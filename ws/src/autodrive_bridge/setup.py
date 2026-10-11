@@ -25,6 +25,7 @@ setup(
             'fast_bridge = autodrive_bridge.fast_bridge:main',
             'adapter = autodrive_bridge.adapter:main',
             'wheel_odom = autodrive_bridge.wheel_odom:main',
+            'teleop_keyboard = autodrive_bridge.teleop_keyboard:main',
         ],
     },
 )
