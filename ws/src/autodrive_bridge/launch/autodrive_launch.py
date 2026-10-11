@@ -1,7 +1,8 @@
 """ros2 launch autodrive_bridge autodrive_launch.py
 
 fast_bridge: AutoDRIVE app <-> ROS 2 over Socket.IO on :4567 (/autodrive/roboracer_1/*)
-adapter:     sim sensors -> /scan, /car_state/odom, TF map -> base_link;  /drive -> throttle/steering
+adapter:     sim sensors -> /scan, /sensors/imu/raw, /ground_truth/odom;  /drive -> throttle/steering
+wheel_odom:  rear-wheel encoders -> /odom (sim stand-in for f1tenth_system's vesc_to_odom)
 """
 from launch import LaunchDescription
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
@@ -20,6 +21,9 @@ def generate_launch_description():
     adapter = Node(package='autodrive_bridge', executable='adapter', name='adapter', output='screen',
                   parameters=[PathJoinSubstitution([FindPackageShare('autodrive_bridge'), 'config', 'adapter.yaml'])])
     
+    wheel_odom = Node(package='autodrive_bridge', executable='wheel_odom', name='wheel_odom', output='screen',
+                  parameters=[PathJoinSubstitution([FindPackageShare('autodrive_bridge'), 'config', 'adapter.yaml'])])
+
     foxglove = Node(package='foxglove_bridge', executable='foxglove_bridge', name='foxglove_bridge')
 
     return LaunchDescription([
@@ -27,5 +31,6 @@ def generate_launch_description():
         DeclareLaunchArgument('publish_camera',default_value='true'),
         bridge,
         adapter,
+        wheel_odom,
         foxglove,        
     ])

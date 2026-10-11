@@ -24,6 +24,7 @@ setup(
         'console_scripts': [
             'fast_bridge = autodrive_bridge.fast_bridge:main',
             'adapter = autodrive_bridge.adapter:main',
+            'wheel_odom = autodrive_bridge.wheel_odom:main',
         ],
     },
 )

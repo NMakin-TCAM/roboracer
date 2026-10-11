@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """AutoDRIVE <-> stack adapter.
 
-Republishes simulator sensor topics into the names expected by the stack, publishes
-static sensor transforms, exposes simulator ground truth separately for debugging,
-and converts /drive commands into AutoDRIVE normalized throttle/steering commands.
+Republishes simulator sensor topics under the official f1tenth_system names (/scan,
+/sensors/imu/raw), publishes static sensor transforms, exposes simulator ground truth
+separately for debugging, and converts /drive commands into AutoDRIVE normalized
+throttle/steering commands.
 
-Vehicle speed for the throttle controller comes from the estimated odometry rather
-than AutoDRIVE ground-truth odometry.
+The throttle loop stands in for the VESC's speed control. Its measured speed comes from
+/odom (wheel_odom in sim, vesc_to_odom on the car) rather than AutoDRIVE ground truth.
 """
 import math
 
@@ -34,7 +35,7 @@ class Adapter(Node):
         super().__init__('adapter')
         p = self.declare_parameter
         self.ns = p('vehicle_ns', '/autodrive/roboracer_1').value
-        self.odom_topic = p('odom_topic', '/odometry/filtered').value
+        self.odom_topic = p('odom_topic', '/odom').value
         self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering_command = 1
         self.imu_x = p('imu_x', 0.08).value
         self.imu_z = p('imu_z', 0.055).value
@@ -66,11 +67,8 @@ class Adapter(Node):
         self.create_subscription(Odometry, self.odom_topic, self.odom_cb, 10)
         self.create_subscription(AckermannDriveStamped, '/drive', self.drive_cb, 10)
 
-        self.scan_pub = self.create_publisher(LaserScan, '/car_state/scan', 10)
-        # ForzaETH's MAP controller reads longitudinal accel from the VESC IMU, which is
-        # mounted rotated 90 deg (it uses -linear_acceleration.y), and /scan for FTG mode.
-        self.vesc_imu_pub = self.create_publisher(Imu, '/vesc/sensors/imu/raw', 10)
-        self.raw_scan_pub = self.create_publisher(LaserScan, '/scan', 10)
+        self.scan_pub = self.create_publisher(LaserScan, '/scan', 10)
+        self.imu_pub = self.create_publisher(Imu, '/sensors/imu/raw', 10)
         self.gt_odom_pub = self.create_publisher(Odometry, '/ground_truth/odom', 10)
         self.gt_pose_pub = self.create_publisher(PoseStamped, '/ground_truth/pose', 10)
         self.throttle_pub = self.create_publisher(Float32, self.ns + '/throttle_command', qos)
@@ -97,7 +95,7 @@ class Adapter(Node):
         self.create_timer(0.02, self.control_step)   # 50 Hz command stream
         self.get_logger().info(f'AutoDRIVE adapter up on {self.ns}')
 
-    # ---------------- sensors -> ForzaETH ----------------
+    # ---------------- sensors -> stack ----------------
     def make_static_tf(self, child, position, orientation=(0.0, 0.0, 0.0, 1.0)):
         tf = TransformStamped()
         tf.header.stamp = self.get_clock().now().to_msg()
@@ -123,15 +121,8 @@ class Adapter(Node):
     def imu_cb(self, msg:Imu):
         self.yaw = yaw_from_quat(msg.orientation)
         self.yaw_rate = msg.angular_velocity.z
-        vesc = Imu()
-        vesc.header.stamp = self.get_clock().now().to_msg()
-        vesc.header.frame_id = 'imu'
-        vesc.linear_acceleration.x = msg.linear_acceleration.y
-        vesc.linear_acceleration.y = -msg.linear_acceleration.x
-        vesc.linear_acceleration.z = msg.linear_acceleration.z
-        vesc.angular_velocity = msg.angular_velocity
-        self.vesc_imu_pub.publish(vesc)
-        # self.vesc_imu_pub.publish(msg)
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.imu_pub.publish(msg)
 
     def sim_odom_cb(self, msg:Odometry):
         self.gt_vx = msg.twist.twist.linear.x
@@ -180,9 +171,8 @@ class Adapter(Node):
         msg.header.frame_id = 'laser'
         msg.header.stamp = self.get_clock().now().to_msg()
         self.scan_pub.publish(msg)
-        self.raw_scan_pub.publish(msg)
 
-    # ---------------- ForzaETH -> AutoDRIVE ----------------
+    # ---------------- stack -> AutoDRIVE ----------------
     def drive_cb(self, msg):
         self.v_ref = float(msg.drive.speed)
         self.steer_ref = float(msg.drive.steering_angle)
