@@ -31,12 +31,16 @@ reset_sim_car() {
 log="$HOME/ws/log/map_track_$name.log"
 mkdir -p "$(dirname "$log")"
 reset_sim_car
+# job control: the launch gets its own process group and keeps SIGINT (a script's background
+# jobs ignore it otherwise), so stopping it stops every node it started
+set -m
 ros2 launch perception mapping.launch.py track:="$name" >"$log" 2>&1 &
 mapping=$!
+set +m
 stop_mapping() {
-    kill -INT "$mapping" 2>/dev/null || return 0
-    for _ in $(seq 20); do kill -0 "$mapping" 2>/dev/null || return 0; sleep 0.5; done
-    kill -TERM "$mapping" 2>/dev/null || true
+    kill -INT -- "-$mapping" 2>/dev/null || return 0
+    for _ in $(seq 20); do kill -0 -- "-$mapping" 2>/dev/null || return 0; sleep 0.5; done
+    kill -TERM -- "-$mapping" 2>/dev/null || true
 }
 trap stop_mapping EXIT
 
