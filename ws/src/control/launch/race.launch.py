@@ -1,6 +1,6 @@
 """Race a mapped track: Cartographer localization + pure pursuit on its raceline.
 
-    ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [pose_topic:=/tracked_pose]
+    ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/tracked_pose]
 
 Needs tracks/<name>/map.pbstream and raceline.csv (ws/scripts/map_track.sh <name>), and the car at
 the pose mapping started from (ws/scripts/race.sh resets the sim car there).
@@ -22,6 +22,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pose_topic', default_value='/tracked_pose',
                               description='/ground_truth/pose only if the raceline is in the sim world frame'),
         DeclareLaunchArgument('speed_scale', default_value='0.5', description='drive speed = raceline vx * speed_scale'),
+        DeclareLaunchArgument('max_speed', default_value='0.0', description='cap on the drive speed [m/s], 0 = no cap'),
         include('perception', 'localization.launch.py', ['track']),
-        include('control', 'pure_pursuit.launch.py', ['track', 'pose_topic', 'speed_scale']),
+        include('control', 'pure_pursuit.launch.py', ['track', 'pose_topic', 'speed_scale', 'max_speed']),
     ])
