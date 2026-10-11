@@ -1,0 +1,12 @@
+diff -ru a/trajectory_planning_helpers/spline_approximation.py b/trajectory_planning_helpers/spline_approximation.py
+--- a/trajectory_planning_helpers/spline_approximation.py
++++ b/trajectory_planning_helpers/spline_approximation.py
+@@ -143,7 +143,7 @@
+ # return distance from point p to a point on the spline at spline parameter t_glob
+ def dist_to_p(t_glob: np.ndarray, path: list, p: np.ndarray):
+     s = interpolate.splev(t_glob, path)
+-    return spatial.distance.euclidean(p, s)
++    return spatial.distance.euclidean(p, np.ravel(s))  # (2, 1) -> (2,): newer scipy rejects 2-D input
+ 
+ 
+ # testing --------------------------------------------------------------------------------------------------------------
