@@ -131,7 +131,7 @@ class Adapter(Node):
     def odom_cb(self, msg:Odometry):
         self.vx = msg.twist.twist.linear.x
 
-    #publishes the ground truth odometry and transform
+    # ground truth in the sim world frame ('world', not Cartographer's 'map'); debugging only
     def ips_cb(self, msg:Point):
         if self.yaw is None:
             return
@@ -141,7 +141,7 @@ class Adapter(Node):
 
         odom = Odometry()
         odom.header.stamp = stamp
-        odom.header.frame_id = 'map'
+        odom.header.frame_id = 'world'
         odom.child_frame_id = 'ground_truth'
         odom.pose.pose.position.x = msg.x
         odom.pose.pose.position.y = msg.y

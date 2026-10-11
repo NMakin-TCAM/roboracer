@@ -2,9 +2,17 @@
 
 ROS 2 Humble in Docker, connected to the AutoDRIVE RoboRacer simulator.
 
+Built to race an unseen track: map it, plan a minimum-time raceline, race it.
+
 ```
 Dockerfile, docker-compose.yml   the ROS 2 environment (any OS, amd64 or arm64)
-ws/src/autodrive_bridge/         AutoDRIVE <-> ROS 2 bridge
+ws/src/autodrive_bridge/         AutoDRIVE <-> ROS 2 bridge, keyboard teleop (sim only)
+ws/src/perception/               Cartographer mapping + localization, save_map
+ws/src/planning/                 centerline extraction + TUM minimum-time raceline
+ws/src/control/                  pure pursuit
+ws/scripts/                      map_track.sh, race.sh
+ws/tracks/<name>/                generated per track (git-ignored)
+docs/pipeline.md                 interfaces, frames and track file formats
 ```
 
 ## Setup (once)
@@ -26,6 +34,21 @@ ros2 launch autodrive_bridge autodrive_launch.py
 ```
 
 Start the simulator, **Connect** to `127.0.0.1:4567`, and set **Driving Mode** to **Autonomous**.
+Restarting the bridge while the simulator is connected makes it reconnect in a loop: **Disconnect** first.
+
+## Race an unseen track
+
+In new container shells (`docker compose exec ros bash`), with the bridge running:
+
+```bash
+scripts/map_track.sh <name>                  # Cartographer mapping; drive, press Enter -> map, centerline, mintime raceline
+ros2 run autodrive_bridge teleop_keyboard    # meanwhile, in another shell: drive 1-2 clean laps (W/S speed, A/D steer, X stop)
+scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the saved map, pure pursuit on the raceline
+```
+
+Check `tracks/<name>/preview.png` before racing. To re-plan an existing map (e.g. new car parameters in
+`ws/src/planning/config/racecar.ini`): `ros2 run planning build_raceline <name>`.
+The aliases in `.bash_aliases` (`map-track`, `race`, `kb`, `reset-car`, ...) wrap these.
 
 | Topic | Direction | |
 |---|---|---|
@@ -34,10 +57,11 @@ Start the simulator, **Connect** to `127.0.0.1:4567`, and set **Driving Mode** t
 | `/sensors/imu/raw` | out | IMU (`sensor_msgs/Imu`) |
 | TF `base_link -> laser, imu, front_camera` | out | static sensor mounts |
 | `/drive` | in | `ackermann_msgs/AckermannDriveStamped` (speed m/s, steering rad) |
-| `/ground_truth/odom`, TF `map -> ground_truth` | out | sim ground truth, debugging only; off with `publish_restricted_topics:=false` |
+| TF `map -> odom`, `/tracked_pose` | out | Cartographer pose in the `map` frame (`perception`) |
+| `/ground_truth/odom`, `/ground_truth/pose`, TF `world -> ground_truth` | out | sim ground truth in the sim `world` frame, debugging only; off with `publish_restricted_topics:=false` |
 
 Topic names follow the official [f1tenth_system](https://github.com/f1tenth/f1tenth_system), so the same
-stack runs on the car. `wheel_odom` and `adapter` are sim-only: on the car, `vesc_to_odom` publishes `/odom`
+stack runs on the car. `fast_bridge`, `adapter`, `wheel_odom` and `teleop_keyboard` are sim-only: on the car, `vesc_to_odom` publishes `/odom`
 and the VESC does the speed control.
 
 Raw sim topics are under `/autodrive/roboracer_1/*`. Foxglove: `ws://localhost:8765`.
