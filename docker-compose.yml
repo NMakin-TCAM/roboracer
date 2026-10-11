@@ -10,5 +10,6 @@ services:
       - "8765:8765"   # Foxglove
     volumes:
       - ./ws:/root/ws
+      - ./.bash_aliases:/root/.bash_aliases:ro
     working_dir: /root/ws
     command: bash
