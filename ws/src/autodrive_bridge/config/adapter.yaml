@@ -21,3 +21,4 @@ wheel_odom:
     wheelbase: 0.33             # rear axle -> front axle
     max_steering_angle: 0.524   # keep equal to the adapter's
     publish_tf: true            # TF odom -> base_link, as vesc_to_odom does; Cartographer adds map -> odom
+    use_imu_yaw_rate: true      # gyro yaw rate; the steering model under-reads turns by ~45%
