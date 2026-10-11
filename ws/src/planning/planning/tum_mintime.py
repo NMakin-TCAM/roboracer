@@ -5,7 +5,8 @@
 
 Mirrors the opt_type = 'mintime' path of TUM's main_globaltraj.py (pinned commit, see
 docker/install_deps.sh) with our inputs instead of its hard-coded ones: import track ->
-prep_track (spline regression) -> opt_mintime (IPOPT) -> create_raceline -> heading/curvature ->
+prep_track (spline regression; normals kept from crossing) -> opt_mintime (IPOPT) -> create_raceline ->
+heading/curvature ->
 mintime velocity profile -> export_traj_race. No reoptimization and no ggv-based velocity
 recalculation: the velocity profile is the optimizer's own.
 
@@ -24,6 +25,10 @@ import numpy as np  # noqa: E402
 import trajectory_planning_helpers as tph  # noqa: E402
 import helper_funcs_glob  # noqa: E402
 import opt_mintime_traj  # noqa: E402
+
+# our numpy-only helpers (-I drops the script's own directory from sys.path)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from planning.track_geometry import uncross_normals  # noqa: E402
 
 
 def load_pars(ini):
@@ -53,9 +58,22 @@ def main():
         file_path=track_csv, width_veh=pars['veh_params']['width'],
         imp_opts={'flip_imp_track': False, 'set_new_start': False, 'num_laps': 1})
 
-    reftrack, normvec, a_interp, coeffs_x, coeffs_y = helper_funcs_glob.src.prep_track.prep_track(
-        reftrack_imp=reftrack_imp, reg_smooth_opts=pars['reg_smooth_opts'],
-        stepsize_opts=pars['stepsize_opts'], debug=True, min_width=None)
+    # = helper_funcs_glob prep_track, except that widths are shrunk where the normals of the
+    # smoothed line cross (prep_track only raises; the regression moves the line by a few cm)
+    so, ro = pars['stepsize_opts'], pars['reg_smooth_opts']
+    reftrack = tph.spline_approximation.spline_approximation(
+        track=reftrack_imp, k_reg=ro['k_reg'], s_reg=ro['s_reg'], stepsize_prep=so['stepsize_prep'],
+        stepsize_reg=so['stepsize_reg'], debug=True)
+    coeffs_x, coeffs_y, a_interp, normvec = tph.calc_splines.calc_splines(
+        path=np.vstack((reftrack[:, :2], reftrack[0, :2])))
+    w_r, w_l = uncross_normals(reftrack[:, :2], -normvec, reftrack[:, 2], reftrack[:, 3],
+                               horizon_m=12 * so['stepsize_reg'], margin=0.9)
+    shrunk = np.sum((w_r < reftrack[:, 2]) | (w_l < reftrack[:, 3]))
+    if shrunk:
+        print('INFO: Narrowed the track at %d of %d points so its normals do not cross' % (shrunk, len(w_r)))
+    reftrack[:, 2], reftrack[:, 3] = w_r, w_l
+    if tph.check_normals_crossing.check_normals_crossing(track=reftrack, normvec_normalized=normvec, horizon=10):
+        raise IOError('spline normals still cross after narrowing the track')
 
     alpha_opt, v_opt, reftrack, a_tmp, normvec = opt_mintime_traj.src.opt_mintime.opt_mintime(
         reftrack=reftrack, coeffs_x=coeffs_x, coeffs_y=coeffs_y, normvectors=normvec, pars=pars,
