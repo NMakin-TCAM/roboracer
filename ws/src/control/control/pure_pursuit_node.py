@@ -88,10 +88,13 @@ class PurePursuit(Node):
         # self.get_logger().info(f"closest_waypoint = {self.waypoints[self.last_pos_idx][1:3]}")
 
         # find waypoint at lookahead distance away
+        # off the raceline (e.g. starting off the loop), add the offset so the target stays ahead along
+        # the line instead of being the closest point, which would cut straight across corners
+        search_distance = self.lookahead_distance + dists[min_local_idx]
         # TODO: more efficient way then looping
         i = self.last_pos_idx
         n_checked = 0  # at most one lap: every waypoint may be within lookahead on a tiny track
-        while (target_dist := (np.hypot(self.waypoints[i][1] - x, self.waypoints[i][2] - y))) < self.lookahead_distance \
+        while (target_dist := (np.hypot(self.waypoints[i][1] - x, self.waypoints[i][2] - y))) < search_distance \
                 and n_checked < len(self.waypoints) - 1:
             i = (i + 1) % len(self.waypoints)
             n_checked += 1
