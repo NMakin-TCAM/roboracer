@@ -3,13 +3,10 @@ import rclpy
 from rclpy.node import Node
 
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
-from ament_index_python.packages import get_package_share_directory
-from nav_msgs.msg import Odometry
-from sensor_msgs.msg import LaserScan
+from geometry_msgs.msg import PoseStamped
 
 import numpy as np
 import os
-from scipy.spatial.transform import Rotation as R
 
 class PurePursuit(Node):
     """ 
@@ -18,16 +15,23 @@ class PurePursuit(Node):
     """
     def __init__(self):
         super().__init__('pure_pursuit_node')
-        # launch/levine_launch.py sets track:=levine, launch/spielberg_launch.py track:=spielberg
-        self.declare_parameter('track', 'Austin')
+        # launch/pure_pursuit.launch.py sets track:=<name> (ws/tracks/<name>/raceline.csv)
+        self.declare_parameter('track', '')
         track = self.get_parameter('track').value
+        self.declare_parameter('raceline_path', '')  # overrides track
+        self.declare_parameter('pose_topic', '/tracked_pose')  # /ground_truth/pose for debugging
+        pose_topic = self.get_parameter('pose_topic').value
+        self.declare_parameter('speed_scale', 0.5)
+        self.speed_scale = self.get_parameter('speed_scale').value
+        self.declare_parameter('max_steering_angle', 0.524)
+        self.max_steering_angle = self.get_parameter('max_steering_angle').value
 
-        lookahead_param = self.declare_parameter('lookahead_distance', 3)
+        lookahead_param = self.declare_parameter('lookahead_distance', 3.0)
         assert lookahead_param.value is not None
         self.lookahead_distance: float = lookahead_param.value
 
-        # TODO: figure out how to get from xacro file in f1tenth_gym_ros/launch/
-        wheelbase_param = self.declare_parameter('wheelbase', 0.3302)
+        # AutoDRIVE RoboRacer (docs/pipeline.md)
+        wheelbase_param = self.declare_parameter('wheelbase', 0.33)
         assert wheelbase_param.value is not None
         self.wheelbase = wheelbase_param.value
 
@@ -35,35 +39,36 @@ class PurePursuit(Node):
 
         self.get_logger().info(f'Initialing pure pursuit with lookahead distance = {self.lookahead_distance}')
 
-        # TODO: load the waypoints of `track` from the package's installed waypoints/ folder:
-        #       os.path.join(get_package_share_directory('pure_pursuit'), 'waypoints', <your csv>)
-        #       (ament_index_python.packages). A path like /home/you/... only exists on your laptop.
-        track_path = os.path.join(get_package_share_directory('control'), "waypoints", f"{track}_raceline.csv")
-        self.waypoints = np.loadtxt(track_path, delimiter=';')
+        # racelines are generated per track into ws/tracks/<track>/raceline.csv (TUM output format)
+        tracks_dir = os.environ.get('TRACKS_DIR', os.path.expanduser('~/ws/tracks'))
+        track_path = self.get_parameter('raceline_path').value or os.path.join(tracks_dir, track, 'raceline.csv')
+        if not os.path.isfile(track_path):
+            self.get_logger().fatal(f'Raceline not found: {track_path} (set track or raceline_path)')
+            raise FileNotFoundError(track_path)
+        self.waypoints = np.loadtxt(track_path, delimiter=';', ndmin=2)
 
         self.get_logger().info(f'Loaded {track} raceline. Waypoints shape: {self.waypoints.shape}')
 
         # create ROS subscribers and publishers
-        self.odom_sub = self.create_subscription(Odometry, '/ego_racecar/odom', self.pose_callback, 10)
+        self.pose_sub = self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
         self.last_pos_idx = 0
 
-    def pose_callback(self, pose_msg: Odometry):
+    def pose_callback(self, pose_msg: PoseStamped):
         # TODO: find the current waypoint to track using methods mentioned in lecture
-        self.get_logger().debug(f'Position: {pose_msg.pose.pose.position}')
-        position = pose_msg.pose.pose.position
+        self.get_logger().debug(f'Position: {pose_msg.pose.position}')
+        position = pose_msg.pose.position
         x = position.x
         y = position.y
-        q = pose_msg.pose.pose.orientation
+        q = pose_msg.pose.orientation
         q_list = [q.x, q.y, q.z, q.w]
         if np.any(np.isnan(q_list)):
             # if quarternion invalid
             self.get_logger().warning("Received invalid quarternion")
             return
-        r = R.from_quat(q_list)
-        yaw = r.as_euler('zyx')[0]
+        yaw = np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y ** 2 + q.z ** 2))
 
         # TODO: Try using arc length instead
 
@@ -85,12 +90,17 @@ class PurePursuit(Node):
         # find waypoint at lookahead distance away
         # TODO: more efficient way then looping
         i = self.last_pos_idx
-        while (target_dist := (np.hypot(self.waypoints[i][1] - x, self.waypoints[i][2] - y))) < self.lookahead_distance:
+        n_checked = 0  # at most one lap: every waypoint may be within lookahead on a tiny track
+        while (target_dist := (np.hypot(self.waypoints[i][1] - x, self.waypoints[i][2] - y))) < self.lookahead_distance \
+                and n_checked < len(self.waypoints) - 1:
             i = (i + 1) % len(self.waypoints)
+            n_checked += 1
         target_waypoint = self.waypoints[i]
 
         # TODO: use curvature to adjust lookahead
-        self.lookahead_distance = min(3, 1/7 * 1 / abs(target_waypoint[4]))
+        # kappa = 0 on straights: use the 3 m max instead of dividing by zero
+        kappa = abs(target_waypoint[4])
+        self.lookahead_distance = min(3., 1/7 * 1 / kappa) if kappa > 0 else 3.
         self.get_logger().info(f"Track curvature: {target_waypoint[4]} lookahead: {self.lookahead_distance}")
 
         # TODO: interpolate to get exact lookahead distance
@@ -110,12 +120,9 @@ class PurePursuit(Node):
         # calculate curvature/steering angle
         curvature = 2 * abs(target_y) / target_dist ** 2
         steering_angle = np.sign(target_y) * np.arctan(self.wheelbase * curvature)
-        # MAX_STEERING_ANGLE = 0.4189 # TODO: find where to get this
-        # steering_angle = np.clip(steering_angle, -MAX_STEERING_ANGLE, MAX_STEERING_ANGLE)
+        steering_angle = np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle)
 
-        speed = target_waypoint[5] / 8 # scale down for now
-        MAX_SPEED = 1. # temp rate limit
-        speed = min(speed, MAX_SPEED)
+        speed = target_waypoint[5] * self.speed_scale # raceline vx, scaled down for now
 
         # TODO: use curvature and target acceleration to adjust output
 
