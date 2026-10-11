@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-tf-transformations \
     python3-pil \
     ros-humble-cv-bridge \
+    # Cartographer SLAM (perception package)
+    ros-humble-cartographer-ros \
     # gevent from apt: pip can't build it on every platform
     python3-gevent python3-gevent-websocket \
     && rm -rf /var/lib/apt/lists/*
