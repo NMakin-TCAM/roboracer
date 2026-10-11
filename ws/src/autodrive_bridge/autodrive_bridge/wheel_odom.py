@@ -35,7 +35,7 @@ class WheelOdom(Node):
         self.speed_window = p('speed_window', 0.1).value         # s
         self.wheelbase = p('wheelbase', 0.33).value              # m, rear axle -> front axle
         self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering = 1
-        self.publish_tf = p('publish_tf', False).value           # off while Cartographer owns odom
+        self.publish_tf = p('publish_tf', True).value            # TF odom -> base_link
 
         # AutoDRIVE's bridge publishes RELIABLE / depth 1; match it.
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,

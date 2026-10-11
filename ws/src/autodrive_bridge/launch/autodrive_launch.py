@@ -2,7 +2,9 @@
 
 fast_bridge: AutoDRIVE app <-> ROS 2 over Socket.IO on :4567 (/autodrive/roboracer_1/*)
 adapter:     sim sensors -> /scan, /sensors/imu/raw, /ground_truth/odom;  /drive -> throttle/steering
-wheel_odom:  rear-wheel encoders -> /odom (sim stand-in for f1tenth_system's vesc_to_odom)
+wheel_odom:  rear-wheel encoders -> /odom + TF odom -> base_link (sim stand-in for vesc_to_odom)
+
+Teleop runs in its own terminal: ros2 run autodrive_bridge teleop_keyboard
 """
 from launch import LaunchDescription
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
