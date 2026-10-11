@@ -6,6 +6,7 @@ Ported from AutoDRIVE's devkit teleop, which wrote raw throttle/steering command
 
   ros2 run autodrive_bridge teleop_keyboard    (needs a terminal; keys are read from stdin)
 """
+import os
 import select
 import signal
 import sys
@@ -72,17 +73,18 @@ def main():
 
     print(HELP.format(speed_step=speed_step, max_speed=max_speed,
                       steer_step=steer_step, max_steer=max_steer))
-    settings = termios.tcgetattr(sys.stdin)
+    fd = sys.stdin.fileno()
+    settings = termios.tcgetattr(fd)
     speed = steer = 0.0
     shown = None
     period = 1.0 / rate
     next_t = time.monotonic()
     try:
-        tty.setcbreak(sys.stdin.fileno())
+        tty.setcbreak(fd)
         while True:
-            ready, _, _ = select.select([sys.stdin], [], [], max(0.0, next_t - time.monotonic()))
-            if ready:
-                key = sys.stdin.read(1).lower()
+            ready, _, _ = select.select([fd], [], [], max(0.0, next_t - time.monotonic()))
+            # os.read, not sys.stdin.read: the buffered reader would hold back keys select can't see
+            for key in (os.read(fd, 32).decode(errors='ignore').lower() if ready else ''):
                 if key == 'w':
                     speed = clamp(speed + speed_step, max_speed)
                 elif key == 's':
@@ -99,9 +101,9 @@ def main():
                     speed = steer = 0.0
                     if key == 'r':
                         reset_pub.publish(Bool(data=True))
-                if (speed, steer) != shown:
-                    shown = (speed, steer)
-                    print(f'\rspeed {speed:+5.2f} m/s   steer {steer:+6.3f} rad   ', end='', flush=True)
+            if (speed, steer) != shown:
+                shown = (speed, steer)
+                print(f'\rspeed {speed:+5.2f} m/s   steer {steer:+6.3f} rad   ', end='', flush=True)
             if time.monotonic() >= next_t:
                 publish(speed, steer)
                 next_t += period
@@ -110,7 +112,7 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+        termios.tcsetattr(fd, termios.TCSADRAIN, settings)
         for _ in range(5):
             publish(0.0, 0.0)
             time.sleep(0.02)
