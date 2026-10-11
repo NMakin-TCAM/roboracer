@@ -23,6 +23,8 @@ class PurePursuit(Node):
         pose_topic = self.get_parameter('pose_topic').value
         self.declare_parameter('speed_scale', 0.5)
         self.speed_scale = self.get_parameter('speed_scale').value
+        self.declare_parameter('max_speed', 0.0)  # m/s cap on the drive speed, 0 = no cap
+        self.max_speed = self.get_parameter('max_speed').value
         self.declare_parameter('max_steering_angle', 0.524)
         self.max_steering_angle = self.get_parameter('max_steering_angle').value
 
@@ -126,6 +128,8 @@ class PurePursuit(Node):
         steering_angle = np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle)
 
         speed = target_waypoint[5] * self.speed_scale # raceline vx, scaled down for now
+        if self.max_speed > 0:
+            speed = min(speed, self.max_speed)
 
         # TODO: use curvature and target acceleration to adjust output
 
