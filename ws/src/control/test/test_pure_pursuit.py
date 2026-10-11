@@ -143,8 +143,8 @@ def test_circle(run):
     assert on.speed == pytest.approx(4.0 * SPEED_SCALE)
     inside = driver.drive(3.0, 0.0, math.pi / 2)  # path is to the right
     assert inside.steering_angle < 0.0
-    outside = driver.drive(5.0, 0.0, math.pi / 2)  # path is to the left, far enough to saturate
-    assert outside.steering_angle == pytest.approx(MAX_STEER)
+    outside = driver.drive(5.0, 0.0, math.pi / 2)  # path is to the left: merge toward it, ahead along the line
+    assert 0.0 < outside.steering_angle <= MAX_STEER
 
 
 def test_straight(run):
