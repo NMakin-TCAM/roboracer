@@ -8,10 +8,13 @@ vesc_to_odom publishes /odom from the VESC instead and this node is not launched
   distance = mean rear-wheel angle change * wheel_radius   (integrated each frame, exact)
   speed    = distance over the last speed_window seconds  (sim frames arrive unevenly, so
              a single-frame difference is noisy)
-  yaw rate = speed * tan(steering angle) / wheelbase
+  yaw rate = IMU gyro z (use_imu_yaw_rate, default), or the bicycle model
+             speed * tan(steering angle) / wheelbase, which reads only ~55% of the sim's real
+             turn rate (measured on Porto) and made Cartographer drift in hairpins
 
 Subscribed (vehicle_ns = /autodrive/roboracer_1):
-  left_encoder, right_encoder (JointState, cumulative wheel angle in rad), steering (Float32, -1..1)
+  left_encoder, right_encoder (JointState, cumulative wheel angle in rad), steering (Float32, -1..1),
+  imu (Imu)
 """
 import math
 from collections import deque
@@ -21,7 +24,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float32
 from tf2_ros import TransformBroadcaster
 
@@ -36,6 +39,7 @@ class WheelOdom(Node):
         self.wheelbase = p('wheelbase', 0.33).value              # m, rear axle -> front axle
         self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering = 1
         self.publish_tf = p('publish_tf', True).value            # TF odom -> base_link
+        self.use_imu = p('use_imu_yaw_rate', True).value          # gyro yaw rate instead of the bicycle model
 
         # AutoDRIVE's bridge publishes RELIABLE / depth 1; match it.
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -43,6 +47,7 @@ class WheelOdom(Node):
         self.create_subscription(JointState, ns + '/left_encoder', self.left_cb, qos)
         self.create_subscription(JointState, ns + '/right_encoder', self.right_cb, qos)
         self.create_subscription(Float32, ns + '/steering', self.steering_cb, qos)
+        self.create_subscription(Imu, ns + '/imu', self.imu_cb, qos)
 
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.tf = TransformBroadcaster(self)
@@ -52,10 +57,14 @@ class WheelOdom(Node):
         self.history = deque()        # (t, distance travelled)
         self.dist = 0.0
         self.steer = 0.0
+        self.gyro_z = None
         self.x = self.y = self.yaw = 0.0
 
     def steering_cb(self, msg):
         self.steer = float(msg.data) * self.max_steer
+
+    def imu_cb(self, msg):
+        self.gyro_z = msg.angular_velocity.z
 
     def left_cb(self, msg):
         self.left = msg.position[0]
@@ -72,9 +81,11 @@ class WheelOdom(Node):
 
         ds = 0.5 * ((sample[1] - last[1]) + (sample[2] - last[2])) * self.wheel_radius
         curvature = math.tan(self.steer) / self.wheelbase
-        self.x += ds * math.cos(self.yaw)
-        self.y += ds * math.sin(self.yaw)
-        self.yaw += ds * curvature
+        gyro = self.use_imu and self.gyro_z is not None
+        dyaw = self.gyro_z * (t - last[0]) if gyro else ds * curvature
+        self.x += ds * math.cos(self.yaw + 0.5 * dyaw)
+        self.y += ds * math.sin(self.yaw + 0.5 * dyaw)
+        self.yaw += dyaw
         self.dist += ds
 
         self.history.append((t, self.dist))
@@ -82,7 +93,7 @@ class WheelOdom(Node):
             self.history.popleft()
         t0, d0 = self.history[0]
         speed = (self.dist - d0) / (t - t0) if t > t0 else 0.0
-        yaw_rate = speed * curvature
+        yaw_rate = self.gyro_z if gyro else speed * curvature
         qz, qw = math.sin(self.yaw / 2.0), math.cos(self.yaw / 2.0)
 
         odom = Odometry()
