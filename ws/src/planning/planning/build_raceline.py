@@ -38,6 +38,9 @@ def main(argv=None):
     ap.add_argument('--config', default=default_config(), help='TUM racecar.ini')
     ap.add_argument('--step', type=float, default=0.1, help='centerline point spacing [m]')
     ap.add_argument('--smooth', type=float, default=0.05, help='centerline spline smoothing [m rms]')
+    ap.add_argument('--carve-trajectory', type=float, nargs='?', const=0.3, default=None, metavar='RADIUS',
+                    help='treat cells within RADIUS m (default 0.3) of the mapping lap as free; only for '
+                         'tracks whose map shows walls across the driven path (overpass)')
     ap.add_argument('--tum-python', default=TUM_PYTHON)
     args = ap.parse_args(argv)
 
@@ -48,13 +51,18 @@ def main(argv=None):
     traj_csv = os.path.join(d, 'trajectory.csv')
     has_traj = os.path.isfile(traj_csv)
     t0 = time.monotonic()
+    # never leave stale outputs next to a failed run
+    for f in ('centerline.csv', 'raceline.csv'):
+        if os.path.exists(os.path.join(d, f)):
+            os.remove(os.path.join(d, f))
 
-    how = ('direction + start from trajectory.csv' if has_traj
+    how = ('following the mapping lap in trajectory.csv' if has_traj
            else 'no trajectory.csv: counter-clockwise, start near the map origin')
     print(f'[1/3] centerline from {map_yaml} ({how})')
     try:
         track, m, mask = extract_centerline(map_yaml, traj_csv if has_traj else None,
-                                            step=args.step, smooth_m=args.smooth)
+                                            step=args.step, smooth_m=args.smooth,
+                                            carve_radius_m=args.carve_trajectory)
     except RuntimeError as e:
         sys.exit(f'build_raceline: centerline extraction failed: {e}')
     cl_csv = os.path.join(d, 'centerline.csv')
@@ -65,13 +73,18 @@ def main(argv=None):
 
     print(f'[2/3] TUM mintime ({args.config})')
     rl_csv = os.path.join(d, 'raceline.csv')
-    if os.path.exists(rl_csv):
-        os.remove(rl_csv)   # never leave a stale raceline next to a new centerline
+    cfg = configparser.ConfigParser()
+    cfg.read(args.config)
+    width_veh = json.loads(cfg.get('GENERAL_OPTIONS', 'veh_params'))['width']
+    width_opt = json.loads(cfg.get('OPTIMIZATION_OPTIONS', 'optim_opts_mintime'))['width_opt']
     try:
+        narrow = width < width_opt
+        if narrow.any():
+            i = np.argmin(width)
+            raise OptimizationError(
+                'track is narrower than width_opt = %.2f m over %.1f m, down to %.2f m at (%.1f, %.1f)'
+                % (width_opt, narrow.sum() * seg.mean(), width[i], *track[i, :2]))
         traj, dt = run_mintime(cl_csv, args.config, python=args.tum_python)
-        cfg = configparser.ConfigParser()
-        cfg.read(args.config)
-        width_veh = json.loads(cfg.get('GENERAL_OPTIONS', 'veh_params'))['width']
         clearance = check_inside(traj, m, mask, width_veh / 2)
     except OptimizationError as e:
         save_preview(os.path.join(d, 'preview.png'), m, track, None, f'{args.name}: mintime FAILED')

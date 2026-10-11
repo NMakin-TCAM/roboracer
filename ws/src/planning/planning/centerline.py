@@ -1,7 +1,10 @@
 """Centerline + track widths from a Cartographer occupancy map (map.pgm / map.yaml).
 
-  free space  -> keep the region the car drove in -> morphological cleanup
-  skeletonize -> prune spurs -> the closed loop through the start -> periodic spline, uniform step
+  free space  -> fill unobserved (unknown-only) islands -> keep the region the car drove in
+              -> morphological cleanup
+  skeletonize -> prune spurs -> the loop: with trajectory.csv the skeleton path that follows the
+                 mapping lap (its length must match the lap's), else the cycle through the map
+                 origin -> periodic spline, uniform step
   widths      -> ray cast along the normal to the first non-free cell (occupied or unknown),
                  capped by the distance transform
 
@@ -18,6 +21,8 @@ from scipy import interpolate, ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from skimage.morphology import disk, remove_small_holes, skeletonize
+
+from planning.track_geometry import uncross_normals
 
 # 8-neighbourhood offsets (row, col)
 NB8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
@@ -78,9 +83,47 @@ def load_trajectory(path):
     return data[:, 1:3]
 
 
-def track_mask(m, seeds_xy, open_radius_m=0.1, hole_area_m2=0.5):
+def fill_unobserved(m, max_occ_frac=0.01):
+    """Free space plus enclosed non-free islands that are (almost) all unknown.
+
+    Cells the lidar never saw, e.g. under the car at the start of the mapping lap, form unknown
+    islands inside the track of any size. A real infield is enclosed by occupied walls: on the
+    maps we have its non-free component is 12-16 % occupied cells, an unobserved island 0 %.
+    Islands touching the image border (the outside) are never filled.
+    """
+    lab, _ = ndimage.label(~m.free, structure=np.ones((3, 3)))
+    size = np.bincount(lab.ravel())
+    occ = np.bincount(lab.ravel(), weights=m.occupied.ravel(), minlength=size.size)
+    fill = occ <= max_occ_frac * size
+    fill[0] = False
+    fill[np.unique(np.concatenate((lab[0], lab[-1], lab[:, 0], lab[:, -1])))] = False
+    return m.free | fill[lab]
+
+
+def carve_trajectory(m, free, traj, radius_m):
+    """Mark the cells within radius_m of the driven path as free (the car was there)."""
+    path = np.zeros_like(free)
+    dense = resample_polyline(traj, m.res / 2)
+    rc = np.round(m.to_pixel(dense)).astype(int)
+    ok = (rc[:, 0] >= 0) & (rc[:, 0] < m.h) & (rc[:, 1] >= 0) & (rc[:, 1] < m.w)
+    path[rc[ok, 0], rc[ok, 1]] = True
+    r = max(1, int(round(radius_m / m.res)))
+    return free | ndimage.binary_dilation(path, structure=disk(r))
+
+
+def resample_polyline(xy, step):
+    """Points every `step` metres along an open polyline (first point kept)."""
+    seg = np.hypot(*np.diff(xy, axis=0).T)
+    s = np.concatenate(([0.0], np.cumsum(seg)))
+    keep = np.concatenate(([True], seg > 1e-9))
+    s, xy = s[keep], xy[keep]
+    t = np.arange(0.0, s[-1], step)
+    return np.column_stack((np.interp(t, s, xy[:, 0]), np.interp(t, s, xy[:, 1])))
+
+
+def track_mask(m, seeds_xy, open_radius_m=0.1, hole_area_m2=0.5, free=None):
     """Free region the car drove in, with thin leaks through wall gaps cut and small holes filled."""
-    free = m.free
+    free = fill_unobserved(m) if free is None else free
     r = max(1, int(round(open_radius_m / m.res)))
     opened = ndimage.binary_opening(free, structure=disk(r))
     labels, n = ndimage.label(opened)                 # 4-connected: no leaks through diagonal gaps
@@ -124,8 +167,8 @@ def prune_spurs(skel):
         skel &= ~ends
 
 
-def skeleton_loop(skel, start_rc):
-    """Ordered pixels of the loop through the skeleton pixel nearest start_rc."""
+def skeleton_graph(skel):
+    """Skeleton pixels (rr, cc) and their 8-connected graph as (rows, cols, weights) in pixels."""
     rr, cc = np.nonzero(skel)
     if rr.size < 10:
         raise RuntimeError('skeleton has no closed loop: is the track closed in the map?')
@@ -144,7 +187,12 @@ def skeleton_loop(skel, start_rc):
         cols.append(j[ok])
         wts.append(np.full(ok.sum(), np.hypot(dr, dc)))
     rows, cols, wts = map(np.concatenate, (rows, cols, wts))
+    return rr, cc, rows, cols, wts
 
+
+def skeleton_loop(skel, start_rc):
+    """Ordered pixels of the loop through the skeleton pixel nearest start_rc (no trajectory)."""
+    rr, cc, rows, cols, wts = skeleton_graph(skel)
     order = np.argsort(np.hypot(rr - start_rc[0], cc - start_rc[1]))
     for p0 in order[:200]:
         nbrs = cols[rows == p0]
@@ -173,6 +221,82 @@ def skeleton_loop(skel, start_rc):
     raise RuntimeError('could not find a closed loop in the skeleton')
 
 
+def off_track(m, mask, xy, min_gap_m=1.0):
+    """Places (one per cluster) where points of xy are not on the track mask."""
+    rc = np.round(m.to_pixel(xy)).astype(int).clip(0, [m.h - 1, m.w - 1])
+    bad = xy[~mask[rc[:, 0], rc[:, 1]]]
+    spots = []
+    for p in bad:
+        if all(np.hypot(*(p - q)) > min_gap_m for q in spots):
+            spots.append(p)
+    return spots
+
+
+def trajectory_loop(skel, m, mask, traj, step_m=0.5, max_detour=3.0):
+    """Ordered skeleton pixels following the mapping lap: the lap is snapped to the skeleton every
+    step_m and consecutive snaps are joined by shortest skeleton paths. Unlike skeleton_loop this
+    never takes another cycle (an island, a short-cut between corridors) than the one driven.
+    """
+    from scipy.spatial import cKDTree
+    rr, cc, rows, cols, wts = skeleton_graph(skel)
+    sxy = m.to_world(np.column_stack((rr, cc)))
+    pts = resample_polyline(np.vstack((traj, traj[:1])), step_m)
+
+    # snap each lap point to the nearest skeleton pixel it can see through the track (no wall between)
+    tree = cKDTree(sxy)
+    _, cand = tree.query(pts, k=min(16, len(sxy)))
+    snaps = []
+    for p, cs in zip(pts, cand):
+        for c in cs:
+            seg = p + np.linspace(0, 1, 20)[:, None] * (sxy[c] - p)
+            rc = np.round(m.to_pixel(seg)).astype(int).clip(0, [m.h - 1, m.w - 1])
+            if mask[rc[:, 0], rc[:, 1]].all():
+                snaps.append(c)
+                break
+        else:
+            snaps.append(-1)
+    snaps = np.array(snaps)
+    if (snaps < 0).any():
+        raise RuntimeError('mapping lap leaves the track at ' + fmt_spots(off_track(m, mask, pts[snaps < 0])))
+    keep = np.concatenate(([True], snaps[1:] != snaps[:-1]))
+    snaps = snaps[keep]
+    pts = pts[keep]
+
+    g = coo_matrix((wts, (rows, cols)), shape=(rr.size, rr.size)).tocsr()
+    src = np.unique(snaps)
+    limit = max_detour * 10 * step_m / m.res + 20
+    dist, pred = dijkstra(g, indices=src, return_predecessors=True, limit=limit)
+    row = {s: i for i, s in enumerate(src)}
+
+    loop = []
+    n = len(snaps)
+    for k in range(n):
+        a, b = snaps[k], snaps[(k + 1) % n]
+        i = row[a]
+        direct = np.hypot(*(sxy[a] - sxy[b])) / m.res
+        if not np.isfinite(dist[i, b]) or dist[i, b] > max_detour * direct + 20:
+            raise RuntimeError('mapping lap leaves the track between (%.1f, %.1f) and (%.1f, %.1f)'
+                               % (*pts[k], *pts[(k + 1) % n]))
+        seg = [b]
+        while seg[-1] != a:
+            seg.append(pred[i, seg[-1]])
+        loop.extend(seg[::-1][:-1])                 # a .. (b excluded, it starts the next piece)
+
+    # drop exact retraces (in and out of a dead end) left by snapping
+    stack = []
+    for p in loop:
+        if len(stack) >= 2 and stack[-2] == p:
+            stack.pop()
+        elif not stack or stack[-1] != p:
+            stack.append(p)
+    return np.column_stack((rr[stack], cc[stack]))
+
+
+def fmt_spots(spots, n=6):
+    s = ', '.join('(%.1f, %.1f)' % tuple(p) for p in spots[:n])
+    return s + (' ...' if len(spots) > n else '')
+
+
 def smooth_loop(xy, step, smooth_m):
     """Periodic smoothing spline through a closed polyline, resampled every `step` metres."""
     # drop duplicates, the spline fit dislikes them
@@ -198,36 +322,6 @@ def normals_left(xy):
     t = np.roll(xy, -1, axis=0) - np.roll(xy, 1, axis=0)
     t /= np.linalg.norm(t, axis=1, keepdims=True)
     return np.column_stack((-t[:, 1], t[:, 0]))
-
-
-def uncross_normals(xy, nl, w_right, w_left, horizon_m=3.0, margin=0.85):
-    """Shrink widths so no two normal segments (right bound -> left bound) within horizon_m cross.
-
-    TUM rejects tracks with crossing normals and its curvilinear model needs 1 - n * kappa > 0;
-    both fail on the inside of tight bends when a width exceeds the local radius.
-    """
-    w_right, w_left = w_right.copy(), w_left.copy()
-    seg = np.hypot(*(np.roll(xy, -1, axis=0) - xy).T).mean()
-    for k in range(1, max(2, int(horizon_m / seg)) + 1):
-        j = np.roll(np.arange(len(xy)), -k)
-        nj, dp = nl[j], xy[j] - xy
-        den = np.cross(nl, nj)
-        ok = np.abs(den) > 1e-9
-        den = np.where(ok, den, 1.0)
-        # xy_i + a * n_i = xy_j + b * n_j   (a, b > 0: left of the line)
-        a = np.cross(dp, nj) / den
-        b = np.cross(dp, nl) / den
-        wa = np.where(a > 0, w_left, w_right)
-        wb = np.where(b > 0, w_left[j], w_right[j])
-        # near misses count too: TUM re-smooths and resamples the line, which moves the crossings
-        hit = ok & (margin * np.abs(a) < wa) & (margin * np.abs(b) < wb)
-        cap_a = np.where(hit, margin * np.abs(a), np.inf)
-        cap_b = np.where(hit, margin * np.abs(b), np.inf)
-        w_left = np.where(a > 0, np.minimum(w_left, cap_a), w_left)
-        w_right = np.where(a <= 0, np.minimum(w_right, cap_a), w_right)
-        w_left[j] = np.where(b > 0, np.minimum(w_left[j], cap_b), w_left[j])
-        w_right[j] = np.where(b <= 0, np.minimum(w_right[j], cap_b), w_right[j])
-    return w_right, w_left
 
 
 def ray_widths(m, mask, xy, normal, max_m=5.0):
@@ -265,19 +359,43 @@ def orient(xy, traj):
 
 
 def extract_centerline(yaml_path, trajectory_path=None, step=0.1, smooth_m=0.05,
-                       open_radius_m=0.1, hole_area_m2=0.5, width_slack_m=0.2):
-    """Returns (track Nx4 [x, y, w_right, w_left], OccupancyMap, track mask)."""
+                       open_radius_m=0.1, hole_area_m2=0.5, width_slack_m=0.2,
+                       length_tol=0.15, carve_radius_m=None):
+    """Returns (track Nx4 [x, y, w_right, w_left], OccupancyMap, track mask).
+
+    With a trajectory the loop follows the mapping lap, and its length must be within length_tol
+    of the lap's, else RuntimeError. carve_radius_m: treat cells within that distance of the lap
+    as free (only for tracks whose map shows walls across the driven path, e.g. an overpass).
+    """
     m = OccupancyMap(yaml_path)
     traj = load_trajectory(trajectory_path)
-    mask = track_mask(m, traj, open_radius_m, hole_area_m2)
-
+    free = fill_unobserved(m)
+    if traj is not None and carve_radius_m:
+        free = carve_trajectory(m, free, traj, carve_radius_m)
+    mask = track_mask(m, traj, open_radius_m, hole_area_m2, free=free)
     skel = prune_spurs(skeletonize(mask))
-    start_xy = traj[0] if traj is not None else np.zeros(2)
-    loop_rc = skeleton_loop(skel, m.to_pixel(start_xy)[0])
-    xy, _ = smooth_loop(m.to_world(loop_rc), step, smooth_m)
 
-    xy = orient(xy, traj)
-    xy = np.roll(xy, -np.argmin(np.hypot(*(xy - start_xy).T)), axis=0)
+    if traj is None:
+        start_xy = np.zeros(2)
+        loop_rc = skeleton_loop(skel, m.to_pixel(start_xy)[0])
+        xy, length = smooth_loop(m.to_world(loop_rc), step, smooth_m)
+        xy = orient(xy, None)
+        xy = np.roll(xy, -np.argmin(np.hypot(*(xy - start_xy).T)), axis=0)
+    else:
+        spots = off_track(m, mask, traj)
+        if spots:
+            walls = off_track(m, ~m.occupied, traj)
+            raise RuntimeError(
+                'the mapping lap leaves the free space at %s%s. The map does not match the drive '
+                '(overlapping SLAM submaps?) or the track has an overpass. Remap; only if the track '
+                'really crosses itself, rerun with --carve-trajectory.'
+                % (fmt_spots(spots), ' (through walls at %s)' % fmt_spots(walls) if walls else ''))
+        loop_rc = trajectory_loop(skel, m, mask, traj)
+        xy, length = smooth_loop(m.to_world(loop_rc), step, smooth_m)
+        lap = np.sum(np.hypot(*np.diff(np.vstack((traj, traj[:1])), axis=0).T))
+        if abs(length - lap) > length_tol * lap:
+            raise RuntimeError('centerline is %.1f m but the mapping lap is %.1f m (tolerance %d %%): '
+                               'the loop does not follow the lap' % (length, lap, 100 * length_tol))
 
     # Widths along the normal, capped at the distance transform (nearest wall in any direction)
     # plus width_slack_m: the cap keeps a gap in a wall or a free strip behind it from making the
