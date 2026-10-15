@@ -10,20 +10,31 @@ alias cbp="cd ~/ws && colcon build --symlink-install --packages-select"
 alias cbclean="cd ~/ws && rm -rf build/ install/ log/ && cb"
 
 # ==============================================================================
-# F1TENTH Gym & Sim Launchers
+# AutoDRIVE Sim & Race Pipeline (docs/pipeline.md)
 # ==============================================================================
-# Run the F1TENTH Gym ROS 2 node/bringup directly[cite: 1]
-alias f1sim="ros2 launch f1tenth_gym_ros gym_bridge_launch.py"
-alias kb="ros2 run teleop_twist_keyboard teleop_twist_keyboard"
+# Bridge to the AutoDRIVE simulator (Connect the sim to 127.0.0.1:4567 after this)
+alias sim="ros2 launch autodrive_bridge autodrive_launch.py"
+
+# Keyboard teleop on /drive (W/S speed, A/D steer, X stop, R reset)
+alias kb="ros2 run autodrive_bridge teleop_keyboard"
+
+# Map a new track and plan its min-time raceline: map-track <name>
+alias map-track="~/ws/scripts/map_track.sh"
+
+# Race a mapped track: race <name> [speed_scale:=0.5]
+alias race="~/ws/scripts/race.sh"
+
+# Re-plan the raceline of an existing map: plan <name>
+alias plan="ros2 run planning build_raceline"
 
 # Open RViz2 configured with standard ROS 2 topic visualization
 alias rviz="rviz2"
 
-# Reset car to global origin (0, 0, 0)
-alias origin-car="ros2 topic pub -1 /initialpose geometry_msgs/msg/PoseWithCovarianceStamped '{header: {frame_id: \"map\"}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}'"
-
 # Stop car instantly (publish 0 m/s speed and 0 rad steer)
 alias stop-car="ros2 topic pub -1 /drive ackermann_msgs/msg/AckermannDriveStamped '{header: {frame_id: \"base_link\"}, drive: {speed: 0.0, steering_angle: 0.0}}'"
+
+# Teleport the sim car back to its start pose
+alias origin-car="ros2 topic pub --times 3 -r 10 /autodrive/reset_command std_msgs/msg/Bool '{data: true}'"
 
 # Full reset: stops the vehicle AND teleports it back to start
 alias reset-car="stop-car && origin-car"
@@ -34,14 +45,15 @@ alias reset-car="stop-car && origin-car"
 # List all active topics
 alias rtl="ros2 topic list"
 
-# Echo LiDAR scan stream[cite: 1]
+# Echo LiDAR scan stream
 alias echo-scan="ros2 topic echo /scan"
 
-# Echo Odometry stream (sim vs real shortcuts)[cite: 1]
-alias echo-odom="ros2 topic echo /ego_racecar/odom"
-alias echo-real-odom="ros2 topic echo /odom"
+# Echo odometry: wheel odometry, Cartographer map pose, sim ground truth
+alias echo-odom="ros2 topic echo /odom"
+alias echo-pose="ros2 topic echo /tracked_pose"
+alias echo-gt="ros2 topic echo /ground_truth/odom"
 
-# Echo drive command output[cite: 1]
+# Echo drive command output
 alias echo-drive="ros2 topic echo /drive"
 
 # ==============================================================================

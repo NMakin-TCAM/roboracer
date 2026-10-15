@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>planning</name>
+  <version>0.0.0</version>
+  <description>Unseen-track planning: centerline from the Cartographer map + TUM minimum-time raceline.</description>
+  <maintainer email="todo@todo.todo">SIGRobotics</maintainer>
+  <license>TODO: License declaration</license>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-skimage</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <!-- apt deps + the TUM optimizer venv (/opt/tum_venv): docker/install_deps.sh, run by the Dockerfile -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
