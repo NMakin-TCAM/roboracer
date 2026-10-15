@@ -141,7 +141,11 @@ class FastBridge:
         ls.angle_min = -2.35619
         ls.angle_max = 2.35619
         ls.angle_increment = 0.004363323
-        ls.time_increment = (1.0 / rate) / 1080 if rate > 0 else 0.0
+        # The sim ray-casts the whole scan in one frame and sends one per frame (~100 Hz), not at
+        # 'V1 LIDAR Scan Rate'. A per-beam time_increment spreads each scan over 1/rate (25 ms), so
+        # consecutive scans overlap and Cartographer drops the overlapping, earliest beams: ~60% of
+        # every scan, the car's whole right side. That broke the IROS 2026 and Berlin maps.
+        ls.time_increment = 0.0
         ls.scan_time = 1.0 / rate if rate > 0 else 0.0
         ls.range_min = 0.06
         ls.range_max = 10.0
