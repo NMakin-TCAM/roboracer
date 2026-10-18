@@ -28,9 +28,12 @@ class PurePursuit(Node):
         self.declare_parameter('max_steering_angle', 0.524)
         self.max_steering_angle = self.get_parameter('max_steering_angle').value
 
-        lookahead_param = self.declare_parameter('lookahead_distance', 3.0)
+        # lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
+        lookahead_param = self.declare_parameter('lookahead_distance', 3.0)  # max [m]
         assert lookahead_param.value is not None
         self.lookahead_distance: float = lookahead_param.value
+        self.lookahead_min = self.declare_parameter('lookahead_min', 0.6).value  # m, ~2x the wheelbase
+        self.lookahead_time = self.declare_parameter('lookahead_time', 0.4).value  # s
 
         # AutoDRIVE RoboRacer (docs/pipeline.md)
         wheelbase_param = self.declare_parameter('wheelbase', 0.33)
@@ -39,7 +42,8 @@ class PurePursuit(Node):
 
         assert self.lookahead_distance is not None
 
-        self.get_logger().info(f'Initialing pure pursuit with lookahead distance = {self.lookahead_distance}')
+        self.get_logger().info(f'Initialing pure pursuit with lookahead {self.lookahead_time} s x speed, '
+                               f'{self.lookahead_min}-{self.lookahead_distance} m')
 
         # racelines are generated per track into ws/tracks/<track>/raceline.csv (TUM output format)
         tracks_dir = os.environ.get('TRACKS_DIR', os.path.expanduser('~/ws/tracks'))
@@ -92,7 +96,14 @@ class PurePursuit(Node):
         # find waypoint at lookahead distance away
         # off the raceline (e.g. starting off the loop), add the offset so the target stays ahead along
         # the line instead of being the closest point, which would cut straight across corners
-        search_distance = self.lookahead_distance + dists[min_local_idx]
+        # Lookahead for the drive speed at the car. (It used to be min(3, 1/(7 kappa)) of the last
+        # target, overwriting the parameter: 0.13 m, under the 0.33 m wheelbase, in tight corners,
+        # where pure pursuit then saturated the steering and ran wide.)
+        v = self.waypoints[self.last_pos_idx][5] * self.speed_scale
+        if self.max_speed > 0:
+            v = min(v, self.max_speed)
+        lookahead = min(max(self.lookahead_time * v, self.lookahead_min), self.lookahead_distance)
+        search_distance = lookahead + dists[min_local_idx]
         # TODO: more efficient way then looping
         i = self.last_pos_idx
         n_checked = 0  # at most one lap: every waypoint may be within lookahead on a tiny track
@@ -101,12 +112,7 @@ class PurePursuit(Node):
             i = (i + 1) % len(self.waypoints)
             n_checked += 1
         target_waypoint = self.waypoints[i]
-
-        # TODO: use curvature to adjust lookahead
-        # kappa = 0 on straights: use the 3 m max instead of dividing by zero
-        kappa = abs(target_waypoint[4])
-        self.lookahead_distance = min(3., 1/7 * 1 / kappa) if kappa > 0 else 3.
-        self.get_logger().info(f"Track curvature: {target_waypoint[4]} lookahead: {self.lookahead_distance}")
+        self.get_logger().debug(f"lookahead: {lookahead:.2f} m")
 
         # TODO: interpolate to get exact lookahead distance
 

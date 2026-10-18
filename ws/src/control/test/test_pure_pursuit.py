@@ -91,7 +91,7 @@ class Driver:
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
     def drive(self, x, y, yaw, n=10):
-        """Publish the same pose n times (the lookahead adapts after the first) and return the last /drive."""
+        """Publish the same pose n times and return the last /drive."""
         self.drives.clear()
         msg = PoseStamped()
         msg.header.frame_id = 'map'
