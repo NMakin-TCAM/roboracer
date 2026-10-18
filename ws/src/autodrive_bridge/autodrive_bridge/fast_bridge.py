@@ -34,8 +34,17 @@ from sensor_msgs.msg import Imu, JointState, LaserScan, Image
 from std_msgs.msg import Bool, Float32, Int32
 
 
+GRAVITY = 9.80665   # m/s^2
+
+
 def vec(s):
     return np.fromstring(s, dtype=float, sep=' ')
+
+
+def gravity_in_body(q):
+    """+g along world z, expressed in the body frame of orientation q = (x, y, z, w)."""
+    x, y, z, w = q
+    return GRAVITY * np.array([2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)])
 
 
 class FastBridge:
@@ -85,6 +94,8 @@ class FastBridge:
         n.create_subscription(Float32, ns + '/steering_command', self._steering_cb, qos)
         n.create_subscription(Bool, '/autodrive/reset_command', self._reset_cb, qos)
 
+        self.last_scan = None         # (raw 'V1 LIDAR Range Array', encoder angles, monotonic time)
+
         self.frames = 0
         self.window_start = None
         self.window_frames = 0
@@ -111,6 +122,23 @@ class FastBridge:
 
         P['throttle'].publish(Float32(data=float(d['V1 Throttle'])))
         P['steering'].publish(Float32(data=float(d['V1 Steering'])))
+
+        q = vec(d['V1 Orientation Quaternion'])
+        w = vec(d['V1 Angular Velocity'])
+        # The sim reports kinematic acceleration without gravity (a stationary car reads 0). A real
+        # accelerometer (the car's VESC IMU) measures specific force, +g up at rest (REP 145), and
+        # Cartographer estimates gravity from it, so add g in the body frame.
+        a = vec(d['V1 Linear Acceleration']) + gravity_in_body(q)
+
+        imu = Imu()
+        imu.header.stamp = stamp
+        imu.header.frame_id = 'imu'
+        imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w = map(float, q)
+        imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = map(float, w)
+        imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = map(float, a)
+        if self.reset_left == 0:   # a reset frame's teleport reads as a ~80 m/s^2 spike
+            P['imu'].publish(imu)
+
         enc = vec(d['V1 Encoder Angles'])
         for key, name, angle in (('left', 'left_encoder', enc[0]), ('right', 'right_encoder', enc[1])):
             js = JointState()
@@ -120,37 +148,8 @@ class FastBridge:
             js.position = [float(angle)]
             P[key].publish(js)
 
-        q = vec(d['V1 Orientation Quaternion'])
-        w = vec(d['V1 Angular Velocity'])
-        a = vec(d['V1 Linear Acceleration'])
-
-        imu = Imu()
-        imu.header.stamp = stamp
-        imu.header.frame_id = 'imu'
-        imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w = map(float, q)
-        imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = map(float, w)
-        imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = map(float, a)
-        P['imu'].publish(imu)
-
-        rate = float(d['V1 LIDAR Scan Rate'])
-        ranges = np.fromstring(gzip.decompress(base64.b64decode(d['V1 LIDAR Range Array'])).decode('utf-8'),
-                               dtype=np.float32, sep='\n')
-        ls = LaserScan()
-        ls.header.stamp = stamp
-        ls.header.frame_id = 'lidar'
-        ls.angle_min = -2.35619
-        ls.angle_max = 2.35619
-        ls.angle_increment = 0.004363323
-        # The sim ray-casts the whole scan in one frame and sends one per frame (~100 Hz), not at
-        # 'V1 LIDAR Scan Rate'. A per-beam time_increment spreads each scan over 1/rate (25 ms), so
-        # consecutive scans overlap and Cartographer drops the overlapping, earliest beams: ~60% of
-        # every scan, the car's whole right side. That broke the IROS 2026 and Berlin maps.
-        ls.time_increment = 0.0
-        ls.scan_time = 1.0 / rate if rate > 0 else 0.0
-        ls.range_min = 0.06
-        ls.range_max = 10.0
-        ls.ranges = ranges.tolist()
-        P['lidar'].publish(ls)
+        if self.new_scan(d['V1 LIDAR Range Array'], enc, float(d['V1 LIDAR Scan Rate'])):
+            self.publish_scan(d, stamp)
 
         if self.publish_camera:
             camera = np.asarray(PILImage.open(BytesIO(base64.b64decode(d['V1 Front Camera Image']))).convert('RGB'))
@@ -190,6 +189,43 @@ class FastBridge:
         return {'V1 Throttle': str(self.throttle_cmd),
                 'V1 Steering': str(self.steering_cmd),
                 'V1 Reset': str(reset)}
+
+    def new_scan(self, raw, enc, rate):
+        """True if this frame carries a lidar scan not published yet.
+
+        The sim sends a frame per rendered frame (~100 Hz) but updates the lidar at 'V1 LIDAR Scan
+        Rate' (40 Hz, as the car's Hokuyo UST-10LX), so 2-3 consecutive frames repeat one scan.
+        Publish each scan once, stamped with the frame it first arrived in. A parked car sees the
+        same ranges every update, so then an unchanged scan is published again at the scan rate.
+        """
+        now = time.monotonic()
+        last = self.last_scan
+        if last is not None and raw == last[0]:
+            parked = np.array_equal(enc, last[1])
+            if not (parked and rate > 0 and now - last[2] >= 1.0 / rate):
+                return False
+        self.last_scan = (raw, enc, now)
+        return True
+
+    def publish_scan(self, d, stamp):
+        rate = float(d['V1 LIDAR Scan Rate'])
+        ranges = np.fromstring(gzip.decompress(base64.b64decode(d['V1 LIDAR Range Array'])).decode('utf-8'),
+                               dtype=np.float32, sep='\n')
+        ls = LaserScan()
+        ls.header.stamp = stamp
+        ls.header.frame_id = 'lidar'
+        ls.angle_min = -2.35619
+        ls.angle_max = 2.35619
+        ls.angle_increment = 0.004363323
+        # The sim ray-casts the whole scan at one instant. A per-beam time_increment spread each scan
+        # over 1/rate while scans came every frame, so they overlapped and Cartographer dropped the
+        # overlapping, earliest beams: ~60% of every scan, the car's right side.
+        ls.time_increment = 0.0
+        ls.scan_time = 1.0 / rate if rate > 0 else 0.0
+        ls.range_min = 0.06
+        ls.range_max = 10.0
+        ls.ranges = ranges.tolist()
+        self.pub['lidar'].publish(ls)
 
     def _stats(self, t_in):
         # report the sim's frame rate every 30 s; it is the control loop rate

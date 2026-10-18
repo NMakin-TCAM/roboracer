@@ -37,8 +37,6 @@ class Adapter(Node):
         self.ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         self.odom_topic = p('odom_topic', '/odom').value
         self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering_command = 1
-        self.imu_x = p('imu_x', 0.08).value
-        self.imu_z = p('imu_z', 0.055).value
         self.laser_x = p('laser_x', 0.2733).value
         self.laser_z = p('laser_z', 0.096).value
         self.camera_x = p('camera_x', -0.015).value
@@ -112,7 +110,10 @@ class Adapter(Node):
 
     def publish_static_transforms(self):
         transforms = [
-            self.make_static_tf('imu', [self.imu_x, 0.0, self.imu_z]),
+            # The sim IMU sits at (0.08, 0, 0.055) m, but Cartographer requires the IMU frame to
+            # coincide with its tracking frame, base_link. The gyro reads the same anywhere on the
+            # rigid car; the accelerometer lever arm (w^2 * 0.08 m) only nudges its gravity estimate.
+            self.make_static_tf('imu', [0.0, 0.0, 0.0]),
             self.make_static_tf('laser', [self.laser_x, 0.0, self.laser_z]),
             self.make_static_tf('front_camera', [self.camera_x, 0.0, self.camera_z],[0.0, 0.0871557, 0.0, 0.9961947]),
         ]
@@ -121,8 +122,7 @@ class Adapter(Node):
     def imu_cb(self, msg:Imu):
         self.yaw = yaw_from_quat(msg.orientation)
         self.yaw_rate = msg.angular_velocity.z
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.imu_pub.publish(msg)
+        self.imu_pub.publish(msg)   # keeps fast_bridge's stamp, the sim frame it arrived in
 
     def sim_odom_cb(self, msg:Odometry):
         self.gt_vx = msg.twist.twist.linear.x
@@ -169,8 +169,7 @@ class Adapter(Node):
 
     def lidar_cb(self, msg:LaserScan):
         msg.header.frame_id = 'laser'
-        msg.header.stamp = self.get_clock().now().to_msg()
-        self.scan_pub.publish(msg)
+        self.scan_pub.publish(msg)  # keeps fast_bridge's stamp, the sim frame the scan arrived in
 
     # ---------------- stack -> AutoDRIVE ----------------
     def drive_cb(self, msg):
