@@ -292,6 +292,25 @@ def trajectory_loop(skel, m, mask, traj, step_m=0.5, max_detour=3.0):
     return np.column_stack((rr[stack], cc[stack]))
 
 
+def first_lap(traj, leave_m=3.0, back_m=1.0):
+    """The first lap of a driven trajectory: up to where it first comes back within back_m of its
+    start after having been leave_m away. map_track.sh runs drive on past the start line (or a
+    second lap). The whole trajectory if it never comes back."""
+    d0 = np.hypot(*(traj - traj[0]).T)
+    away = np.flatnonzero(d0 > leave_m)
+    if len(away):
+        back = np.flatnonzero(d0[away[0]:] < back_m)
+        if len(back):
+            return traj[:away[0] + back[0] + 1]
+    return traj
+
+
+def lap_length(traj):
+    """Closed length of the first lap."""
+    lap = first_lap(traj)
+    return np.sum(np.hypot(*np.diff(np.vstack((lap, lap[:1])), axis=0).T))
+
+
 def fmt_spots(spots, n=6):
     s = ', '.join('(%.1f, %.1f)' % tuple(p) for p in spots[:n])
     return s + (' ...' if len(spots) > n else '')
@@ -390,9 +409,9 @@ def extract_centerline(yaml_path, trajectory_path=None, step=0.1, smooth_m=0.05,
                 '(overlapping SLAM submaps?) or the track has an overpass. Remap; only if the track '
                 'really crosses itself, rerun with --carve-trajectory.'
                 % (fmt_spots(spots), ' (through walls at %s)' % fmt_spots(walls) if walls else ''))
-        loop_rc = trajectory_loop(skel, m, mask, traj)
+        loop_rc = trajectory_loop(skel, m, mask, first_lap(traj))
         xy, length = smooth_loop(m.to_world(loop_rc), step, smooth_m)
-        lap = np.sum(np.hypot(*np.diff(np.vstack((traj, traj[:1])), axis=0).T))
+        lap = lap_length(traj)
         if abs(length - lap) > length_tol * lap:
             raise RuntimeError('centerline is %.1f m but the mapping lap is %.1f m (tolerance %d %%): '
                                'the loop does not follow the lap' % (length, lap, 100 * length_tol))

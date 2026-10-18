@@ -4,7 +4,7 @@ import os
 import numpy as np
 import pytest
 
-from planning.centerline import OccupancyMap, extract_centerline, signed_area, write_centerline
+from planning.centerline import OccupancyMap, extract_centerline, lap_length, signed_area, write_centerline
 
 FIX = os.path.join(os.path.dirname(__file__), 'fixtures')
 MAP = os.path.join(FIX, 'track_map_v3.yaml')
@@ -56,6 +56,20 @@ def test_follows_trajectory(tmp_path, result):
     cw, _, _ = extract_centerline(MAP, str(traj_csv), step=0.1)
     assert signed_area(cw[:, :2]) < 0
     assert np.hypot(*(cw[0, :2] - lap[0])) < 0.3
+
+
+def test_lap_length_ignores_overrun_and_second_lap(tmp_path, result):
+    track = result[0]
+    lap = track[::5, :2]
+    one = np.sum(np.hypot(*np.diff(np.vstack((lap, lap[:1])), axis=0).T))
+    # map_track.sh runs drive on past the start line, or a second lap
+    for drive in (np.vstack((lap, lap[:len(lap) // 4])), np.vstack((lap, lap, lap[:10]))):
+        assert lap_length(drive) == pytest.approx(one, rel=0.02)
+        t = np.arange(len(drive)) * 0.1
+        traj_csv = tmp_path / 'trajectory.csv'
+        np.savetxt(traj_csv, np.column_stack((t, drive, np.zeros(len(drive)))), delimiter=',',
+                   header='t,x_m,y_m,yaw_rad')
+        extract_centerline(MAP, str(traj_csv), step=0.1)   # raised 'does not follow the lap' before
 
 
 def test_csv_format(tmp_path, result):
