@@ -20,17 +20,20 @@ def generate_launch_description():
     bridge = Node(package='autodrive_bridge', executable='fast_bridge', name='fast_bridge', output='screen', 
                   parameters=[{'publish_restricted_topics': publish_restricted_topics,'publish_camera': publish_camera,}])
     
+    vehicle = PathJoinSubstitution([FindPackageShare('control'), 'config', 'vehicle.yaml'])
+    config = PathJoinSubstitution([FindPackageShare('autodrive_bridge'), 'config', 'adapter.yaml'])
     adapter = Node(package='autodrive_bridge', executable='adapter', name='adapter', output='screen',
-                  parameters=[PathJoinSubstitution([FindPackageShare('autodrive_bridge'), 'config', 'adapter.yaml'])])
-    
+                  parameters=[vehicle, config])
+
     wheel_odom = Node(package='autodrive_bridge', executable='wheel_odom', name='wheel_odom', output='screen',
-                  parameters=[PathJoinSubstitution([FindPackageShare('autodrive_bridge'), 'config', 'adapter.yaml'])])
+                  parameters=[vehicle, config])
 
     foxglove = Node(package='foxglove_bridge', executable='foxglove_bridge', name='foxglove_bridge')
 
     return LaunchDescription([
         DeclareLaunchArgument('publish_restricted_topics',default_value='true'),
-        DeclareLaunchArgument('publish_camera',default_value='true'),
+        # nothing in the stack uses the camera, and decoding it every frame slows the sim loop
+        DeclareLaunchArgument('publish_camera',default_value='false'),
         bridge,
         adapter,
         wheel_odom,
