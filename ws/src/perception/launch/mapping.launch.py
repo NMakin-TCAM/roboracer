@@ -17,7 +17,8 @@ def generate_launch_description():
     cartographer = Node(package='cartographer_ros', executable='cartographer_node', name='cartographer_node',
                         output='screen',
                         arguments=['-configuration_directory', config_dir,
-                                   '-configuration_basename', 'mapping.lua'])
+                                   '-configuration_basename', 'mapping.lua'],
+                        remappings=[('imu', '/sensors/imu/raw')])
 
     grid = Node(package='cartographer_ros', executable='cartographer_occupancy_grid_node',
                 name='cartographer_occupancy_grid_node', output='screen',

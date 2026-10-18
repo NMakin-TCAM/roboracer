@@ -39,13 +39,16 @@ launches `control race.launch.py` (perception `localization.launch.py` + control
 |---|---|---|
 | `/scan` (frame `laser`) | `sensor_msgs/LaserScan` | adapter (sim) / urg_node (car) |
 | `/odom`, TF `odom -> base_link` | `nav_msgs/Odometry` | wheel_odom (sim) / vesc_to_odom (car) |
-| `/sensors/imu/raw` | `sensor_msgs/Imu` | adapter (sim) / vesc (car) |
+| `/sensors/imu/raw` (frame `imu`) | `sensor_msgs/Imu`, accel includes gravity; Cartographer uses it | adapter (sim) / vesc (car) |
 | `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, pure_pursuit |
 | TF `map -> odom` | | Cartographer (mapping and localization) |
 | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
 | `/ground_truth/pose`, TF `world -> ground_truth` | `geometry_msgs/PoseStamped`, frame `world` (sim) | adapter, debugging only |
 
 Static TF `base_link -> laser, imu, front_camera` comes from the adapter. `base_link` is the rear axle.
+Cartographer runs with `use_imu_data = true`, which requires `imu` at the origin of `base_link`
+(rotation allowed). On the car, publish `base_link -> imu` with zero translation and the VESC's
+mounting rotation, or Cartographer stops waiting for an IMU it cannot transform.
 
 ## Track directory `ws/tracks/<name>/`
 

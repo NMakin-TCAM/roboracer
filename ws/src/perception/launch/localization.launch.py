@@ -31,7 +31,8 @@ def nodes(context):
                                    PathJoinSubstitution([FindPackageShare('perception'), 'config']),
                                    '-configuration_basename', 'localization.lua',
                                    '-load_state_filename', pbstream,
-                                   '-load_frozen_state', 'true'])
+                                   '-load_frozen_state', 'true'],
+                        remappings=[('imu', '/sensors/imu/raw')])
 
     grid = Node(package='cartographer_ros', executable='cartographer_occupancy_grid_node',
                 name='cartographer_occupancy_grid_node', output='screen',
