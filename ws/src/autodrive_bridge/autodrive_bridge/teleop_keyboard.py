@@ -15,6 +15,8 @@ import time
 import tty
 
 import rclpy
+import yaml
+from ament_index_python.packages import get_package_share_directory
 from rclpy.signals import SignalHandlerOptions
 from ackermann_msgs.msg import AckermannDriveStamped
 from std_msgs.msg import Bool
@@ -58,7 +60,10 @@ def main():
     rate = p('rate', 20.0).value                      # Hz; adapter stops after cmd_timeout = 0.5 s
     max_speed = p('max_speed', 5.0).value             # m/s
     speed_step = p('speed_step', 0.5).value
-    max_steer = p('max_steering_angle', 0.524).value  # rad
+    vehicle = os.path.join(get_package_share_directory('control'), 'config', 'vehicle.yaml')
+    with open(vehicle) as f:
+        lock = yaml.safe_load(f)['/**']['ros__parameters']['max_steering_angle']
+    max_steer = p('max_steering_angle', lock).value  # rad, default from control/config/vehicle.yaml
     steer_step = p('steer_step', 0.1).value
     drive_pub = node.create_publisher(AckermannDriveStamped, '/drive', 10)
     reset_pub = node.create_publisher(Bool, '/autodrive/reset_command', 1)

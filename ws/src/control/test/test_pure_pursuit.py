@@ -12,13 +12,15 @@ import time
 
 import numpy as np
 import pytest
+import yaml
 
 rclpy = pytest.importorskip('rclpy')
 from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 
 SPEED_SCALE = 0.5
-MAX_STEER = 0.524
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'vehicle.yaml')) as f:
+    MAX_STEER = yaml.safe_load(f)['/**']['ros__parameters']['max_steering_angle']
 HEADER = '# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2'
 
 

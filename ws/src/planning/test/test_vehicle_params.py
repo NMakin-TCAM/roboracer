@@ -1,0 +1,25 @@
+"""racecar.ini (read by TUM's optimizer, which cannot load ROS parameters) must match the car
+geometry in control/config/vehicle.yaml, the one place it is set."""
+import configparser
+import json
+import math
+import os
+
+import pytest
+import yaml
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VEHICLE = os.path.join(HERE, '..', '..', 'control', 'config', 'vehicle.yaml')
+RACECAR = os.path.join(HERE, '..', 'config', 'racecar.ini')
+
+
+def test_racecar_ini_matches_vehicle_yaml():
+    with open(VEHICLE) as f:
+        car = yaml.safe_load(f)['/**']['ros__parameters']
+    ini = configparser.ConfigParser()
+    ini.read(RACECAR)
+    veh = json.loads(ini.get('GENERAL_OPTIONS', 'veh_params'))
+    mintime = json.loads(ini.get('OPTIMIZATION_OPTIONS', 'vehicle_params_mintime'))
+    assert mintime['delta_max'] == pytest.approx(car['max_steering_angle'])
+    assert mintime['wheelbase_front'] + mintime['wheelbase_rear'] == pytest.approx(car['wheelbase'])
+    assert veh['curvlim'] == pytest.approx(math.tan(car['max_steering_angle']) / car['wheelbase'], abs=0.01)

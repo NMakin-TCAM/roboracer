@@ -29,9 +29,11 @@ Localization (Cartographer, `/tracked_pose`) must be running for the default pos
 | `raceline_path` | `''` | explicit raceline file, overrides `track` |
 | `pose_topic` | `/tracked_pose` | `/ground_truth/pose` for debugging in the sim |
 | `speed_scale` | `0.5` | speed = raceline `vx_mps` * `speed_scale` |
-| `lookahead_distance` | `3.0` | initial lookahead (m), then updated from curvature |
-| `wheelbase` | `0.33` | m, AutoDRIVE RoboRacer |
-| `max_steering_angle` | `0.524` | rad, steering is clipped to this |
+| `lookahead_time` | `0.4` | s; lookahead = `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`] |
+| `lookahead_min` | `0.6` | m, about twice the wheelbase |
+| `lookahead_distance` | `3.0` | m, maximum lookahead |
+| `wheelbase` | none | m, from `config/vehicle.yaml` (required) |
+| `max_steering_angle` | none | rad, steering is clipped to this; from `config/vehicle.yaml` (required) |
 
 The raceline is the TUM output format: `;` separated, `#` header
 `s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`.

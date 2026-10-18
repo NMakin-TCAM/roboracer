@@ -7,9 +7,10 @@ Follows $TRACKS_DIR/<name>/raceline.csv (default ~/ws/tracks). Needs localizatio
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -25,7 +26,7 @@ def generate_launch_description():
             package='control',
             executable='pure_pursuit_node',
             output='screen',
-            parameters=[{
+            parameters=[PathJoinSubstitution([FindPackageShare('control'), 'config', 'vehicle.yaml']), {
                 'track': ParameterValue(LaunchConfiguration('track'), value_type=str),
                 'pose_topic': LaunchConfiguration('pose_topic'),
                 'speed_scale': ParameterValue(LaunchConfiguration('speed_scale'), value_type=float),

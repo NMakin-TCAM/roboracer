@@ -66,7 +66,6 @@ mounting rotation, or Cartographer stops waiting for an IMU it cannot transform.
 
 | | |
 |---|---|
-| wheelbase | 0.33 m |
-| max steering | 0.524 rad |
+| wheelbase, max steering | `ws/src/control/config/vehicle.yaml` (0.33 m, 0.524 rad), loaded by every node that uses them |
 | wheel radius | 0.0585 m (calibrated against ground truth) |
 | top speed | ~25 m/s per unit throttle (sim), throttle loop in `adapter.yaml` |

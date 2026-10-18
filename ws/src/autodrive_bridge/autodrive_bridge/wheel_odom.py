@@ -21,6 +21,7 @@ from collections import deque
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
@@ -36,8 +37,10 @@ class WheelOdom(Node):
         ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         self.wheel_radius = p('wheel_radius', 0.0585).value      # m; calibrated against /ground_truth/odom
         self.speed_window = p('speed_window', 0.1).value         # s
-        self.wheelbase = p('wheelbase', 0.33).value              # m, rear axle -> front axle
-        self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering = 1
+        self.wheelbase = p('wheelbase', Parameter.Type.DOUBLE).value           # m (vehicle.yaml)
+        self.max_steer = p('max_steering_angle', Parameter.Type.DOUBLE).value  # rad at steering = 1 (vehicle.yaml)
+        if self.wheelbase is None or self.max_steer is None:
+            raise RuntimeError('wheelbase / max_steering_angle unset: load control/config/vehicle.yaml')
         self.publish_tf = p('publish_tf', True).value            # TF odom -> base_link
         self.use_imu = p('use_imu_yaw_rate', True).value          # gyro yaw rate instead of the bicycle model
         self.max_speed = p('max_plausible_speed', 30.0).value     # m/s; faster wheel travel = sim reset

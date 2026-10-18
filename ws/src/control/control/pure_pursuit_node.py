@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 
 from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
 from geometry_msgs.msg import PoseStamped
@@ -25,8 +26,8 @@ class PurePursuit(Node):
         self.speed_scale = self.get_parameter('speed_scale').value
         self.declare_parameter('max_speed', 0.0)  # m/s cap on the drive speed, 0 = no cap
         self.max_speed = self.get_parameter('max_speed').value
-        self.declare_parameter('max_steering_angle', 0.524)
-        self.max_steering_angle = self.get_parameter('max_steering_angle').value
+        # vehicle geometry: config/vehicle.yaml only (pure_pursuit.launch.py loads it)
+        self.max_steering_angle = self.declare_parameter('max_steering_angle', Parameter.Type.DOUBLE).value
 
         # lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
         lookahead_param = self.declare_parameter('lookahead_distance', 3.0)  # max [m]
@@ -35,10 +36,9 @@ class PurePursuit(Node):
         self.lookahead_min = self.declare_parameter('lookahead_min', 0.6).value  # m, ~2x the wheelbase
         self.lookahead_time = self.declare_parameter('lookahead_time', 0.4).value  # s
 
-        # AutoDRIVE RoboRacer (docs/pipeline.md)
-        wheelbase_param = self.declare_parameter('wheelbase', 0.33)
-        assert wheelbase_param.value is not None
-        self.wheelbase = wheelbase_param.value
+        self.wheelbase = self.declare_parameter('wheelbase', Parameter.Type.DOUBLE).value
+        if self.max_steering_angle is None or self.wheelbase is None:
+            raise RuntimeError('max_steering_angle / wheelbase unset: load control/config/vehicle.yaml')
 
         assert self.lookahead_distance is not None
 
