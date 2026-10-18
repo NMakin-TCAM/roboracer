@@ -7,12 +7,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     git vim \
     ros-humble-ackermann-msgs \
+    ros-humble-rqt \
+    ros-humble-rviz2 \
+    ros-humble-rviz-default-plugins \
+    ros-humble-rviz-visual-tools \
+    ros-humble-rqt-common-plugins \
     ros-humble-tf2-ros \
     ros-humble-foxglove-bridge \
     ros-humble-tf-transformations \
     python3-pil \
     ros-humble-cv-bridge \
     # Cartographer SLAM (perception package)
+    ros-humble-robot-localization \
     ros-humble-cartographer-ros \
     # gevent from apt: pip can't build it on every platform
     python3-gevent python3-gevent-websocket \
@@ -24,6 +30,7 @@ RUN pip3 install --no-cache-dir python-socketio==4.2.0 python-engineio==3.13.0
 RUN echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc \
  && echo "[ -f /root/ws/install/setup.bash ] && source /root/ws/install/setup.bash" >> ~/.bashrc
 
+RUN echo "alias c='clear'" >> ~/.bashrc
 # Planning: apt deps + TUM mintime optimizer in its own venv (/opt/tum_venv), see the script
 COPY ws/src/planning/docker /tmp/planning_docker
 RUN bash /tmp/planning_docker/install_deps.sh && rm -rf /tmp/planning_docker
