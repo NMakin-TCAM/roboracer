@@ -59,7 +59,7 @@ class PurePursuit(Node):
         self.last_pos_idx = 0
 
     def pose_callback(self, pose_msg: PoseStamped):
-        # TODO: find the current waypoint to track using methods mentioned in lecture
+        # find the current waypoint 
         self.get_logger().debug(f'Position: {pose_msg.pose.position}')
         position = pose_msg.pose.position
         x = position.x
@@ -130,8 +130,6 @@ class PurePursuit(Node):
         speed = target_waypoint[5] * self.speed_scale # raceline vx, scaled down for now
         if self.max_speed > 0:
             speed = min(speed, self.max_speed)
-
-        # TODO: use curvature and target acceleration to adjust output
 
         # TODO: publish drive message, don't forget to limit the steering angle.
         drive_msg = AckermannDriveStamped()

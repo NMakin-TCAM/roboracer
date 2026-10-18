@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pure_pursuit_node = control.pure_pursuit_node:main',
+            'follow_the_gap_node = control.follow_the_gap_node:main',
         ],
     },
 )

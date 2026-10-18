@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-cartographer-ros \
     # gevent from apt: pip can't build it on every platform
     python3-gevent python3-gevent-websocket \
-    && rm -rf /var/lib/apt/lists/*
+    # To be able to see matplotlib
+    python3-tornado \
+    && rm -rf /var/lib/apt/lists/* \
 
 # AutoDRIVE's Socket.IO client needs these exact versions
 RUN pip3 install --no-cache-dir python-socketio==4.2.0 python-engineio==3.13.0
