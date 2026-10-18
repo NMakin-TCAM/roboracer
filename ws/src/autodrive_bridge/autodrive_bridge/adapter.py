@@ -13,6 +13,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, TransformStamped
@@ -36,7 +37,9 @@ class Adapter(Node):
         p = self.declare_parameter
         self.ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         self.odom_topic = p('odom_topic', '/odom').value
-        self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering_command = 1
+        self.max_steer = p('max_steering_angle', Parameter.Type.DOUBLE).value  # rad at steering_command = 1 (vehicle.yaml)
+        if self.max_steer is None:
+            raise RuntimeError('max_steering_angle unset: load control/config/vehicle.yaml')
         self.laser_x = p('laser_x', 0.2733).value
         self.laser_z = p('laser_z', 0.096).value
         self.camera_x = p('camera_x', -0.015).value
@@ -90,7 +93,9 @@ class Adapter(Node):
         self.stuck_since = None
         self.reverse_until = None
 
-        self.create_timer(0.02, self.control_step)   # 50 Hz command stream
+        # Commands go out as each /drive arrives (drive_cb), so the bridge's next reply to the sim
+        # carries it. A 50 Hz command timer used to add ~10 ms and drop 2/3 of pure pursuit's
+        # commands. When /drive goes quiet, fast_bridge zeroes the commands after its cmd_timeout.
         self.get_logger().info(f'AutoDRIVE adapter up on {self.ns}')
 
     # ---------------- sensors -> stack ----------------
@@ -176,15 +181,16 @@ class Adapter(Node):
         self.v_ref = float(msg.drive.speed)
         self.steer_ref = float(msg.drive.steering_angle)
         self.last_cmd_t = self.get_clock().now()
+        self.control_step()
 
     def control_step(self):
+        """Throttle and steering for the latest /drive (called on every /drive)."""
         now = self.get_clock().now()
-        stale = (self.last_cmd_t is None or
-                 (now - self.last_cmd_t).nanoseconds * 1e-9 > self.cmd_timeout)
-        v_ref = 0.0 if stale else self.v_ref
-        steer = 0.0 if stale else self.steer_ref
-
-        dt = 0.02 if self.last_ctrl_t is None else (now - self.last_ctrl_t).nanoseconds * 1e-9
+        v_ref, steer = self.v_ref, self.steer_ref
+        gap = None if self.last_ctrl_t is None else (now - self.last_ctrl_t).nanoseconds * 1e-9
+        if gap is None or gap > self.cmd_timeout:
+            self.integral = 0.0   # /drive restarted after fast_bridge stopped the car
+        dt = 0.02 if gap is None else min(0.1, gap)
         self.last_ctrl_t = now
 
         t = now.nanoseconds * 1e-9
