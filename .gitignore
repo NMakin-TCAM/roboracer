@@ -24,5 +24,4 @@ frames_*.pdf
 *.user
 *~
 .DS_Store
-docker-compose.yml
 ws/Default.perspective
