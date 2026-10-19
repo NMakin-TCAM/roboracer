@@ -1,4 +1,5 @@
-# AutoDRIVE RoboRacer (2026-iros practice build), measured 2026-10-04 (see adapter.py docstring).
+# AutoDRIVE RoboRacer (2026-iros practice build), measured 2026-10-04.
+# Parameters not listed here use the defaults in adapter.py / wheel_odom.py.
 # max_steering_angle and wheelbase come from control/config/vehicle.yaml.
 adapter:
   ros__parameters:

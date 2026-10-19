@@ -15,6 +15,7 @@ import tempfile
 import time
 
 import numpy as np
+from scipy import ndimage
 
 HEADER = 's_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2'
 TUM_PYTHON = os.environ.get('TUM_PYTHON', '/opt/tum_venv/bin/python')
@@ -72,7 +73,6 @@ def lap_time(traj):
 
 def check_inside(traj, m, mask, half_width):
     """Smallest wall clearance of the raceline (centre to wall, m). Fails if the centre leaves the track."""
-    from scipy import ndimage
     dist = ndimage.distance_transform_edt(mask) * m.res - 0.5 * m.res
     rc = m.to_pixel(traj[:, 1:3])
     d = ndimage.map_coordinates(dist, rc.T, order=1, mode='constant', cval=-1.0)

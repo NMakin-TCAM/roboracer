@@ -11,22 +11,12 @@
 set -eo pipefail
 
 name=${1:?usage: map_track.sh <track name>}
-tracks=${TRACKS_DIR:-$HOME/ws/tracks}
-source /opt/ros/humble/setup.bash
-source "$HOME/ws/install/setup.bash"
+source "$(dirname "$0")/common.sh"
 
 if [ -e "$tracks/$name/map.pbstream" ]; then
     echo "$tracks/$name already has a map; pick another name or delete it" >&2
     exit 1
 fi
-
-# localization assumes the race starts where mapping started: the sim reset pose
-reset_sim_car() {
-    if ros2 topic info /autodrive/reset_command 2>/dev/null | grep -q 'Subscription count: [1-9]'; then
-        ros2 topic pub --times 3 -r 10 /autodrive/reset_command std_msgs/msg/Bool '{data: true}' >/dev/null
-        sleep 1
-    fi
-}
 
 log="$HOME/ws/log/map_track_$name.log"
 mkdir -p "$(dirname "$log")"

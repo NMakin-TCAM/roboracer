@@ -19,7 +19,7 @@ setup(
     zip_safe=True,
     maintainer='zzangupenn, Hongrui Zheng',
     maintainer_email='zzang@seas.upenn.edu, billyzheng.bz@gmail.com',
-    description='f1tenth pure_pursuit',
+    description='Pure pursuit on the generated raceline, follow the gap, and the race launch file.',
     license='MIT',
     tests_require=['pytest'],
     entry_points={

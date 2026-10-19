@@ -1,6 +1,8 @@
 # ==============================================================================
 # ROS 2 Core & Workspace Management
 # ==============================================================================
+alias c="clear"
+
 # Quickly source ROS 2 Humble base and your local workspace
 alias sb="source /opt/ros/humble/setup.bash && source ~/ws/install/setup.bash"
 
@@ -26,9 +28,6 @@ alias race="~/ws/scripts/race.sh"
 
 # Re-plan the raceline of an existing map: plan <name>
 alias plan="ros2 run planning build_raceline"
-
-# Open RViz2 configured with standard ROS 2 topic visualization
-alias rviz="rviz2"
 
 # Stop car instantly (publish 0 m/s speed and 0 rad steer)
 alias stop-car="ros2 topic pub -1 /drive ackermann_msgs/msg/AckermannDriveStamped '{header: {frame_id: \"base_link\"}, drive: {speed: 0.0, steering_angle: 0.0}}'"

@@ -20,6 +20,7 @@ from PIL import Image
 from scipy import interpolate, ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 from skimage.morphology import disk, remove_small_holes, skeletonize
 
 from planning.track_geometry import uncross_normals
@@ -237,7 +238,6 @@ def trajectory_loop(skel, m, mask, traj, step_m=0.5, max_detour=3.0):
     step_m and consecutive snaps are joined by shortest skeleton paths. Unlike skeleton_loop this
     never takes another cycle (an island, a short-cut between corridors) than the one driven.
     """
-    from scipy.spatial import cKDTree
     rr, cc, rows, cols, wts = skeleton_graph(skel)
     sxy = m.to_world(np.column_stack((rr, cc)))
     pts = resample_polyline(np.vstack((traj, traj[:1])), step_m)

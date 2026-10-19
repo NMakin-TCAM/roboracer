@@ -1,9 +1,14 @@
 # control
 
 Pure pursuit on a generated raceline. `pure_pursuit_node` takes the car's pose in the `map` frame,
-finds the closest raceline waypoint, picks the waypoint one lookahead distance ahead (shorter in
-curves: `min(3, 1/(7 kappa))`), steers on the arc through it and drives at the raceline speed scaled
-by `speed_scale`. See `docs/pipeline.md` for where it sits in the stack.
+finds the closest raceline waypoint, picks the first waypoint one lookahead ahead (lookahead =
+`lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`]), steers on the arc
+through it and drives at the raceline speed scaled by `speed_scale`. See `docs/pipeline.md` for where
+it sits in the stack.
+
+`follow_the_gap_node` is a reactive alternative that needs no map: it steers toward the farthest point
+of the widest free gap in `/scan` at a constant `speed` (`ros2 run control follow_the_gap_node`).
+`tools/lidar_plot.py` plots its scan processing live (WebAgg, not installed).
 
 ## Run
 
@@ -29,6 +34,7 @@ Localization (Cartographer, `/tracked_pose`) must be running for the default pos
 | `raceline_path` | `''` | explicit raceline file, overrides `track` |
 | `pose_topic` | `/tracked_pose` | `/ground_truth/pose` for debugging in the sim |
 | `speed_scale` | `0.5` | speed = raceline `vx_mps` * `speed_scale` |
+| `max_speed` | `0.0` | m/s cap on the drive speed, 0 = no cap |
 | `lookahead_time` | `0.4` | s; lookahead = `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`] |
 | `lookahead_min` | `0.6` | m, about twice the wheelbase |
 | `lookahead_distance` | `3.0` | m, maximum lookahead |

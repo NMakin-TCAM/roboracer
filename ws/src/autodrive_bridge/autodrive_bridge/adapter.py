@@ -10,11 +10,14 @@ The throttle loop stands in for the VESC's speed control. Its measured speed com
 /odom (wheel_odom in sim, vesc_to_odom on the car) rather than AutoDRIVE ground truth.
 """
 import math
+import signal
+import sys
 
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.signals import SignalHandlerOptions
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
@@ -79,18 +82,14 @@ class Adapter(Node):
         self.static_tf = StaticTransformBroadcaster(self)
         self.publish_static_transforms()
 
-        self.yaw = None
+        self.yaw = None               # sim IMU yaw, for the ground-truth pose
         self.yaw_rate = 0.0
-        self.gt_vx = 0.0
+        self.gt_vx = 0.0              # sim ground-truth velocity
         self.gt_vy = 0.0
-        self.vx = 0.0
-        self.vy = 0.0
-        self.v_ref = 0.0
-        self.steer_ref = 0.0
-        self.last_cmd_t = None
+        self.vx = 0.0                 # measured speed from /odom, for the throttle loop
         self.integral = 0.0
         self.last_ctrl_t = None
-        self.stuck_since = None
+        self.stuck_since = None       # auto_unstick state
         self.reverse_until = None
 
         # Commands go out as each /drive arrives (drive_cb), so the bridge's next reply to the sim
@@ -104,13 +103,9 @@ class Adapter(Node):
         tf.header.stamp = self.get_clock().now().to_msg()
         tf.header.frame_id = 'base_link'
         tf.child_frame_id = child
-        tf.transform.translation.x = position[0]
-        tf.transform.translation.y = position[1]
-        tf.transform.translation.z = position[2]
-        tf.transform.rotation.x = orientation[0]
-        tf.transform.rotation.y = orientation[1]
-        tf.transform.rotation.z = orientation[2]
-        tf.transform.rotation.w = orientation[3]
+        t, r = tf.transform.translation, tf.transform.rotation
+        t.x, t.y, t.z = position
+        r.x, r.y, r.z, r.w = orientation
         return tf
 
     def publish_static_transforms(self):
@@ -120,7 +115,8 @@ class Adapter(Node):
             # rigid car; the accelerometer lever arm (w^2 * 0.08 m) only nudges its gravity estimate.
             self.make_static_tf('imu', [0.0, 0.0, 0.0]),
             self.make_static_tf('laser', [self.laser_x, 0.0, self.laser_z]),
-            self.make_static_tf('front_camera', [self.camera_x, 0.0, self.camera_z],[0.0, 0.0871557, 0.0, 0.9961947]),
+            self.make_static_tf('front_camera', [self.camera_x, 0.0, self.camera_z],
+                                [0.0, 0.0871557, 0.0, 0.9961947]),   # pitched down 10 deg
         ]
         self.static_tf.sendTransform(transforms)
 
@@ -178,15 +174,10 @@ class Adapter(Node):
 
     # ---------------- stack -> AutoDRIVE ----------------
     def drive_cb(self, msg):
-        self.v_ref = float(msg.drive.speed)
-        self.steer_ref = float(msg.drive.steering_angle)
-        self.last_cmd_t = self.get_clock().now()
-        self.control_step()
-
-    def control_step(self):
-        """Throttle and steering for the latest /drive (called on every /drive)."""
+        """Throttle (speed PI + feedforward) and normalized steering for each /drive."""
+        v_ref = float(msg.drive.speed)
+        steer = float(msg.drive.steering_angle)
         now = self.get_clock().now()
-        v_ref, steer = self.v_ref, self.steer_ref
         gap = None if self.last_ctrl_t is None else (now - self.last_ctrl_t).nanoseconds * 1e-9
         if gap is None or gap > self.cmd_timeout:
             self.integral = 0.0   # /drive restarted after fast_bridge stopped the car
@@ -225,11 +216,17 @@ class Adapter(Node):
 
 
 def main():
-    rclpy.init()
+    # No rclpy signal handler: Ctrl+C / SIGTERM end the loop with the context still valid, so the
+    # zero command below can be published (rclpy's handler shut the context down first and it
+    # raised). Under ros2 launch, fast_bridge is stopping too and may not forward it; its own
+    # cmd_timeout is what zeroes the sim. Python handles signals only between waits: wake every 0.1 s.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     node = Adapter()
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        while True:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         node.throttle_pub.publish(Float32(data=0.0))

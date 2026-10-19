@@ -71,8 +71,8 @@ class FastBridge:
         }
 
         if self.publish_camera:
-           self.pub['camera'] = n.create_publisher(Image, ns + '/front_camera', qos)
-           self.cv_bridge = CvBridge()
+            self.pub['camera'] = n.create_publisher(Image, ns + '/front_camera', qos)
+            self.cv_bridge = CvBridge()
 
         if self.publish_restricted_topics:
             self.pub.update({
@@ -148,8 +148,9 @@ class FastBridge:
             js.position = [float(angle)]
             P[key].publish(js)
 
-        if self.new_scan(d['V1 LIDAR Range Array'], enc, float(d['V1 LIDAR Scan Rate'])):
-            self.publish_scan(d, stamp)
+        rate = float(d['V1 LIDAR Scan Rate'])
+        if self.new_scan(d['V1 LIDAR Range Array'], enc, rate):
+            self.publish_scan(d['V1 LIDAR Range Array'], rate, stamp)
 
         if self.publish_camera:
             camera = np.asarray(PILImage.open(BytesIO(base64.b64decode(d['V1 Front Camera Image']))).convert('RGB'))
@@ -207,10 +208,9 @@ class FastBridge:
         self.last_scan = (raw, enc, now)
         return True
 
-    def publish_scan(self, d, stamp):
-        rate = float(d['V1 LIDAR Scan Rate'])
-        ranges = np.fromstring(gzip.decompress(base64.b64decode(d['V1 LIDAR Range Array'])).decode('utf-8'),
-                               dtype=np.float32, sep='\n')
+    def publish_scan(self, raw, rate, stamp):
+        """raw: base64 of gzipped newline-separated ranges, 1081 beams over 270 deg."""
+        ranges = np.fromstring(gzip.decompress(base64.b64decode(raw)).decode('utf-8'), dtype=np.float32, sep='\n')
         ls = LaserScan()
         ls.header.stamp = stamp
         ls.header.frame_id = 'lidar'

@@ -14,14 +14,12 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-
-def tracks_dir():
-    return os.environ.get('TRACKS_DIR', os.path.expanduser('~/ws/tracks'))
+from perception.tracks import track_dir
 
 
 def nodes(context):
     track = LaunchConfiguration('track').perform(context)
-    pbstream = os.path.join(tracks_dir(), track, 'map.pbstream')
+    pbstream = os.path.join(track_dir(track), 'map.pbstream')
     if not os.path.isfile(pbstream):
         raise RuntimeError(f'{pbstream} not found; map the track first (save_map {track})')
 

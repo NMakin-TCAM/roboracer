@@ -29,9 +29,9 @@ launches `control race.launch.py` (perception `localization.launch.py` + control
 | Package | Contents |
 |---|---|
 | `autodrive_bridge` | `fast_bridge`, `adapter`, `wheel_odom`, `teleop_keyboard`; `autodrive_launch.py`. Sim only: replaced by f1tenth_system on the car. |
-| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map` |
+| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
 | `planning` | `build_raceline` = `centerline` extraction + TUM `mintime` optimization |
-| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py` |
+| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`. `follow_the_gap_node`: reactive `/scan` -> `/drive`, needs no map |
 
 ## Interfaces
 

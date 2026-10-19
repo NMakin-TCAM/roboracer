@@ -7,10 +7,10 @@ Built to race an unseen track: map it, plan a minimum-time raceline, race it.
 ```
 Dockerfile, docker-compose.yml   the ROS 2 environment (any OS, amd64 or arm64)
 ws/src/autodrive_bridge/         AutoDRIVE <-> ROS 2 bridge, keyboard teleop (sim only)
-ws/src/perception/               Cartographer mapping + localization, save_map
+ws/src/perception/               Cartographer mapping + localization, save_map; experimental IMU EKF velocity
 ws/src/planning/                 centerline extraction + TUM minimum-time raceline
-ws/src/control/                  pure pursuit
-ws/scripts/                      map_track.sh, race.sh
+ws/src/control/                  pure pursuit, follow the gap
+ws/scripts/                      map_track.sh, race.sh (+ common.sh, sourced by both)
 ws/tracks/<name>/                generated per track (git-ignored)
 docs/pipeline.md                 interfaces, frames and track file formats
 ```

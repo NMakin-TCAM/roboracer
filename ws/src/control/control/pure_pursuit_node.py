@@ -1,162 +1,109 @@
 #!/usr/bin/env python3
+"""Pure pursuit on a generated raceline (tracks/<track>/raceline.csv, TUM output format).
+
+On every pose (pose_topic, map frame): find the closest raceline point, pick the first point at
+least one lookahead ahead of the car, steer on the arc through it, drive at the raceline speed
+* speed_scale (capped at max_speed). One /drive per pose.
+
+  lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
+"""
+import os
+
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-
-from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
+from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
 
-import numpy as np
-import os
+from perception.tracks import track_dir
+
+# raceline.csv columns: s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
+X, Y, VX = 1, 2, 5
+
 
 class PurePursuit(Node):
-    """ 
-    Implement Pure Pursuit on the car
-    This is just a template, you are free to implement your own node!
-    """
     def __init__(self):
         super().__init__('pure_pursuit_node')
-        # launch/pure_pursuit.launch.py sets track:=<name> (ws/tracks/<name>/raceline.csv)
-        self.declare_parameter('track', '')
-        track = self.get_parameter('track').value
-        self.declare_parameter('raceline_path', '')  # overrides track
-        self.declare_parameter('pose_topic', '/tracked_pose')  # /ground_truth/pose for debugging
-        pose_topic = self.get_parameter('pose_topic').value
-        self.declare_parameter('speed_scale', 0.5)
-        self.speed_scale = self.get_parameter('speed_scale').value
-        self.declare_parameter('max_speed', 0.0)  # m/s cap on the drive speed, 0 = no cap
-        self.max_speed = self.get_parameter('max_speed').value
-        # vehicle geometry: config/vehicle.yaml only (pure_pursuit.launch.py loads it)
-        self.max_steering_angle = self.declare_parameter('max_steering_angle', Parameter.Type.DOUBLE).value
-
-        # lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
-        lookahead_param = self.declare_parameter('lookahead_distance', 3.0)  # max [m]
-        assert lookahead_param.value is not None
-        self.lookahead_distance: float = lookahead_param.value
-        self.lookahead_min = self.declare_parameter('lookahead_min', 0.6).value  # m, ~2x the wheelbase
-        self.lookahead_time = self.declare_parameter('lookahead_time', 0.4).value  # s
-
-        self.wheelbase = self.declare_parameter('wheelbase', Parameter.Type.DOUBLE).value
+        p = self.declare_parameter
+        track = p('track', '').value                      # set by pure_pursuit.launch.py
+        raceline_path = p('raceline_path', '').value      # overrides track
+        pose_topic = p('pose_topic', '/tracked_pose').value   # /ground_truth/pose for debugging
+        self.speed_scale = p('speed_scale', 0.5).value
+        self.max_speed = p('max_speed', 0.0).value        # m/s cap on the drive speed, 0 = no cap
+        self.lookahead_distance = p('lookahead_distance', 3.0).value   # m, max
+        self.lookahead_min = p('lookahead_min', 0.6).value             # m, ~2x the wheelbase
+        self.lookahead_time = p('lookahead_time', 0.4).value           # s
+        # vehicle geometry comes only from config/vehicle.yaml (pure_pursuit.launch.py loads it)
+        self.max_steering_angle = p('max_steering_angle', Parameter.Type.DOUBLE).value
+        self.wheelbase = p('wheelbase', Parameter.Type.DOUBLE).value
         if self.max_steering_angle is None or self.wheelbase is None:
             raise RuntimeError('max_steering_angle / wheelbase unset: load control/config/vehicle.yaml')
 
-        assert self.lookahead_distance is not None
+        path = raceline_path or os.path.join(track_dir(track), 'raceline.csv')
+        if not os.path.isfile(path):
+            self.get_logger().fatal(f'Raceline not found: {path} (set track or raceline_path)')
+            raise FileNotFoundError(path)
+        self.waypoints = np.loadtxt(path, delimiter=';', ndmin=2)
+        self.xy = self.waypoints[:, [X, Y]]
+        self.get_logger().info(f'Loaded {path}: {len(self.waypoints)} points; lookahead '
+                               f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m')
 
-        self.get_logger().info(f'Initialing pure pursuit with lookahead {self.lookahead_time} s x speed, '
-                               f'{self.lookahead_min}-{self.lookahead_distance} m')
-
-        # racelines are generated per track into ws/tracks/<track>/raceline.csv (TUM output format)
-        tracks_dir = os.environ.get('TRACKS_DIR', os.path.expanduser('~/ws/tracks'))
-        track_path = self.get_parameter('raceline_path').value or os.path.join(tracks_dir, track, 'raceline.csv')
-        if not os.path.isfile(track_path):
-            self.get_logger().fatal(f'Raceline not found: {track_path} (set track or raceline_path)')
-            raise FileNotFoundError(track_path)
-        self.waypoints = np.loadtxt(track_path, delimiter=';', ndmin=2)
-
-        self.get_logger().info(f'Loaded {track} raceline. Waypoints shape: {self.waypoints.shape}')
-
-        # create ROS subscribers and publishers
-        self.pose_sub = self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
-
+        self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
 
-        self.last_pos_idx = 0
+    def drive_speed(self, i):
+        v = self.waypoints[i, VX] * self.speed_scale
+        return min(v, self.max_speed) if self.max_speed > 0 else v
 
-    def pose_callback(self, pose_msg: PoseStamped):
-        # find the current waypoint 
-        self.get_logger().debug(f'Position: {pose_msg.pose.position}')
-        position = pose_msg.pose.position
-        x = position.x
-        y = position.y
-        q = pose_msg.pose.orientation
-        q_list = [q.x, q.y, q.z, q.w]
-        if np.any(np.isnan(q_list)):
-            # if quarternion invalid
-            self.get_logger().warning("Received invalid quarternion")
+    def pose_callback(self, msg: PoseStamped):
+        x, y = msg.pose.position.x, msg.pose.position.y
+        q = msg.pose.orientation
+        if np.isnan([q.x, q.y, q.z, q.w]).any():
+            self.get_logger().warning('Received invalid quaternion')
             return
         yaw = np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y ** 2 + q.z ** 2))
 
-        # TODO: Try using arc length instead
+        n = len(self.xy)
+        dists = np.hypot(self.xy[:, 0] - x, self.xy[:, 1] - y)
+        closest = int(np.argmin(dists))
 
-        # Obtain closest waypoint to vehicle
-        window_size = len(self.waypoints) # TODO: optimize by reducing window... remember to check if window exceeded
+        # Target: first point after the closest whose distance from the car reaches the lookahead.
+        # Off the line, the car's offset is added so the target stays ahead along the line instead
+        # of being the closest point, which would cut straight across corners. At most one lap is
+        # searched: on a tiny track every point may be within the lookahead.
+        lookahead = np.clip(self.lookahead_time * self.drive_speed(closest),
+                            self.lookahead_min, self.lookahead_distance)
+        ahead = (closest + np.arange(n)) % n
+        far = np.flatnonzero(dists[ahead] >= lookahead + dists[closest])
+        target = ahead[far[0]] if far.size else ahead[-1]
+        target_dist = dists[target]
+        if target_dist < 1e-6:
+            return
 
-        #     self.get_logger().warning(f"exceeded window size for closest waypoint search")
-
-        indices = np.arange(self.last_pos_idx, self.last_pos_idx + window_size) % len(self.waypoints)
-        dists = np.hypot(self.waypoints[indices, 1] - x, self.waypoints[indices, 2] - y)
-        min_local_idx = None
-        min_local_idx = np.argmin(dists)
-        self.last_pos_idx = indices[min_local_idx]
-
-        # self.get_logger().info(f"last_pox_idx = {self.last_pos_idx} | dist to car = {dists[min_local_idx]}")
-        # self.get_logger().info(f"current pos = {(x, y)}")
-        # self.get_logger().info(f"closest_waypoint = {self.waypoints[self.last_pos_idx][1:3]}")
-
-        # find waypoint at lookahead distance away
-        # off the raceline (e.g. starting off the loop), add the offset so the target stays ahead along
-        # the line instead of being the closest point, which would cut straight across corners
-        # Lookahead for the drive speed at the car. (It used to be min(3, 1/(7 kappa)) of the last
-        # target, overwriting the parameter: 0.13 m, under the 0.33 m wheelbase, in tight corners,
-        # where pure pursuit then saturated the steering and ran wide.)
-        v = self.waypoints[self.last_pos_idx][5] * self.speed_scale
-        if self.max_speed > 0:
-            v = min(v, self.max_speed)
-        lookahead = min(max(self.lookahead_time * v, self.lookahead_min), self.lookahead_distance)
-        search_distance = lookahead + dists[min_local_idx]
-        # TODO: more efficient way then looping
-        i = self.last_pos_idx
-        n_checked = 0  # at most one lap: every waypoint may be within lookahead on a tiny track
-        while (target_dist := (np.hypot(self.waypoints[i][1] - x, self.waypoints[i][2] - y))) < search_distance \
-                and n_checked < len(self.waypoints) - 1:
-            i = (i + 1) % len(self.waypoints)
-            n_checked += 1
-        target_waypoint = self.waypoints[i]
-        self.get_logger().debug(f"lookahead: {lookahead:.2f} m")
-
-        # TODO: interpolate to get exact lookahead distance
-
-        # self.get_logger().info(f"closest_waypoint_idx = {self.last_pos_idx}, target_waypoint_idx = {i} | dist to car = {target_dist}")
-
-        # transform goal point to vehicle frame of reference 
-        dx = target_waypoint[1] - x
-        dy = target_waypoint[2] - y
-
-        target_x = dx * np.cos(yaw) + dy * np.sin(yaw)
+        # target in the vehicle frame, then the arc through it: curvature = 2 y / d^2
+        dx, dy = self.xy[target, 0] - x, self.xy[target, 1] - y
         target_y = -dx * np.sin(yaw) + dy * np.cos(yaw)
+        steering = np.arctan(self.wheelbase * 2 * target_y / target_dist ** 2)
 
-        # self.get_logger().info(f"x {x} y {y} yaw {yaw} tx {target_waypoint[1]} ty {target_waypoint[2]}")
-        # self.get_logger().info(f"dx {dx}, dy {dy}, yaw {yaw}, target_x {target_x} target_y {target_y}")
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'base_link'
+        drive.drive.steering_angle = float(np.clip(steering, -self.max_steering_angle, self.max_steering_angle))
+        drive.drive.speed = float(self.drive_speed(target))
+        self.drive_pub.publish(drive)
 
-        # calculate curvature/steering angle
-        curvature = 2 * abs(target_y) / target_dist ** 2
-        steering_angle = np.sign(target_y) * np.arctan(self.wheelbase * curvature)
-        steering_angle = np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle)
 
-        speed = target_waypoint[5] * self.speed_scale # raceline vx, scaled down for now
-        if self.max_speed > 0:
-            speed = min(speed, self.max_speed)
-
-        # TODO: publish drive message, don't forget to limit the steering angle.
-        drive_msg = AckermannDriveStamped()
-        drive_msg.header.stamp = self.get_clock().now().to_msg()
-        drive_msg.header.frame_id = 'pure_pursuit'
-
-        drive_msg.drive.steering_angle = steering_angle
-        drive_msg.drive.speed = speed
-
-        # self.get_logger().info(f"Speed: {speed}, Steering Angle: {steering_angle}")
-
-        self.drive_pub.publish(drive_msg)
-
-def main(args=None):
-    rclpy.init(args=args)
-    print("PurePursuit Initialized")
-    pure_pursuit_node = PurePursuit()
-    rclpy.spin(pure_pursuit_node)
-
-    pure_pursuit_node.destroy_node()
-    rclpy.shutdown()
+def main():
+    rclpy.init()
+    node = PurePursuit()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

@@ -4,11 +4,10 @@
   /opt/tum_venv/bin/python -I tum_mintime.py <centerline.csv> <racecar.ini> <traj_race_cl.csv> <work_dir>
 
 Mirrors the opt_type = 'mintime' path of TUM's main_globaltraj.py (pinned commit, see
-docker/install_deps.sh) with our inputs instead of its hard-coded ones: import track ->
-prep_track (spline regression; normals kept from crossing) -> opt_mintime (IPOPT) -> create_raceline ->
-heading/curvature ->
-mintime velocity profile -> export_traj_race. No reoptimization and no ggv-based velocity
-recalculation: the velocity profile is the optimizer's own.
+docker/install_deps.sh) with our inputs instead of its hard-coded ones:
+  import track -> prep_track (spline regression; normals kept from crossing) -> opt_mintime (IPOPT)
+  -> create_raceline -> heading/curvature -> mintime velocity profile -> export_traj_race.
+No reoptimization and no ggv-based velocity recalculation: the velocity profile is the optimizer's own.
 
 Exit code != 0 if IPOPT does not converge (opt_mintime exits 1).
 """
