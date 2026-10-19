@@ -36,7 +36,7 @@ class WheelOdom(Node):
         ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         self.wheel_radius = p('wheel_radius', 0.0585).value      # m; calibrated against /ground_truth/odom
         self.speed_window = p('speed_window', 0.1).value         # s
-        self.wheelbase = p('wheelbase', 0.33).value              # m, rear axle -> front axle
+        self.wheelbase = p('wheelbase', 0.324).value              # m, rear axle -> front axle
         self.max_steer = p('max_steering_angle', 0.5236).value   # rad at steering = 1
         self.publish_tf = p('publish_tf', True).value            # TF odom -> base_link
         self.use_imu = p('use_imu_yaw_rate', True).value          # gyro yaw rate instead of the bicycle model
