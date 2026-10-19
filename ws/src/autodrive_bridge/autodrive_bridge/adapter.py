@@ -19,7 +19,7 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.signals import SignalHandlerOptions
 from ackermann_msgs.msg import AckermannDriveStamped
-from geometry_msgs.msg import Point, PoseStamped, TransformStamped
+from geometry_msgs.msg import PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import Float32
@@ -52,7 +52,8 @@ class Adapter(Node):
         self.ki = p('speed_ki', 0.006).value
         self.i_max = p('speed_i_max', 1.0).value
         self.max_throttle = p('max_throttle', 1.0).value
-        self.cmd_timeout = p('cmd_timeout', 0.5).value            # s without /drive -> stop
+        self.cmd_timeout = p('cmd_timeout', 0.5).value            # s; a longer /drive gap restarts the integral
+                                                                  # (fast_bridge's own cmd_timeout stops the car)
         self.unstick = p('auto_unstick', False).value
         self.unstick_cmd = p('unstick_cmd', 0.5).value
         self.unstick_speed = p('unstick_speed', 0.1).value
@@ -64,8 +65,7 @@ class Adapter(Node):
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
                          history=HistoryPolicy.KEEP_LAST, depth=1)
 
-        self.create_subscription(Point, self.ns + '/ips', self.ips_cb, qos)
-        self.create_subscription(Odometry, self.ns + '/odom', self.sim_odom_cb, qos)
+        self.create_subscription(Odometry, self.ns + '/odom', self.sim_odom_cb, qos)   # restricted topic
         self.create_subscription(Imu, self.ns + '/imu', self.imu_cb, qos)
         self.create_subscription(LaserScan, self.ns + '/lidar', self.lidar_cb, qos)
         self.create_subscription(Odometry, self.odom_topic, self.odom_cb, 10)
@@ -82,10 +82,6 @@ class Adapter(Node):
         self.static_tf = StaticTransformBroadcaster(self)
         self.publish_static_transforms()
 
-        self.yaw = None               # sim IMU yaw, for the ground-truth pose
-        self.yaw_rate = 0.0
-        self.gt_vx = 0.0              # sim ground-truth velocity
-        self.gt_vy = 0.0
         self.vx = 0.0                 # measured speed from /odom, for the throttle loop
         self.integral = 0.0
         self.last_ctrl_t = None
@@ -121,38 +117,28 @@ class Adapter(Node):
         self.static_tf.sendTransform(transforms)
 
     def imu_cb(self, msg:Imu):
-        self.yaw = yaw_from_quat(msg.orientation)
-        self.yaw_rate = msg.angular_velocity.z
         self.imu_pub.publish(msg)   # keeps fast_bridge's stamp, the sim frame it arrived in
-
-    def sim_odom_cb(self, msg:Odometry):
-        self.gt_vx = msg.twist.twist.linear.x
-        self.gt_vy = msg.twist.twist.linear.y
 
     def odom_cb(self, msg:Odometry):
         self.vx = msg.twist.twist.linear.x
 
-    # ground truth in the sim world frame ('world', not Cartographer's 'map'); debugging only
-    def ips_cb(self, msg:Point):
-        if self.yaw is None:
-            return
-
-        stamp = self.get_clock().now().to_msg()
-        qx, qy, qz, qw = quat_from_yaw(self.yaw)
+    def sim_odom_cb(self, msg:Odometry):
+        """Sim ground truth, projected to 2D, in the sim world frame ('world', not Cartographer's
+        'map'): /ground_truth/odom, /ground_truth/pose, TF world -> ground_truth. Debugging only."""
+        src = msg.pose.pose
+        qx, qy, qz, qw = quat_from_yaw(yaw_from_quat(src.orientation))
 
         odom = Odometry()
-        odom.header.stamp = stamp
+        odom.header.stamp = msg.header.stamp   # fast_bridge's stamp, the sim frame
         odom.header.frame_id = 'world'
         odom.child_frame_id = 'ground_truth'
-        odom.pose.pose.position.x = msg.x
-        odom.pose.pose.position.y = msg.y
-        odom.pose.pose.orientation.x = qx
-        odom.pose.pose.orientation.y = qy
-        odom.pose.pose.orientation.z = qz
-        odom.pose.pose.orientation.w = qw
-        odom.twist.twist.linear.x = self.gt_vx
-        odom.twist.twist.linear.y = self.gt_vy
-        odom.twist.twist.angular.z = self.yaw_rate
+        odom.pose.pose.position.x = src.position.x
+        odom.pose.pose.position.y = src.position.y
+        o = odom.pose.pose.orientation
+        o.x, o.y, o.z, o.w = qx, qy, qz, qw
+        odom.twist.twist.linear.x = msg.twist.twist.linear.x
+        odom.twist.twist.linear.y = msg.twist.twist.linear.y
+        odom.twist.twist.angular.z = msg.twist.twist.angular.z
         self.gt_odom_pub.publish(odom)
 
         pose = PoseStamped()
@@ -163,8 +149,8 @@ class Adapter(Node):
         tf = TransformStamped()
         tf.header = odom.header
         tf.child_frame_id = 'ground_truth'
-        tf.transform.translation.x = msg.x
-        tf.transform.translation.y = msg.y
+        tf.transform.translation.x = odom.pose.pose.position.x
+        tf.transform.translation.y = odom.pose.pose.position.y
         tf.transform.rotation = odom.pose.pose.orientation
         self.tf.sendTransform(tf)
 

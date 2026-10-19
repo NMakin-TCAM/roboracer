@@ -49,12 +49,12 @@ def gravity_in_body(q):
 
 class FastBridge:
     def __init__(self):
-        self.node = rclpy.create_node('autodrive_fast_bridge')
+        self.node = rclpy.create_node('fast_bridge')   # same name as in autodrive_launch.py
         p = self.node.declare_parameter
         ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         self.port = p('port', 4567).value
         self.reset_frames = p('reset_frames', 5).value
-        self.cmd_timeout = p('cmd_timeout', 0.5).value
+        self.cmd_timeout = p('cmd_timeout', 0.5).value   # s without a command -> reply zeros (stops the car)
         self.publish_restricted_topics = p('publish_restricted_topics', True).value
         self.publish_camera = p('publish_camera', False).value
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -85,10 +85,13 @@ class FastBridge:
                 'best_lap_time': n.create_publisher(Float32, ns + '/best_lap_time', qos),
             })
 
+        # Command state: written by the executor thread (callbacks below), read by the Socket.IO
+        # thread (on_frame); the lock keeps a command from being lost between check and reply.
+        self.lock = threading.Lock()
         self.throttle_cmd = 0.0
         self.steering_cmd = 0.0
         self.last_cmd_t = 0.0
-        self.reset_left = 0
+        self.reset_left = 0           # frames still to reply 'V1 Reset' True
 
         n.create_subscription(Float32, ns + '/throttle_command', self._throttle_cb, qos)
         n.create_subscription(Float32, ns + '/steering_command', self._steering_cb, qos)
@@ -96,29 +99,45 @@ class FastBridge:
 
         self.last_scan = None         # (raw 'V1 LIDAR Range Array', encoder angles, monotonic time)
 
-        self.frames = 0
+        self.frames = 0               # total, for the first stats report at frame 150
         self.window_start = None
         self.window_frames = 0
         self.work_s = 0.0
 
     def _throttle_cb(self, msg):
-        self.throttle_cmd = float(msg.data)
-        self.last_cmd_t = time.monotonic()
+        with self.lock:
+            self.throttle_cmd = float(msg.data)
+            self.last_cmd_t = time.monotonic()
 
     def _steering_cb(self, msg):
-        self.steering_cmd = float(msg.data)
-        self.last_cmd_t = time.monotonic()
+        with self.lock:
+            self.steering_cmd = float(msg.data)
+            self.last_cmd_t = time.monotonic()
 
     def _reset_cb(self, msg):
         if msg.data:
-            self.reset_left = self.reset_frames
-            self.throttle_cmd = self.steering_cmd = 0.0
+            with self.lock:
+                self.reset_left = self.reset_frames
+                self.throttle_cmd = self.steering_cmd = 0.0
             self.node.get_logger().info('Resetting the car to its start pose')
+
+    def _reply(self):
+        """The command for this frame; zeros while resetting or after cmd_timeout without commands."""
+        with self.lock:
+            reset = self.reset_left > 0
+            if reset:
+                self.reset_left -= 1
+            if reset or time.monotonic() - self.last_cmd_t > self.cmd_timeout:
+                self.throttle_cmd = self.steering_cmd = 0.0
+            return {'V1 Throttle': str(self.throttle_cmd),
+                    'V1 Steering': str(self.steering_cmd),
+                    'V1 Reset': str(reset)}
 
     def on_frame(self, d):
         t_in = time.perf_counter()
         stamp = self.node.get_clock().now().to_msg()
         P = self.pub
+        resetting = self.reset_left > 0
 
         P['throttle'].publish(Float32(data=float(d['V1 Throttle'])))
         P['steering'].publish(Float32(data=float(d['V1 Steering'])))
@@ -136,7 +155,7 @@ class FastBridge:
         imu.orientation.x, imu.orientation.y, imu.orientation.z, imu.orientation.w = map(float, q)
         imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = map(float, w)
         imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = map(float, a)
-        if self.reset_left == 0:   # a reset frame's teleport reads as a ~80 m/s^2 spike
+        if not resetting:   # a reset frame's teleport reads as a ~80 m/s^2 spike
             P['imu'].publish(imu)
 
         enc = vec(d['V1 Encoder Angles'])
@@ -180,16 +199,9 @@ class FastBridge:
             P['last_lap_time'].publish(Float32(data=float(d['V1 Last Lap Time'])))
             P['best_lap_time'].publish(Float32(data=float(d['V1 Best Lap Time'])))
 
-        reset = self.reset_left > 0
-        if reset:
-            self.reset_left -= 1
-        if reset or time.monotonic() - self.last_cmd_t > self.cmd_timeout:
-            self.throttle_cmd = self.steering_cmd = 0.0
-        self.frames += 1
+        reply = self._reply()
         self._stats(t_in)
-        return {'V1 Throttle': str(self.throttle_cmd),
-                'V1 Steering': str(self.steering_cmd),
-                'V1 Reset': str(reset)}
+        return reply
 
     def new_scan(self, raw, enc, rate):
         """True if this frame carries a lidar scan not published yet.
@@ -231,6 +243,7 @@ class FastBridge:
         # report the sim's frame rate every 30 s; it is the control loop rate
         now = time.perf_counter()
         self.work_s += now - t_in
+        self.frames += 1
         self.window_frames += 1
         if self.window_start is None:
             self.window_start = now
