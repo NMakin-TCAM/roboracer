@@ -24,8 +24,7 @@ setup(
         'console_scripts': [
             'save_map = perception.save_map:main',
             'map_origin = perception.map_origin:main',
-            'encoder_to_odom = perception.encoder_to_odom:main',
-            'corrector = perception.corrector:main'
+            'corrector = perception.corrector:main',
         ],
     },
 )
