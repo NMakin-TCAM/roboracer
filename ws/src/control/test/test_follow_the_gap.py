@@ -1,13 +1,6 @@
 import numpy as np
 import pytest
 import rclpy
-from rclpy.context import Context
-
-from control.follow_the_gap_node import ReactiveFollowGap
-
-
-import pytest
-import rclpy
 from rclpy.parameter import Parameter
 
 from control.follow_the_gap_node import ReactiveFollowGap

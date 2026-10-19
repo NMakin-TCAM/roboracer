@@ -126,7 +126,7 @@ class ReactiveFollowGap(Node):
         drive_msg.drive.steering_angle = steering_angle
         self.drive_pub.publish(drive_msg)
 
-        self.get_logger().info(f"Steering angle: {steering_angle * 180 / np.pi:.2f}")
+        self.get_logger().debug(f"Steering angle: {steering_angle * 180 / np.pi:.2f}")
 
     @staticmethod
     def get_angle(data: LaserScan, idx):
@@ -134,7 +134,7 @@ class ReactiveFollowGap(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    print("WallFollow Initialized")
+    print("ReactiveFollowGap Initialized")
     reactive_node = ReactiveFollowGap()
     rclpy.spin(reactive_node)
 
