@@ -24,3 +24,4 @@ frames_*.pdf
 *.user
 *~
 .DS_Store
+ws/Default.perspective
