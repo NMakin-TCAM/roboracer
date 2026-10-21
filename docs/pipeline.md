@@ -70,4 +70,5 @@ mounting rotation, or Cartographer stops waiting for an IMU it cannot transform.
 |---|---|
 | wheelbase, max steering | `ws/src/control/config/vehicle.yaml` (0.33 m, 0.524 rad), loaded by every node that uses them |
 | wheel radius | 0.0585 m (calibrated against ground truth) |
-| top speed | ~25 m/s per unit throttle (sim), throttle loop in `adapter.yaml` |
+| throttle | motor torque (sim VehicleController; ~25 m/s per unit throttle is only its steady state), speed loop in `adapter.yaml` |
+| acceleration limit | 2.5 m/s^2 up, 6.9 m/s^2 down (`adapter.yaml` `max_acceleration`, `max_deceleration`): the adapter ramps the /drive speed as the car's speed controller would, so a launch from a standstill does not spin the wheels; after a /drive gap the ramp restarts from the measured speed |

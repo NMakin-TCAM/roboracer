@@ -6,8 +6,10 @@ Republishes simulator sensor topics under the official f1tenth_system names (/sc
 separately for debugging, and converts /drive commands into AutoDRIVE normalized
 throttle/steering commands.
 
-The throttle loop stands in for the VESC's speed control. Its measured speed comes from
-/odom (wheel_odom in sim, vesc_to_odom on the car) rather than AutoDRIVE ground truth.
+The throttle loop stands in for the VESC's speed control and for f1tenth_system's acceleration
+limit on the /drive speed. Its measured speed comes from /odom (wheel_odom in sim, vesc_to_odom
+on the car) rather than AutoDRIVE ground truth. The sim throttle is motor torque
+(VehicleController); ~25 m/s per unit throttle is its steady state.
 """
 import math
 import signal
@@ -34,6 +36,11 @@ def quat_from_yaw(yaw):
     return 0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)
 
 
+def move_towards(current, target, max_change):
+    """current moved toward target by at most max_change (ActuationLimiter in ForzaETH's f1tenth_system)."""
+    return current + max(-max_change, min(max_change, target - current))
+
+
 class Adapter(Node):
     def __init__(self):
         super().__init__('adapter')
@@ -53,7 +60,10 @@ class Adapter(Node):
         self.ki = p('speed_ki', 0.006).value
         self.i_max = p('speed_i_max', 1.0).value
         self.max_throttle = p('max_throttle', 1.0).value
-        self.cmd_timeout = p('cmd_timeout', 0.5).value            # s; a longer /drive gap restarts the integral
+        self.max_accel = p('max_acceleration', 2.5).value         # m/s^2 ramp on the /drive speed
+        self.max_decel = p('max_deceleration', 6.9).value         # m/s^2 (names as ForzaETH's ActuationLimiter)
+        self.cmd_timeout = p('cmd_timeout', 0.5).value            # s; a longer /drive gap restarts the integral and
+                                                                  # the speed ramp from the measured speed
                                                                   # (fast_bridge's own cmd_timeout stops the car)
         self.unstick = p('auto_unstick', False).value
         self.unstick_cmd = p('unstick_cmd', 0.5).value
@@ -84,6 +94,7 @@ class Adapter(Node):
         self.publish_static_transforms()
 
         self.vx = 0.0                 # measured speed from /odom, for the throttle loop
+        self.v_cmd = 0.0              # /drive speed after the acceleration limit
         self.integral = 0.0
         self.last_ctrl_t = None
         self.stuck_since = None       # auto_unstick state
@@ -167,8 +178,17 @@ class Adapter(Node):
         now = self.get_clock().now()
         gap = None if self.last_ctrl_t is None else (now - self.last_ctrl_t).nanoseconds * 1e-9
         if gap is None or gap > self.cmd_timeout:
-            self.integral = 0.0   # /drive restarted after fast_bridge stopped the car
-        dt = 0.02 if gap is None else min(0.1, gap)
+            # /drive restarted after fast_bridge stopped the car: ramp from the measured speed, nominal first
+            # step. With zero throttle for cmd_timeout the wheels are not driven, so vx is not above the true
+            # speed. Clamped at 0: /odom can read a large negative glitch after a respawn (-10.55 m/s seen),
+            # which would otherwise mean full reverse torque. After a sim reset this relies on /drive staying
+            # quiet longer than cmd_timeout (the localization gate withholds poses); otherwise the ramp
+            # continues from before the reset.
+            self.integral = 0.0
+            self.v_cmd = max(0.0, self.vx)
+            dt = 0.02
+        else:
+            dt = min(0.1, gap)
         self.last_ctrl_t = now
 
         t = now.nanoseconds * 1e-9
@@ -176,6 +196,7 @@ class Adapter(Node):
             if self.reverse_until is not None:
                 if t < self.reverse_until:
                     self.integral = 0.0
+                    self.v_cmd = 0.0   # forward again ramps from 0
                     self.throttle_pub.publish(Float32(data=float(-self.kff * self.unstick_reverse_speed)))
                     self.steer_pub.publish(Float32(data=0.0))
                     return
@@ -189,16 +210,25 @@ class Adapter(Node):
             else:
                 self.stuck_since = None
 
-        err = v_ref - self.vx
+        # The sim throttle is motor torque, so kff * v_ref from a standstill is a torque step that spins
+        # the wheels, and /odom counts the spin as travel. Ramp the speed as f1tenth_system does on the car
+        # (stock throttle_interpolator, symmetric; ForzaETH's ActuationLimiter, accel / decel separate, copied
+        # here). max_deceleration (mue * g) does not limit the planned braking at speed_scale <= 1; it keeps
+        # a one-frame stop from restarting the ramp at 0 while the car is fast.
+        rate = self.max_accel if v_ref > self.v_cmd else self.max_decel
+        self.v_cmd = move_towards(self.v_cmd, v_ref, rate * dt)
+
+        err = self.v_cmd - self.vx
         if abs(v_ref) < 1e-3 and abs(self.vx) < 0.05:
             self.integral = 0.0
+            self.v_cmd = 0.0
             throttle = 0.0
         else:
             self.integral = max(-self.i_max, min(self.i_max, self.integral + err * dt))
             # The feedforward alone keeps the throttle positive while slowing down (8 -> 3 m/s with
             # kp 0.006: +0.09), leaving braking to drag; a larger gain on overspeed brakes.
             kp = self.kp if err >= 0 else self.kp_brake
-            throttle = self.kff * v_ref + kp * err + self.ki * self.integral
+            throttle = self.kff * self.v_cmd + kp * err + self.ki * self.integral
         throttle = max(-self.max_throttle, min(self.max_throttle, throttle))
 
         self.throttle_pub.publish(Float32(data=float(throttle)))
@@ -208,8 +238,8 @@ class Adapter(Node):
 def main():
     # No rclpy signal handler: Ctrl+C / SIGTERM end the loop with the context still valid, so the
     # zero command below can be published (rclpy's handler shut the context down first and it
-    # raised). Under ros2 launch, fast_bridge is stopping too and may not forward it; its own
-    # cmd_timeout is what zeroes the sim. Python handles signals only between waits: wake every 0.1 s.
+    # raised). Under ros2 launch, fast_bridge is stopping too and may not forward it; it sends the
+    # sim a zero command itself when it stops. Python handles signals only between waits: wake every 0.1 s.
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     node = Adapter()
