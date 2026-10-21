@@ -3,7 +3,8 @@ import os
 
 
 def tracks_dir():
-    return os.environ.get('TRACKS_DIR', os.path.expanduser('~/ws/tracks'))
+    # absolute: cartographer_node opens write_state's filename from its own working directory
+    return os.path.abspath(os.path.expanduser(os.environ.get('TRACKS_DIR', '~/ws/tracks')))
 
 
 def track_dir(name):

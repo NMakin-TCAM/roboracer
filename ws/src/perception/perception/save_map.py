@@ -3,9 +3,10 @@
 
   ros2 run perception save_map <name>
 
-Finishes the active trajectory (final optimization), then writes (see docs/pipeline.md):
+Finishes the active trajectory, waits until its poses settle (Cartographer optimizes in the
+background after /finish_trajectory returns), then writes (see docs/pipeline.md):
   map.pbstream       Cartographer state via /write_state, loaded by localization.launch.py
-  map.pgm, map.yaml  /map in map_server format (trinary, thresholds 0.65 / 0.25)
+  map.pgm, map.yaml  /map in map_server format (trinary, thresholds 0.65 / 0.196)
   trajectory.csv     optimized trajectory node poses of base_link in map (/trajectory_query)
   map_to_world.yaml  map origin in the sim world, only if map_origin latched one (sim only)
 """
@@ -15,6 +16,7 @@ import time
 
 import numpy as np
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from rclpy.utilities import remove_ros_args
@@ -27,13 +29,16 @@ from perception.map_origin import pose2d
 from perception.tracks import track_dir
 
 OCCUPIED_THRESH = 0.65
-FREE_THRESH = 0.25
+FREE_THRESH = 0.25       # grid percent -> free pixel (254)
+YAML_FREE_THRESH = 0.196  # map.yaml: just below unknown 205's p = 0.19608, so loaders keep it unknown
 
 
 class SaveMap(Node):
     def __init__(self):
         super().__init__('save_map')
         self.timeout = self.declare_parameter('timeout', 30.0).value   # s per step
+        self.settle_time = self.declare_parameter('settle_time', 5.0).value   # s of unchanged poses
+        self.poll_period = 0.5
         self.map = None
         self.map_rx_t = 0.0
         self.origin = None
@@ -66,6 +71,44 @@ class SaveMap(Node):
             rclpy.spin_once(self, timeout_sec=0.1)
         return done()
 
+    def query_poses(self, tid):
+        res = self.call(TrajectoryQuery, '/trajectory_query', TrajectoryQuery.Request(trajectory_id=tid))
+        self.check(res.status, 'trajectory_query')
+        poses = [(p.pose.position.x, p.pose.position.y, p.pose.position.z, p.pose.orientation.x,
+                  p.pose.orientation.y, p.pose.orientation.z, p.pose.orientation.w) for p in res.trajectory]
+        return res, poses
+
+    def wait_settled(self, tid, finished):
+        """Poll /trajectory_query until the poses stop changing; returns the last response.
+
+        /finish_trajectory only queues an optimization. If this run finished the trajectory, first wait
+        for that optimization to move the poses (it always moves the newest nodes), then for
+        settle_time without change.
+        """
+        res, poses = self.query_poses(tid)
+        if finished:
+            self.get_logger().info('waiting for the final optimization')
+            end = time.monotonic() + self.timeout
+            while True:
+                time.sleep(self.poll_period)
+                res, new = self.query_poses(tid)
+                if new != poses:   # list compare: length and values
+                    poses = new
+                    break
+                if time.monotonic() > end:
+                    raise RuntimeError(f'trajectory {tid} unchanged {self.timeout:.0f} s after finish_trajectory '
+                                       '(optimization not done?)')
+        end = time.monotonic() + self.timeout
+        quiet_since = time.monotonic()
+        while time.monotonic() - quiet_since < self.settle_time:
+            if time.monotonic() > end:
+                raise RuntimeError(f'trajectory {tid} still changing after {self.timeout:.0f} s')
+            time.sleep(self.poll_period)
+            res, new = self.query_poses(tid)
+            if new != poses:
+                poses, quiet_since = new, time.monotonic()
+        return res
+
     def save(self, out):
         os.makedirs(out, exist_ok=True)
 
@@ -80,6 +123,7 @@ class SaveMap(Node):
             res = self.call(FinishTrajectory, '/finish_trajectory', FinishTrajectory.Request(trajectory_id=tid))
             self.check(res.status, 'finish_trajectory')
         tid = active[-1] if active else ids[-1]
+        traj = self.wait_settled(tid, finished=bool(active))
 
         pbstream = os.path.join(out, 'map.pbstream')
         res = self.call(WriteState, '/write_state',
@@ -87,9 +131,7 @@ class SaveMap(Node):
         self.check(res.status, 'write_state')
         self.get_logger().info(f'wrote {pbstream}')
 
-        res = self.call(TrajectoryQuery, '/trajectory_query', TrajectoryQuery.Request(trajectory_id=tid))
-        self.check(res.status, 'trajectory_query')
-        self.write_trajectory(os.path.join(out, 'trajectory.csv'), res.trajectory)
+        self.write_trajectory(os.path.join(out, 'trajectory.csv'), traj.trajectory)
 
         # a /map drawn after the final optimization
         after = time.monotonic()
@@ -133,7 +175,7 @@ class SaveMap(Node):
                     f'origin: [{x:.6f}, {y:.6f}, {yaw:.6f}]\n'
                     'negate: 0\n'
                     f'occupied_thresh: {OCCUPIED_THRESH}\n'
-                    f'free_thresh: {FREE_THRESH}\n')
+                    f'free_thresh: {YAML_FREE_THRESH}\n')
         self.get_logger().info(f'wrote map.pgm/map.yaml ({w}x{h}, {grid.info.resolution:.3f} m)')
 
     def write_origin(self, path, msg):
@@ -161,8 +203,8 @@ def main():
     except RuntimeError as e:
         node.get_logger().error(str(e))
         sys.exit(1)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        sys.exit(130)   # not 0: map_track.sh must not take a half-saved track as saved
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

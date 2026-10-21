@@ -5,12 +5,13 @@ The EKF integrates forward acceleration, so its vx drifts. This node subtracts a
 re-estimates from the wheel encoders and the IMU:
   1. zero-velocity update: both wheels stopped and the chassis not accelerating for 2 EKF
      updates -> bias = EKF vx (the car is at rest)
-  2. upper clamp: accelerating forward, the corrected vx may not exceed the slip-scaled wheel speed
+  2. upper clamp: accelerating forward, the corrected vx may not exceed the wheel speed (x slip_scale)
   3. floor: wheels not turning backwards, the corrected vx may not go negative
 Publishes the EKF odometry with vx corrected (and vy = 0) on output_odom_topic, and optionally the
-bias and the error against sim ground truth.
+bias and the error against sim ground truth. While the encoders are silent the bias is held.
 """
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -38,11 +39,13 @@ class OdomDriftCorrector(Node):
         self.publish_error = p('publish_error', True).value
         error_topic = p('error_topic', '/odometry/velocity_error').value
         bias_topic = p('bias_topic', '/odometry/velocity_bias').value
-        self.wheel_radius = p('wheel_radius', 0.059).value   # m (wheel_odom uses the calibrated 0.0585)
+        self.wheel_radius = p('wheel_radius', 0.0585).value  # m, wheel_odom's calibrated radius (adapter.yaml)
         self.v_max = p('v_max', 22.88).value                 # m/s, sim top speed
-        self.slip_scale = p('slip_scale', 0.9152).value      # 22.88 / 25.0
+        self.slip_scale = p('slip_scale', 1.0).value         # the calibrated radius already matches ground speed
+        self.encoder_timeout = p('encoder_timeout', 0.25).value   # s without encoders -> hold the bias
 
-        self.wheels = {'left': [None, None, 0.0], 'right': [None, None, 0.0]}   # [last angle, last t, speed]
+        # [last angle, last t, speed, monotonic receive time]
+        self.wheels = {'left': [None, None, 0.0, None], 'right': [None, None, 0.0, None]}
         self.imu_ax = 0.0
         self.imu_ay = 0.0
         self.gt_vx = None
@@ -69,12 +72,18 @@ class OdomDriftCorrector(Node):
         if not msg.position:
             return
         w = self.wheels[side]
+        w[3] = time.monotonic()
         angle, t = float(msg.position[0]), stamp_to_sec(msg.header.stamp)
         last_angle, last_t = w[0], w[1]
         if last_t is None or t > last_t:
             w[0], w[1] = angle, t
         if last_t is not None and t - last_t > 1e-4:
-            w[2] = self.wheel_radius * (angle - last_angle) / (t - last_t)
+            speed = self.wheel_radius * (angle - last_angle) / (t - last_t)
+            if abs(speed) > 2.0 * self.v_max:
+                # a sim reset teleports the car and resets the encoders; keep the last speed
+                self.get_logger().warn(f'{side} encoder jump ({speed:.0f} m/s, sim reset?), skipped')
+                return
+            w[2] = speed
 
     def imu_cb(self, msg: Imu):
         self.imu_ax = msg.linear_acceleration.x
@@ -92,7 +101,13 @@ class OdomDriftCorrector(Node):
         wheels_stopped = abs(left_vel) < 0.05 and abs(right_vel) < 0.05
         chassis_settled = math.hypot(self.imu_ax, self.imu_ay) < 0.20
 
-        if wheels_stopped and chassis_settled:
+        now = time.monotonic()
+        encoders_live = all(w[3] is not None and now - w[3] < self.encoder_timeout
+                            for w in self.wheels.values())
+
+        if not encoders_live:
+            pass   # stale wheel speeds: no zero-velocity update or clamp, keep the bias
+        elif wheels_stopped and chassis_settled:
             # 1. zero-velocity update
             self.stopped_frames += 1
             if self.stopped_frames >= 2:

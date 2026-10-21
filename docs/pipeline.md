@@ -22,10 +22,19 @@ ros2 launch control follow_the_gap.launch.py [speed:=1.0]   # no-map fallback, i
 
 `map_track.sh` resets the sim car, starts Cartographer mapping, waits for you to finish driving and
 press Enter, runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
+It needs a terminal (it refuses to start without one) and exits early if `cartographer_node` dies on startup.
+If `save_map` fails, mapping keeps running and it asks to retry (Enter) or quit (`q`, the map is lost; delete `tracks/<name>` before reusing the name).
 `race.sh` resets the sim car (localization starts at the map origin = where mapping started) and
 launches `control race.launch.py` (perception `localization.launch.py` + control `pure_pursuit.launch.py`).
 If mapping fails on race day, `follow_the_gap.launch.py` drives on `/scan` alone (no map); run it instead of
 `race.sh`, never alongside it, since both publish `/drive`.
+
+### Stopping a launch
+
+Stop `ros2 launch` with Ctrl-C, or from a script with SIGINT to its whole process group:
+`kill -INT -- -<pgid>` (`map_track.sh` does this). SIGTERM to the `ros2 launch` process alone
+(e.g. `timeout ros2 launch ...`, `kill <pid>`) exits the launch but leaves every node it started running.
+Check with `ros2 node list` and kill leftovers before the next launch.
 
 ## Packages (`ws/src/`)
 

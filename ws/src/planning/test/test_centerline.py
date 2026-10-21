@@ -1,10 +1,12 @@
 """Centerline extraction on a real Cartographer map (fixtures/track_map_v3: ~16 x 9 m, ~30 m loop)."""
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from planning.centerline import OccupancyMap, extract_centerline, lap_length, signed_area, write_centerline
+from planning.centerline import (OccupancyMap, extract_centerline, fill_unobserved, first_lap, lap_length,
+                                 normals_left, signed_area, write_centerline)
 
 FIX = os.path.join(os.path.dirname(__file__), 'fixtures')
 MAP = os.path.join(FIX, 'track_map_v3.yaml')
@@ -78,3 +80,41 @@ def test_csv_format(tmp_path, result):
     lines = path.read_text().splitlines()
     assert lines[0] == '# x_m,y_m,w_tr_right_m,w_tr_left_m'
     assert np.loadtxt(path, delimiter=',', comments='#').shape == result[0].shape
+
+
+def test_widths_left_and_right(result):
+    # w_left along the left normal, w_right along the right one: a swap leaves 16-25 % of the points outside
+    track, m, mask = result
+    xy, nl = track[:, :2], normals_left(track[:, :2])
+    for p in (xy + 0.9 * track[:, 3:4] * nl, xy - 0.9 * track[:, 2:3] * nl):
+        rc = np.round(m.to_pixel(p)).astype(int)
+        assert mask[rc[:, 0], rc[:, 1]].all()
+
+
+def test_first_lap_returns_off_its_start():
+    # on a wide track the second lap passes 1.5 m outside the start point
+    th = np.linspace(0, 2.5 * 2 * np.pi, 2000)
+    r = 10 + 1.5 * th / (2 * np.pi)
+    drive = np.column_stack((r * np.cos(th), r * np.sin(th)))
+    lap = first_lap(drive)
+    one = np.sum(np.hypot(*np.diff(drive[th <= 2 * np.pi], axis=0).T))
+    assert np.sum(np.hypot(*np.diff(lap, axis=0).T)) == pytest.approx(one, rel=0.01)
+
+
+def test_short_loop_without_trajectory_fails():
+    with pytest.raises(RuntimeError, match='only'):
+        extract_centerline(MAP, min_loop_m=100.0)
+
+
+def test_large_sparse_infield_kept():
+    # a 25 x 25 m unknown infield behind a 1-cell wall is only 0.8 % occupied, but its edge is all wall
+    n = 600
+    occupied = np.zeros((n, n), bool)
+    free = np.zeros((n, n), bool)
+    free[20:-20, 20:-20] = True
+    free[50:-50, 50:-50] = False
+    occupied[50:-50, 50:-50] = True
+    occupied[51:-51, 51:-51] = False
+    free[30:33, 30:33] = False                              # unobserved speck on the track
+    out = fill_unobserved(SimpleNamespace(free=free, occupied=occupied))
+    assert out[31, 31] and not out[n // 2, n // 2]

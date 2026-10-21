@@ -9,6 +9,7 @@ psi is TUM's heading convention: 0 = +y (north), counter-clockwise positive, in 
 i.e. psi = yaw - pi/2 with yaw the usual ROS angle from +x.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ def run_mintime(centerline_csv, ini_path, python=TUM_PYTHON):
         log = proc.stdout
         # IPOPT's iteration table is long; keep the summary lines
         for line in log.splitlines():
+            line = re.sub(r'\x1b\[[0-9;]*m', '', line)   # TUM colours its ERROR / WARNING lines
             if line.startswith(('INFO', 'WARNING', 'EXIT', 'Spline', 'Number of Iterations',
                                 'Total seconds', 'ERROR')):
                 print('  [tum] ' + line)
@@ -53,7 +55,12 @@ def run_mintime(centerline_csv, ini_path, python=TUM_PYTHON):
             else:
                 why = f'optimizer failed (exit code {proc.returncode})'
             raise OptimizationError(f'mintime {why}. Last output:\n{tail}')
-        traj = np.loadtxt(out, comments='#', delimiter=';', ndmin=2)
+        try:
+            traj = np.loadtxt(out, comments='#', delimiter=';', ndmin=2)
+        except ValueError as e:
+            raise OptimizationError(f'mintime output is malformed: {e}')
+    if traj.shape[1] != 7:
+        raise OptimizationError(f'mintime output has {traj.shape[1]} columns, expected 7 ({HEADER})')
     return traj, dt
 
 

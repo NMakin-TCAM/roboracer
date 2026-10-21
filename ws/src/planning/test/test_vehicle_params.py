@@ -23,3 +23,11 @@ def test_racecar_ini_matches_vehicle_yaml():
     assert mintime['delta_max'] == pytest.approx(car['max_steering_angle'])
     assert mintime['wheelbase_front'] + mintime['wheelbase_rear'] == pytest.approx(car['wheelbase'])
     assert veh['curvlim'] == pytest.approx(math.tan(car['max_steering_angle']) / car['wheelbase'], abs=0.01)
+
+
+def test_width_opt_fits_the_car():
+    ini = configparser.ConfigParser()
+    ini.read(RACECAR)
+    width = json.loads(ini.get('GENERAL_OPTIONS', 'veh_params'))['width']
+    width_opt = json.loads(ini.get('OPTIMIZATION_OPTIONS', 'optim_opts_mintime'))['width_opt']
+    assert width_opt >= width   # the car fits inside its own margin
