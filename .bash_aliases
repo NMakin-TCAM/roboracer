@@ -9,7 +9,8 @@ alias sb="source /opt/ros/humble/setup.bash && source ~/ws/install/setup.bash"
 # Build options using colcon
 alias cb="cd ~/ws && colcon build --symlink-install"
 alias cbp="cd ~/ws && colcon build --symlink-install --packages-select"
-alias cbclean="cd ~/ws && rm -rf build/ install/ log/ && cb"
+# cbclean removes only colcon's own logs: log/ also holds map_track logs and analysis scripts
+alias cbclean="cd ~/ws && rm -rf build/ install/ log/build_* log/test_* log/latest* && cb"
 
 # ==============================================================================
 # AutoDRIVE Sim & Race Pipeline (docs/pipeline.md)
