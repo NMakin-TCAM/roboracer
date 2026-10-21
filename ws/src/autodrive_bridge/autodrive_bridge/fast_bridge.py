@@ -15,10 +15,12 @@ Subscribed:
 """
 import base64
 import gzip
+import signal
 import threading
 import time
 from io import BytesIO
 
+import gevent
 import numpy as np
 import rclpy
 import socketio
@@ -28,8 +30,9 @@ from geventwebsocket.handler import WebSocketHandler
 from PIL import Image as PILImage
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Odometry
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import Imu, JointState, LaserScan, Image
 from std_msgs.msg import Bool, Float32, Int32
 
@@ -256,11 +259,20 @@ class FastBridge:
 
 
 def main():
-    rclpy.init()
+    # No rclpy signal handler: it only shut the context down, gevent's loop never saw the signal,
+    # and the process outlived ros2 launch (SIGINT, then SIGTERM) with :4567 still bound.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     bridge = FastBridge()
     executor = SingleThreadedExecutor()
     executor.add_node(bridge.node)
-    threading.Thread(target=executor.spin, daemon=True).start()
+    def spin_until_shutdown():
+        try:
+            executor.spin()
+        except ExternalShutdownException:   # rclpy.try_shutdown() below
+            pass
+
+    spin = threading.Thread(target=spin_until_shutdown, daemon=True)
+    spin.start()
 
     sio = socketio.Server(async_mode='gevent')
 
@@ -278,12 +290,18 @@ def main():
             sio.emit('Bridge', data=bridge.on_frame(data))
 
     bridge.node.get_logger().info(f'Waiting for AutoDRIVE on port {bridge.port}')
+    server = pywsgi.WSGIServer(('', bridge.port), socketio.WSGIApp(sio),
+                               handler_class=WebSocketHandler, log=None)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        gevent.signal_handler(sig, lambda: gevent.spawn(server.stop, timeout=1.0))
     try:
-        pywsgi.WSGIServer(('', bridge.port), socketio.WSGIApp(sio),
-                          handler_class=WebSocketHandler, log=None).serve_forever()
+        server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        # context first: it wakes executor.spin, which would otherwise still be in its wait at exit
+        # (std::terminate, exit code -6)
+        rclpy.try_shutdown()
+        spin.join(timeout=2.0)
         executor.shutdown()
         bridge.node.destroy_node()
-        rclpy.try_shutdown()
