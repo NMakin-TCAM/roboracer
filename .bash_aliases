@@ -27,6 +27,10 @@ alias map-track="~/ws/scripts/map_track.sh"
 # Race a mapped track: race <name> [speed_scale:=0.5]
 alias race="~/ws/scripts/race.sh"
 
+# No-map fallback: follow the gap on /scan, no map or localization: ftg [speed:=1.0]
+# (stop it before race: both publish /drive)
+alias ftg="ros2 launch control follow_the_gap.launch.py"
+
 # Re-plan the raceline of an existing map: plan <name>
 alias plan="ros2 run planning build_raceline"
 

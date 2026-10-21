@@ -48,7 +48,8 @@ scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the sa
 
 Check `tracks/<name>/preview.png` before racing. To re-plan an existing map (e.g. new car parameters in
 `ws/src/planning/config/racecar.ini`): `ros2 run planning build_raceline <name>`.
-The aliases in `.bash_aliases` (`map-track`, `race`, `kb`, `reset-car`, ...) wrap these.
+No map (mapping failed)? `ros2 launch control follow_the_gap.launch.py [speed:=1.0]` drives on the LiDAR alone.
+The aliases in `.bash_aliases` (`map-track`, `race`, `ftg`, `kb`, `reset-car`, ...) wrap these.
 
 | Topic | Direction | |
 |---|---|---|

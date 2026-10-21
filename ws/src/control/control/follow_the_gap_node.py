@@ -36,6 +36,8 @@ class ReactiveFollowGap(Node):
         self.MAX_RANGE, self.DISPARITY_THRESHOLD, self.ALPHA, self.SPEED, self.CAR_WIDTH = (
             p.get_parameter_value().double_value for p in params
         )
+        # Steering lock (rad); default mirrors config/vehicle.yaml, which follow_the_gap.launch.py loads
+        self.MAX_STEERING_ANGLE = self.declare_parameter('max_steering_angle', 0.524).value
 
         self.lidar_processor = LidarProcessor(
             max_range=self.MAX_RANGE,
@@ -118,7 +120,7 @@ class ReactiveFollowGap(Node):
         # Find the best point in the gap 
         best_idx = self.find_best_point(max_start, max_end, proc_ranges)
         
-        steering_angle = self.get_angle(data, best_idx)
+        steering_angle = float(np.clip(self.get_angle(data, best_idx), -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE))
 
         # Publish Drive message
         drive_msg = AckermannDriveStamped()
