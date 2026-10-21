@@ -49,6 +49,7 @@ class Adapter(Node):
         self.camera_z = p('camera_z', 0.15).value
         self.kff = p('speed_kff', 0.04).value                     # throttle per m/s (1 / 25)
         self.kp = p('speed_kp', 0.006).value
+        self.kp_brake = p('speed_kp_brake', 0.1).value            # kp when too fast: negative throttle brakes
         self.ki = p('speed_ki', 0.006).value
         self.i_max = p('speed_i_max', 1.0).value
         self.max_throttle = p('max_throttle', 1.0).value
@@ -194,7 +195,10 @@ class Adapter(Node):
             throttle = 0.0
         else:
             self.integral = max(-self.i_max, min(self.i_max, self.integral + err * dt))
-            throttle = self.kff * v_ref + self.kp * err + self.ki * self.integral
+            # The feedforward alone keeps the throttle positive while slowing down (8 -> 3 m/s with
+            # kp 0.006: +0.09), leaving braking to drag; a larger gain on overspeed brakes.
+            kp = self.kp if err >= 0 else self.kp_brake
+            throttle = self.kff * v_ref + kp * err + self.ki * self.integral
         throttle = max(-self.max_throttle, min(self.max_throttle, throttle))
 
         self.throttle_pub.publish(Float32(data=float(throttle)))

@@ -8,6 +8,7 @@ adapter:
     laser_x: 0.2733             # rear axle -> lidar
     speed_kff: 0.04             # throttle per m/s; sim settles at ~25 m/s per unit throttle
     speed_kp: 0.006
+    speed_kp_brake: 0.1         # kp when faster than /drive: 8 -> 3 m/s gives throttle -0.38 (brakes); not yet tuned in sim
     speed_ki: 0.006
     speed_i_max: 1.0
     max_throttle: 1.0
