@@ -82,8 +82,9 @@ class SaveMap(Node):
         """Poll /trajectory_query until the poses stop changing; returns the last response.
 
         /finish_trajectory only queues an optimization. If this run finished the trajectory, first wait
-        for that optimization to move the poses (it always moves the newest nodes), then for
-        settle_time without change.
+        up to timeout for that optimization to move the poses, then for settle_time without change.
+        It moves nothing when an earlier optimization already covered every node (car parked before
+        Enter, as map_track.sh asks): then the poses are final and unchanged for timeout.
         """
         res, poses = self.query_poses(tid)
         if finished:
@@ -96,8 +97,9 @@ class SaveMap(Node):
                     poses = new
                     break
                 if time.monotonic() > end:
-                    raise RuntimeError(f'trajectory {tid} unchanged {self.timeout:.0f} s after finish_trajectory '
-                                       '(optimization not done?)')
+                    self.get_logger().warn(f'trajectory {tid} unchanged {self.timeout:.0f} s after '
+                                           'finish_trajectory: taking its poses as final')
+                    return res
         end = time.monotonic() + self.timeout
         quiet_since = time.monotonic()
         while time.monotonic() - quiet_since < self.settle_time:

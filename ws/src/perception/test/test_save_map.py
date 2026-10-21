@@ -62,10 +62,12 @@ def test_length_change_counts(node, monkeypatch):
     assert len(res.trajectory) == 3
 
 
-def test_no_change_after_finish_times_out(node, monkeypatch):
-    script(node, monkeypatch, [[0, 1]])
-    with pytest.raises(RuntimeError, match='unchanged'):
-        node.wait_settled(0, finished=True)
+def test_no_change_after_finish_is_final(node, monkeypatch):
+    # final optimization adds nothing (car parked, earlier optimization covered every node)
+    calls = script(node, monkeypatch, [[0, 1]])
+    res = node.wait_settled(0, finished=True)
+    assert [p.pose.position.x for p in res.trajectory] == [0, 1]
+    assert len(calls) > 10   # waited the timeout first
 
 
 def test_rerun_without_finish_only_needs_quiet(node, monkeypatch):
