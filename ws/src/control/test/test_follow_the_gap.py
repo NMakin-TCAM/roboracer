@@ -101,7 +101,7 @@ def test_callback_clips_steering(make_node):
     node.drive_pub = SimpleNamespace(publish=msgs.append)
     ranges = np.full(1081, 2.5)
     ranges[0] = 2.4      # closest point, far right
-    ranges[900:] = 5.0   # only free space is far left, past the steering lock
+    ranges[700:] = 5.0   # only free space is far left (from 40 deg), past the steering lock
 
     node.lidar_callback(make_scan(ranges))
 
@@ -110,6 +110,27 @@ def test_callback_clips_steering(make_node):
     assert node.get_angle(make_scan(ranges), node.find_best_point(start, end, proc)) > 0.524
     assert msgs[0].drive.speed == node.SPEED
     assert msgs[0].drive.steering_angle == pytest.approx(0.524)
+
+
+def test_best_point_is_middle_of_capped_run(make_node):
+    node = make_node()
+    ranges = np.array([1., 5., 5., 5., 5., 5., 2.])   # max_range cap: a run of equal farthest beams
+
+    assert node.find_best_point(0, 6, ranges) == 3   # argmax alone gives 1, the run's edge
+
+
+def test_callback_ignores_gaps_outside_fov(make_node):
+    node = make_node()
+    msgs = []
+    node.drive_pub = SimpleNamespace(publish=msgs.append)
+    ranges = np.full(1081, 1.0)
+    ranges[1000] = 0.9        # closest point behind on the left
+    ranges[:150] = 5.0        # farthest free space: behind on the right, past -90 deg
+    ranges[600:680] = 3.0     # nearer free space ahead on the left
+
+    node.lidar_callback(make_scan(ranges))
+
+    assert msgs[0].drive.steering_angle > 0
 
 
 def test_callback_stops_on_all_nan_scan(make_node):

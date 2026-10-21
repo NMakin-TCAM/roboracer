@@ -9,7 +9,8 @@ profile at its own position near `speed_scale` 1.0. See `docs/pipeline.md` for w
 it sits in the stack.
 
 `follow_the_gap_node` is a reactive alternative that needs no map: it steers toward the farthest point
-of the widest free gap in `/scan` at a constant `speed` (`ros2 run control follow_the_gap_node`, or
+(the middle of the run of farthest beams, since ranges are capped at `max_range`) of the widest free
+gap within `fov` (default ±90°) of straight ahead in `/scan`, at a constant `speed` (`ros2 run control follow_the_gap_node`, or
 `ros2 launch control follow_the_gap.launch.py`, which loads `config/vehicle.yaml`). Its steering is
 clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle.yaml`).
 `tools/lidar_plot.py` plots its scan processing live (WebAgg, not installed).
