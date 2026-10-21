@@ -1,43 +1,41 @@
 #!/usr/bin/env python3
-"""Reactive follow the gap on /scan -> /drive (no map or localization needed).
 
-Each scan: LidarProcessor caps and smooths the ranges and zeroes a safety bubble around the
-closest obstacle; the node then drives at a constant speed toward the farthest point of the
-widest run of non-zero ranges. Stops if no free space is left.
+# From Roboracer Lab 4: https://github.com/f1tenth/f1tenth_lab4_template/tree/68bda6b1346b741e3d10da68736ae47dbe7c6743
 
-  ros2 run control follow_the_gap_node [--ros-args -p speed:=1.0 ...]
-
-From the F1TENTH Lab 4 template:
-https://github.com/f1tenth/f1tenth_lab4_template/tree/68bda6b1346b741e3d10da68736ae47dbe7c6743
-"""
-import numpy as np
 import rclpy
 from rclpy.node import Node
-from ackermann_msgs.msg import AckermannDriveStamped
-from sensor_msgs.msg import LaserScan
+from rcl_interfaces.msg import ParameterDescriptor
 
 from control.lidar_processing import LidarProcessor
-
-
-def find_max_gap(ranges):
-    """(start, end) indices, both inclusive, of the longest run of non-zero ranges (first if tied)."""
-    edges = np.diff(np.concatenate(([0], (np.asarray(ranges) != 0).astype(np.int8), [0])))
-    starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1) - 1
-    if not starts.size:
-        return 0, 0
-    k = int(np.argmax(ends - starts))
-    return int(starts[k]), int(ends[k])
-
+from copy import deepcopy
+import numpy as np
+from sensor_msgs.msg import LaserScan
+from ackermann_msgs.msg import AckermannDriveStamped, AckermannDrive
 
 class ReactiveFollowGap(Node):
+    """ 
+    Follow the gap
+    """
     def __init__(self, parameter_overrides=None):
         super().__init__('reactive_node', parameter_overrides=parameter_overrides)
-        p = self.declare_parameter
-        self.MAX_RANGE = p('max_range', 5.0).value                       # m, ranges are capped here
-        self.DISPARITY_THRESHOLD = p('disparity_threshold', 2.0).value   # m, range jump = obstacle edge
-        self.ALPHA = p('alpha', 0.7).value                               # smoothing weight of the new scan
-        self.SPEED = p('speed', 1.0).value                               # m/s, constant drive speed
-        self.CAR_WIDTH = p('car_width', 0.27).value                      # m, sizes the safety bubble
+        # Topics & Subs, Pubs
+        lidarscan_topic = '/scan'
+        drive_topic = '/drive'
+
+        params = self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('max_range', 5.0, ParameterDescriptor()),            # cap for lidar reading
+                ('disparity_threshold', 2.0, ParameterDescriptor()),  # diff necessary for disparity
+                ('alpha', 0.7, ParameterDescriptor()),                # exp moving average: weight of new data
+                ('speed', 1., ParameterDescriptor()),                 # speed to drive at
+                ('car_width', 0.27, ParameterDescriptor()),           # car width for collision bubble
+            ],
+        )
+
+        self.MAX_RANGE, self.DISPARITY_THRESHOLD, self.ALPHA, self.SPEED, self.CAR_WIDTH = (
+            p.get_parameter_value().double_value for p in params
+        )
 
         self.lidar_processor = LidarProcessor(
             max_range=self.MAX_RANGE,
@@ -45,50 +43,103 @@ class ReactiveFollowGap(Node):
             alpha=self.ALPHA,
             car_width=self.CAR_WIDTH,
         )
-        self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
-        self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+
+        # Subscribe to LIDAR
+        self.lidar_sub = self.create_subscription(LaserScan, lidarscan_topic, self.lidar_callback, 10)
+
+        # Publish to drive
+        self.drive_pub = self.create_publisher(AckermannDriveStamped, drive_topic, 10)
 
     def preprocess_lidar(self, ranges):
         return self.lidar_processor.preprocess_lidar(ranges)
 
+    def remove_obstacles(self, ranges, data: LaserScan, closest_idx: int):
+        self.lidar_processor.remove_obstacles(ranges, data, closest_idx)
+
+    def find_max_gap(self, free_space_ranges) -> tuple[int, int]:
+        """ Return the start index & end index of the max gap in free_space_ranges
+        """
+
+        max_gap = 0
+        i = np.argmax(free_space_ranges != 0)
+        j = i + 1
+        max_i, max_j = i, j
+
+        while j <= len(free_space_ranges):
+            if j < len(free_space_ranges) and free_space_ranges[j] != 0:
+                j += 1
+            else:
+                gap = j - i
+                if gap > max_gap:
+                    max_gap = gap
+                    max_i, max_j = i, j - 1
+                try:
+                    i = j + np.argmax(free_space_ranges[j:] != 0)
+                except ValueError:
+                    i = j
+                j = i + 1
+
+        return int(max_i), int(max_j)
+    
+    def find_best_point(self, start_i, end_i, ranges):
+        """Start_i & end_i are start and end indicies of max-gap range, respectively
+        Return index of best point in ranges
+	    Naive: Choose the furthest point within ranges and go there
+        """
+        # choose center of gap
+        # best_idx = (start_i + end_i) / 2
+
+        # choose farthest distance within gap
+        best_idx = start_i + np.argmax(ranges[start_i:end_i + 1])
+
+        # TODO: idea - try to stay in midpoint
+
+        return best_idx
+
+    def lidar_callback(self, data: LaserScan):
+        """ Process each LiDAR scan as per the Follow Gap algorithm & publish an AckermannDriveStamped Message
+        """
+        proc_ranges = self.lidar_processor.process(data)
+
+        if len(proc_ranges) == 0:
+            self.get_logger().warning(f"No ranges found from lidar scan")
+            return
+        
+        if not np.any(proc_ranges):
+            drive_msg = AckermannDriveStamped()
+            drive_msg.drive.speed = 0.0
+            drive_msg.drive.steering_angle = 0.0
+            self.drive_pub.publish(drive_msg)
+            return
+
+        # Find max length gap 
+        max_start, max_end = self.find_max_gap(proc_ranges)
+
+        # Find the best point in the gap 
+        best_idx = self.find_best_point(max_start, max_end, proc_ranges)
+        
+        steering_angle = self.get_angle(data, best_idx)
+
+        # Publish Drive message
+        drive_msg = AckermannDriveStamped()
+        drive_msg.drive.speed = self.SPEED
+        drive_msg.drive.steering_angle = steering_angle
+        self.drive_pub.publish(drive_msg)
+
+        self.get_logger().debug(f"Steering angle: {steering_angle * 180 / np.pi:.2f}")
+
     @staticmethod
-    def find_max_gap(ranges):
-        return find_max_gap(ranges)
+    def get_angle(data: LaserScan, idx):
+        return data.angle_min + idx * data.angle_increment
 
-    def publish(self, speed, steering_angle):
-        msg = AckermannDriveStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'base_link'
-        msg.drive.speed = float(speed)
-        msg.drive.steering_angle = float(steering_angle)
-        self.drive_pub.publish(msg)
+def main(args=None):
+    rclpy.init(args=args)
+    print("ReactiveFollowGap Initialized")
+    reactive_node = ReactiveFollowGap()
+    rclpy.spin(reactive_node)
 
-    def lidar_callback(self, scan: LaserScan):
-        ranges = self.lidar_processor.process(scan)
-        if len(ranges) == 0:
-            self.get_logger().warning('Empty lidar scan')
-            return
-        if not np.any(ranges):
-            self.publish(0.0, 0.0)
-            return
-
-        start, end = find_max_gap(ranges)
-        best = start + int(np.argmax(ranges[start:end + 1]))   # farthest point in the gap
-        steering_angle = scan.angle_min + best * scan.angle_increment
-        self.publish(self.SPEED, steering_angle)
-        self.get_logger().debug(f'Steering angle: {np.degrees(steering_angle):.2f} deg')
-
-
-def main():
-    rclpy.init()
-    node = ReactiveFollowGap()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+    reactive_node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':
