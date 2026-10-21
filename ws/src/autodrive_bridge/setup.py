@@ -20,6 +20,7 @@ setup(
     maintainer_email='todo@todo.todo',
     description='AutoDRIVE RoboRacer simulator bridge: Socket.IO to ROS 2, plus an adapter to the stack topics.',
     license='TODO: License declaration',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'fast_bridge = autodrive_bridge.fast_bridge:main',

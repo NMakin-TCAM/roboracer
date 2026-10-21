@@ -20,6 +20,7 @@ setup(
     maintainer_email='todo@todo.todo',
     description='Cartographer mapping and localization, and saving maps to tracks/<name>/.',
     license='TODO: License declaration',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'save_map = perception.save_map:main',
