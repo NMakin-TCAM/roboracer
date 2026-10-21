@@ -10,6 +10,7 @@ nothing is published and save_map skips the file.
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped
@@ -37,7 +38,7 @@ class MapOrigin(Node):
     def tracked_cb(self, msg):
         if self.gt is None:
             return
-        wx, wy, wyaw = pose2d(self.gt.pose)
+        wx, wy, wyaw = pose2d(self.gt.pose)   # sim vehicle frame = rear axle = base_link (AutoDRIVE bridge)
         mx, my, myaw = pose2d(msg.pose)
         yaw = wyaw - myaw
         c, s = math.cos(yaw), math.sin(yaw)
@@ -59,7 +60,7 @@ def main():
     node = MapOrigin()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

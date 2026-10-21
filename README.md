@@ -57,7 +57,7 @@ The aliases in `.bash_aliases` (`map-track`, `race`, `kb`, `reset-car`, ...) wra
 | `/sensors/imu/raw` | out | IMU (`sensor_msgs/Imu`) |
 | TF `base_link -> laser, imu, front_camera` | out | static sensor mounts |
 | `/drive` | in | `ackermann_msgs/AckermannDriveStamped` (speed m/s, steering rad) |
-| TF `map -> odom`, `/tracked_pose` | out | Cartographer pose in the `map` frame (`perception`) |
+| TF `map -> odom`, `/tracked_pose`, `/localized_pose` | out | Cartographer pose in the `map` frame; `/localized_pose` is the same pose, only once localized (localization_gate; what race.launch drives on) |
 | `/ground_truth/odom`, `/ground_truth/pose`, TF `world -> ground_truth` | out | sim ground truth in the sim `world` frame, debugging only; off with `publish_restricted_topics:=false` |
 | `/autodrive/roboracer_1/sim_reset` | out | fast_bridge: one `std_msgs/String` event per sim reset (respawns only with restricted topics); localization_gate relocalizes on it |
 

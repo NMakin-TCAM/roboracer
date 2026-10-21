@@ -17,7 +17,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('track', description='track name under ws/tracks/'),
         DeclareLaunchArgument('pose_topic', default_value='/tracked_pose',
-                              description='geometry_msgs/PoseStamped; /ground_truth/pose for debugging'),
+                              description='geometry_msgs/PoseStamped in the map frame'),
         DeclareLaunchArgument('speed_scale', default_value='0.5',
                               description='drive speed = raceline vx * speed_scale'),
         DeclareLaunchArgument('max_speed', default_value='0.0',

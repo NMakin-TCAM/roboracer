@@ -25,6 +25,7 @@ setup(
             'save_map = perception.save_map:main',
             'map_origin = perception.map_origin:main',
             'corrector = perception.corrector:main',
+            'localization_gate = perception.localization_gate:main',
         ],
     },
 )

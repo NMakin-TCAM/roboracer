@@ -11,6 +11,9 @@ The closest point is searched within search_window m along the line of the previ
 cannot jump to another stretch of track that passes close by (iros2026: two legs 1.07 m apart,
 driven in opposite directions). On the first pose, or when that point is more than
 reacquire_distance m away, the whole line is searched, among points heading within 90 deg of the car.
+
+Safety: a pose not in the map frame, older than max_pose_age s, or more than max_offset m from the
+raceline gets a stop command (speed 0) instead; driving resumes on the next good pose.
 """
 import os
 
@@ -33,7 +36,7 @@ class PurePursuit(Node):
         p = self.declare_parameter
         track = p('track', '').value                      # set by pure_pursuit.launch.py
         raceline_path = p('raceline_path', '').value      # overrides track
-        pose_topic = p('pose_topic', '/tracked_pose').value   # /ground_truth/pose for debugging
+        pose_topic = p('pose_topic', '/tracked_pose').value   # PoseStamped in the map frame
         self.speed_scale = p('speed_scale', 0.5).value
         self.max_speed = p('max_speed', 0.0).value        # m/s cap on the drive speed, 0 = no cap
         self.lookahead_distance = p('lookahead_distance', 3.0).value   # m, max
@@ -41,6 +44,8 @@ class PurePursuit(Node):
         self.lookahead_time = p('lookahead_time', 0.4).value           # s
         search_window = p('search_window', 2.0).value                  # m along the line, each way
         self.reacquire_distance = p('reacquire_distance', 1.0).value   # m from the line
+        self.max_pose_age = p('max_pose_age', 0.5).value   # s, as fast_bridge's /drive watchdog
+        self.max_offset = p('max_offset', 3.0).value       # m from the line, farther = bad pose
         # vehicle geometry comes only from config/vehicle.yaml (pure_pursuit.launch.py loads it)
         self.max_steering_angle = p('max_steering_angle', Parameter.Type.DOUBLE).value
         self.wheelbase = p('wheelbase', Parameter.Type.DOUBLE).value
@@ -71,6 +76,13 @@ class PurePursuit(Node):
         v = self.waypoints[i, VX] * self.speed_scale
         return min(v, self.max_speed) if self.max_speed > 0 else v
 
+    def stop(self, reason):
+        self.get_logger().warning(f'Stopping: {reason}', throttle_duration_sec=1.0)
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'base_link'
+        self.drive_pub.publish(drive)   # speed 0, steering 0
+
     def find_closest(self, dists, yaw):
         n = len(self.xy)
         if self.closest is not None:
@@ -90,21 +102,31 @@ class PurePursuit(Node):
         if np.isnan([q.x, q.y, q.z, q.w]).any():
             self.get_logger().warning('Received invalid quaternion')
             return
+        if msg.header.frame_id != 'map':
+            return self.stop(f"pose in frame '{msg.header.frame_id}', the raceline is in 'map'")
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9   # 0 = unstamped, stale
+        age = self.get_clock().now().nanoseconds * 1e-9 - stamp
+        if age > self.max_pose_age:
+            return self.stop(f'pose {age:.2f} s old')
         yaw = np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y ** 2 + q.z ** 2))
 
         n = len(self.xy)
         dists = np.hypot(self.xy[:, 0] - x, self.xy[:, 1] - y)
-        closest = self.closest = self.find_closest(dists, yaw)
+        closest = self.find_closest(dists, yaw)
+        if dists[closest] > self.max_offset:
+            return self.stop(f'pose {dists[closest]:.1f} m from the raceline')
+        self.closest = closest
 
         # Target: first point after the closest whose distance from the car reaches the lookahead.
         # Off the line, the car's offset is added so the target stays ahead along the line instead
         # of being the closest point, which would cut straight across corners. At most one lap is
-        # searched: on a tiny track every point may be within the lookahead.
+        # searched: on a tiny track every point may be within the lookahead, then the farthest
+        # point (across the loop) is the target.
         lookahead = np.clip(self.lookahead_time * self.drive_speed(closest),
                             self.lookahead_min, self.lookahead_distance)
         ahead = (closest + np.arange(n)) % n
         far = np.flatnonzero(dists[ahead] >= lookahead + dists[closest])
-        target = ahead[far[0]] if far.size else ahead[-1]
+        target = ahead[far[0]] if far.size else ahead[np.argmax(dists[ahead])]
         target_dist = dists[target]
         if target_dist < 1e-6:
             return
