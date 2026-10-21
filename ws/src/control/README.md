@@ -38,6 +38,8 @@ Localization (Cartographer, `/tracked_pose`) must be running for the default pos
 | `lookahead_time` | `0.4` | s; lookahead = `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`] |
 | `lookahead_min` | `0.6` | m, about twice the wheelbase |
 | `lookahead_distance` | `3.0` | m, maximum lookahead |
+| `search_window` | `2.0` | m; the closest point is searched this far along the line either side of the previous one |
+| `reacquire_distance` | `1.0` | m; farther than this from that point, the whole line is searched (points heading within 90 deg of the car) |
 | `wheelbase` | none | m, from `config/vehicle.yaml` (required) |
 | `max_steering_angle` | none | rad, steering is clipped to this; from `config/vehicle.yaml` (required) |
 

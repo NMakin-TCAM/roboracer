@@ -38,6 +38,19 @@ def circle(radius, n):
     return np.column_stack([radius * np.cos(t), radius * np.sin(t)]), t + np.pi / 2
 
 
+def hairpin(length, gap, step):
+    """Counter-clockwise loop: +x along y = 0, a half turn, -x back along y = gap."""
+    x = np.arange(0.0, length, step)
+    t = np.linspace(-np.pi / 2, np.pi / 2, int(np.pi * gap / 2 / step), endpoint=False)
+    r = gap / 2
+    xy = np.concatenate([np.column_stack([x, np.zeros_like(x)]),
+                         np.column_stack([length + r * np.cos(t), r + r * np.sin(t)]),
+                         np.column_stack([length - x, np.full_like(x, gap)]),
+                         np.column_stack([-r * np.cos(t), r - r * np.sin(t)])])
+    seg = np.roll(xy, -1, axis=0) - xy
+    return xy, np.arctan2(seg[:, 1], seg[:, 0])
+
+
 @pytest.fixture(scope='module')
 def tracks_dir():
     with tempfile.TemporaryDirectory() as d:
@@ -47,6 +60,8 @@ def tracks_dir():
         write_raceline(d, 'straight', np.column_stack([x, np.zeros_like(x)]), np.zeros_like(x), 0.0, 3.0)
         xy, psi = circle(0.2, 10)  # every waypoint within the lookahead distance
         write_raceline(d, 'tiny', xy, psi, 5.0, 1.0)
+        xy, psi = hairpin(10.0, 1.0, 0.1)
+        write_raceline(d, 'hairpin', xy, psi, 0.0, 3.0)
         yield d
 
 
@@ -163,6 +178,14 @@ def test_tiny_raceline_within_lookahead(run):
     driver, _ = run('tiny')
     d = driver.drive(0.2, 0.0, math.pi / 2)
     assert d.speed == pytest.approx(1.0 * SPEED_SCALE)
+
+
+def test_hairpin_keeps_its_leg(run):
+    # 0.55 m off the +x leg, 0.45 m from the -x leg: steer back to its own leg, not onto the other
+    driver, _ = run('hairpin')
+    assert driver.drive(5.0, 0.55, 0.0).steering_angle < 0.0  # first pose: heading picks the leg
+    driver.drive(5.0, 0.0, 0.0)
+    assert driver.drive(5.1, 0.55, 0.0).steering_angle < 0.0  # drifted off: stays on the leg
 
 
 def test_missing_raceline(tracks_dir):

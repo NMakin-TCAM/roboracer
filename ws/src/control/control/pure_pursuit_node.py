@@ -6,6 +6,11 @@ least one lookahead ahead of the car, steer on the arc through it, drive at the 
 * speed_scale (capped at max_speed). One /drive per pose.
 
   lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
+
+The closest point is searched within search_window m along the line of the previous one, so it
+cannot jump to another stretch of track that passes close by (iros2026: two legs 1.07 m apart,
+driven in opposite directions). On the first pose, or when that point is more than
+reacquire_distance m away, the whole line is searched, among points heading within 90 deg of the car.
 """
 import os
 
@@ -34,6 +39,8 @@ class PurePursuit(Node):
         self.lookahead_distance = p('lookahead_distance', 3.0).value   # m, max
         self.lookahead_min = p('lookahead_min', 0.6).value             # m, ~2x the wheelbase
         self.lookahead_time = p('lookahead_time', 0.4).value           # s
+        search_window = p('search_window', 2.0).value                  # m along the line, each way
+        self.reacquire_distance = p('reacquire_distance', 1.0).value   # m from the line
         # vehicle geometry comes only from config/vehicle.yaml (pure_pursuit.launch.py loads it)
         self.max_steering_angle = p('max_steering_angle', Parameter.Type.DOUBLE).value
         self.wheelbase = p('wheelbase', Parameter.Type.DOUBLE).value
@@ -45,7 +52,15 @@ class PurePursuit(Node):
             self.get_logger().fatal(f'Raceline not found: {path} (set track or raceline_path)')
             raise FileNotFoundError(path)
         self.waypoints = np.loadtxt(path, delimiter=';', ndmin=2)
+        if len(self.waypoints) > 1 and np.allclose(self.waypoints[0, [X, Y]], self.waypoints[-1, [X, Y]]):
+            self.waypoints = self.waypoints[:-1]   # TUM closes the loop by repeating the first row
         self.xy = self.waypoints[:, [X, Y]]
+        # heading of each point toward the next, from the geometry (no psi convention involved)
+        seg = np.roll(self.xy, -1, axis=0) - self.xy
+        self.heading = np.arctan2(seg[:, 1], seg[:, 0])
+        step = np.median(np.hypot(seg[:, 0], seg[:, 1]))
+        self.window = max(1, int(np.ceil(search_window / step))) if step > 0 else len(self.xy)
+        self.closest = None
         self.get_logger().info(f'Loaded {path}: {len(self.waypoints)} points; lookahead '
                                f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m')
 
@@ -55,6 +70,19 @@ class PurePursuit(Node):
     def drive_speed(self, i):
         v = self.waypoints[i, VX] * self.speed_scale
         return min(v, self.max_speed) if self.max_speed > 0 else v
+
+    def find_closest(self, dists, yaw):
+        n = len(self.xy)
+        if self.closest is not None:
+            near = (self.closest + np.arange(-self.window, self.window + 1)) % n
+            i = near[np.argmin(dists[near])]
+            if dists[i] <= self.reacquire_distance:
+                return int(i)
+        # first pose, or off the line: the closest point the car is heading along
+        along = np.flatnonzero(np.cos(self.heading - yaw) > 0)
+        if not along.size:
+            along = np.arange(n)
+        return int(along[np.argmin(dists[along])])
 
     def pose_callback(self, msg: PoseStamped):
         x, y = msg.pose.position.x, msg.pose.position.y
@@ -66,7 +94,7 @@ class PurePursuit(Node):
 
         n = len(self.xy)
         dists = np.hypot(self.xy[:, 0] - x, self.xy[:, 1] - y)
-        closest = int(np.argmin(dists))
+        closest = self.closest = self.find_closest(dists, yaw)
 
         # Target: first point after the closest whose distance from the car reaches the lookahead.
         # Off the line, the car's offset is added so the target stays ahead along the line instead
