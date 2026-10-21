@@ -23,7 +23,12 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-gevent</exec_depend>
   <exec_depend>python3-gevent-websocket</exec_depend>
-  <!-- pip, see the Dockerfile: python-socketio==4.2.0 python-engineio==3.13.0 -->
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <!-- pip, see the Dockerfile: python-socketio==4.2.0 python-engineio==3.13.0, pinned on purpose
+       (the sim's Socket.IO client needs these old protocol versions; rosdep has no keys for them) -->
+
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

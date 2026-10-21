@@ -59,6 +59,7 @@ The aliases in `.bash_aliases` (`map-track`, `race`, `kb`, `reset-car`, ...) wra
 | `/drive` | in | `ackermann_msgs/AckermannDriveStamped` (speed m/s, steering rad) |
 | TF `map -> odom`, `/tracked_pose` | out | Cartographer pose in the `map` frame (`perception`) |
 | `/ground_truth/odom`, `/ground_truth/pose`, TF `world -> ground_truth` | out | sim ground truth in the sim `world` frame, debugging only; off with `publish_restricted_topics:=false` |
+| `/autodrive/roboracer_1/sim_reset` | out | fast_bridge: one `std_msgs/String` event per sim reset (respawns only with restricted topics); localization_gate relocalizes on it |
 
 Topic names follow the official [f1tenth_system](https://github.com/f1tenth/f1tenth_system), so the same
 stack runs on the car. `fast_bridge`, `adapter`, `wheel_odom` and `teleop_keyboard` are sim-only: on the car, `vesc_to_odom` publishes `/odom`

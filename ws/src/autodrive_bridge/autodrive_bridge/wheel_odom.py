@@ -20,6 +20,7 @@ import math
 from collections import deque
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -28,6 +29,16 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Float32
 from tf2_ros import TransformBroadcaster
+
+
+def reset_jump(a, b, wheel_radius, max_speed):
+    """True if the wheels turned farther between consecutive encoder samples a, b = (t, left, right)
+    than the car can drive: a sim reset teleports the car and sets the encoders back.
+
+    dt is floored at 0.02 s: stamps are the bridge's wall clock and two frames can arrive ~1 ms apart.
+    """
+    ds = 0.5 * ((b[1] - a[1]) + (b[2] - a[2])) * wheel_radius
+    return abs(ds) > max_speed * max(b[0] - a[0], 0.02) + 0.05
 
 
 class WheelOdom(Node):
@@ -44,6 +55,9 @@ class WheelOdom(Node):
         self.publish_tf = p('publish_tf', True).value            # TF odom -> base_link
         self.use_imu = p('use_imu_yaw_rate', True).value          # gyro yaw rate instead of the bicycle model
         self.max_speed = p('max_plausible_speed', 30.0).value     # m/s; faster wheel travel = sim reset
+        # s; longest gap the gyro is integrated over, per the sim's TimeManager maximum delta time (a
+        # sim hitch moves physics at most this far per frame while the wall clock runs on)
+        self.max_gyro_dt = p('max_gyro_dt', 0.1).value
 
         # AutoDRIVE's bridge publishes RELIABLE / depth 1; match it.
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
@@ -57,6 +71,7 @@ class WheelOdom(Node):
         self.tf = TransformBroadcaster(self)
 
         self.left = None
+        self.prev = None              # (t, left angle, right angle), last received
         self.last = None              # (t, left angle, right angle), last integrated
         self.pending = None           # (sample, stamp) waiting for the gyro of its frame
         self.history = deque()        # (t, distance travelled)
@@ -82,7 +97,18 @@ class WheelOdom(Node):
         if self.left is None:
             return
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        self.pending = ((t, self.left, msg.position[0]), msg.header.stamp)
+        sample = (t, self.left, msg.position[0])
+        # Check consecutive samples, not the last integrated one: no IMU comes in reset frames, so
+        # that one can be several frames old and a reset after a short drive passed as motion.
+        if self.prev is not None and reset_jump(self.prev, sample, self.wheel_radius, self.max_speed):
+            # A sim reset teleports the car and resets the encoders (one reset read as a 76 m step at
+            # -700 m/s, and the adapter's speed loop answered with full throttle). Re-reference the
+            # encoders and drop the speed history; the pose continues from where it was.
+            self.get_logger().warn('encoder jump in one frame (sim reset?), skipped')
+            self.last = None
+            self.history.clear()
+        self.prev = sample
+        self.pending = (sample, msg.header.stamp)
         self.integrate()
 
     def integrate(self):
@@ -104,15 +130,8 @@ class WheelOdom(Node):
             return
 
         ds = 0.5 * ((sample[1] - last[1]) + (sample[2] - last[2])) * self.wheel_radius
-        if abs(ds) > self.max_speed * (t - last[0]) + 0.05:
-            # A sim reset teleports the car and resets the encoders (one reset read as a 76 m step at
-            # -700 m/s, and the adapter's speed loop answered with full throttle). Re-reference the
-            # encoders and drop the speed history; the pose continues from where it was.
-            self.get_logger().warn(f'encoder jump of {ds:.1f} m in one frame (sim reset?), skipped')
-            self.history.clear()
-            return
         curvature = math.tan(self.steer) / self.wheelbase
-        dyaw = self.gyro_z * (t - last[0]) if gyro else ds * curvature
+        dyaw = self.gyro_z * min(t - last[0], self.max_gyro_dt) if gyro else ds * curvature
         self.x += ds * math.cos(self.yaw + 0.5 * dyaw)
         self.y += ds * math.sin(self.yaw + 0.5 * dyaw)
         self.yaw += dyaw
@@ -154,8 +173,11 @@ def main():
     node = WheelOdom()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):   # Ctrl-C: rclpy's handler shuts down the context
         pass
     finally:
-        node.destroy_node()
-        rclpy.try_shutdown()
+        try:
+            node.destroy_node()
+            rclpy.try_shutdown()
+        except KeyboardInterrupt:   # Ctrl-C under ros2 launch sends a second SIGINT during cleanup
+            pass

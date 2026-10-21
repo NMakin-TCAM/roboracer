@@ -1,0 +1,60 @@
+import pytest
+from builtin_interfaces.msg import Time
+from sensor_msgs.msg import Imu, JointState
+
+from autodrive_bridge.wheel_odom import WheelOdom, reset_jump
+
+R = 0.0585   # wheel_radius default
+
+
+def stamp(t):
+    return Time(sec=int(t), nanosec=int(round((t - int(t)) * 1e9)))
+
+
+def frame(node, t, dist, gyro=None):
+    """One sim frame: both encoders at `dist` metres of travel, then (unless None) the IMU."""
+    for cb in (node.left_cb, node.right_cb):
+        js = JointState()
+        js.header.stamp = stamp(t)
+        js.position = [dist / R]
+        cb(js)
+    if gyro is not None:
+        imu = Imu()
+        imu.header.stamp = stamp(t)
+        imu.angular_velocity.z = gyro
+        node.imu_cb(imu)
+
+
+@pytest.fixture
+def node():
+    n = WheelOdom()
+    yield n
+    n.destroy_node()
+
+
+def test_reset_jump():
+    assert reset_jump((0.0, 0.0, 0.0), (0.01, -1.0 / R, -1.0 / R), R, 30.0)      # 1 m back in 10 ms
+    assert not reset_jump((0.0, 0.0, 0.0), (0.01, 0.1 / R, 0.1 / R), R, 30.0)    # 10 m/s
+    # bunched frames: wall-clock stamps 1 ms apart, a normal frame's travel
+    assert not reset_jump((0.0, 0.0, 0.0), (0.001, 0.11 / R, 0.11 / R), R, 30.0)
+
+
+def test_short_drive_reset_not_integrated(node):
+    # 1 m in 100 frames, then a reset: no IMU in the reset frames, encoders back to the start
+    for i in range(101):
+        frame(node, 1.0 + 0.01 * i, 0.01 * i, gyro=0.0)
+    x = node.x
+    assert x == pytest.approx(1.0)
+    frame(node, 2.01, 1.01)
+    frame(node, 2.02, 0.0)
+    frame(node, 2.03, 0.0)
+    frame(node, 2.04, 0.0, gyro=0.0)
+    assert node.x == pytest.approx(x)   # pose continues from where it was, no jump back
+    frame(node, 2.05, 0.01, gyro=0.0)
+    assert node.x == pytest.approx(x + 0.01)
+
+
+def test_gyro_gap_capped(node):
+    frame(node, 1.0, 0.0, gyro=2.0)
+    frame(node, 1.5, 0.1, gyro=2.0)     # 0.5 s stall at 2 rad/s
+    assert node.yaw == pytest.approx(2.0 * node.max_gyro_dt)
