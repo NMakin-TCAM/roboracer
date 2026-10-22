@@ -8,9 +8,10 @@ Needs only /scan. With laps > 0 it counts laps on pose_topic, stops the car afte
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, Shutdown
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -28,7 +29,7 @@ def generate_launch_description():
             output='screen',
             emulate_tty=True,
             on_exit=Shutdown(),
-            parameters=[{
+            parameters=[PathJoinSubstitution([FindPackageShare('control'), 'config', 'vehicle.yaml']), {
                 'speed': ParameterValue(LaunchConfiguration('speed'), value_type=float),
                 'laps': ParameterValue(LaunchConfiguration('laps'), value_type=int),
                 'pose_topic': LaunchConfiguration('pose_topic'),

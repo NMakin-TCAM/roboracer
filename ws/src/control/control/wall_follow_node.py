@@ -69,7 +69,8 @@ class WallFollower(Node):
         self.max_range = p('max_range', 5.0).value                # beyond this a side counts as "no wall"
         self.track_width = p('track_width', 1.2).value            # m, used when only one wall is visible
         self.corner_slowdown = p('corner_slowdown', 0.5).value    # fraction of speed shed at full steering
-        self.max_steer = p('max_steering_angle', 0.524).value     # rad, steering is clipped to this
+        self.max_steer = p('max_steering_angle', 0.524).value     # rad, steering is clipped to this; default mirrors
+                                                                  # config/vehicle.yaml, which wall_follow.launch.py loads
         self.laps = p('laps', 0).value                            # stop after this many laps, 0 = never
         pose_topic = p('pose_topic', '/tracked_pose').value       # for lap counting only
         self.debug = p('debug', False).value                      # log wall distances and steering

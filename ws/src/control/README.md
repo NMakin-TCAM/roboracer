@@ -98,7 +98,7 @@ ros2 launch control wall_follow.launch.py speed:=1.0 debug:=true     # on its ow
 | `max_range` | `5.0` | m, a side with no return within this has no wall |
 | `track_width` | `1.2` | m, holds half of it from the wall when only one wall is visible |
 | `corner_slowdown` | `0.5` | fraction of `speed` shed at full steering |
-| `max_steering_angle` | `0.524` | rad, steering is clipped to this |
+| `max_steering_angle` | `0.524` | rad, steering is clipped to this; `wall_follow.launch.py` loads it from `config/vehicle.yaml` |
 | `laps` | `0` | stop after this many laps, 0 = never |
 | `lap_leave_radius`, `lap_return_radius`, `lap_min_distance` | `3.0`, `1.5`, `10.0` | m: a lap is leaving the start by the first, coming back within the second, after driving at least the third |
 | `debug` | `false` | log wall distances, steering and speed |
