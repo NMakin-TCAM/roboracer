@@ -1,9 +1,17 @@
+import os
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import rclpy
+import yaml
 from rclpy.parameter import Parameter
+from sensor_msgs.msg import LaserScan
 
 from control.follow_the_gap_node import ReactiveFollowGap
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VEHICLE = os.path.join(HERE, '..', 'config', 'vehicle.yaml')
 
 
 @pytest.fixture
@@ -75,3 +83,68 @@ def test_max_gap(make_node):
         ranges = tests[i]
         result = node.find_max_gap(ranges)
         np.testing.assert_allclose(result, ans[i])
+
+def make_scan(ranges):
+    scan = LaserScan()
+    scan.angle_min = -2.35619
+    scan.angle_max = 2.35619
+    scan.angle_increment = 0.004363323
+    scan.range_min = 0.06
+    scan.range_max = 10.0
+    scan.ranges = [float(r) for r in ranges]
+    return scan
+
+
+def test_callback_clips_steering(make_node):
+    node = make_node()
+    msgs = []
+    node.drive_pub = SimpleNamespace(publish=msgs.append)
+    ranges = np.full(1081, 2.5)
+    ranges[0] = 2.4      # closest point, far right
+    ranges[700:] = 5.0   # only free space is far left (from 40 deg), past the steering lock
+
+    node.lidar_callback(make_scan(ranges))
+
+    proc = node.lidar_processor.process(make_scan(ranges))
+    start, end = node.find_max_gap(proc)
+    assert node.get_angle(make_scan(ranges), node.find_best_point(start, end, proc)) > 0.524
+    assert msgs[0].drive.speed == node.SPEED
+    assert msgs[0].drive.steering_angle == pytest.approx(0.524)
+
+
+def test_best_point_is_middle_of_capped_run(make_node):
+    node = make_node()
+    ranges = np.array([1., 5., 5., 5., 5., 5., 2.])   # max_range cap: a run of equal farthest beams
+
+    assert node.find_best_point(0, 6, ranges) == 3   # argmax alone gives 1, the run's edge
+
+
+def test_callback_ignores_gaps_outside_fov(make_node):
+    node = make_node()
+    msgs = []
+    node.drive_pub = SimpleNamespace(publish=msgs.append)
+    ranges = np.full(1081, 1.0)
+    ranges[1000] = 0.9        # closest point behind on the left
+    ranges[:150] = 5.0        # farthest free space: behind on the right, past -90 deg
+    ranges[600:680] = 3.0     # nearer free space ahead on the left
+
+    node.lidar_callback(make_scan(ranges))
+
+    assert msgs[0].drive.steering_angle > 0
+
+
+def test_callback_stops_on_all_nan_scan(make_node):
+    node = make_node()
+    msgs = []
+    node.drive_pub = SimpleNamespace(publish=msgs.append)
+
+    node.lidar_callback(make_scan(np.full(1081, np.nan)))
+
+    assert msgs[0].drive.speed == 0.0
+    assert msgs[0].drive.steering_angle == 0.0
+
+
+def test_max_steering_angle_default_matches_vehicle_yaml(make_node):
+    with open(VEHICLE) as f:
+        lock = yaml.safe_load(f)['/**']['ros__parameters']['max_steering_angle']
+    assert make_node().MAX_STEERING_ANGLE == pytest.approx(lock)

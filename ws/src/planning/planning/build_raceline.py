@@ -52,7 +52,7 @@ def main(argv=None):
     has_traj = os.path.isfile(traj_csv)
     t0 = time.monotonic()
     # never leave stale outputs next to a failed run
-    for f in ('centerline.csv', 'raceline.csv'):
+    for f in ('centerline.csv', 'raceline.csv', 'preview.png'):
         if os.path.exists(os.path.join(d, f)):
             os.remove(os.path.join(d, f))
 

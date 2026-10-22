@@ -11,7 +11,7 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'config'), glob('config/*.lua') + glob('config/*.yaml') ),
+        (os.path.join('share', package_name, 'config'), glob('config/*.lua') + glob('config/*.yaml')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -20,11 +20,13 @@ setup(
     maintainer_email='todo@todo.todo',
     description='Cartographer mapping and localization, and saving maps to tracks/<name>/.',
     license='TODO: License declaration',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'save_map = perception.save_map:main',
             'map_origin = perception.map_origin:main',
             'corrector = perception.corrector:main',
+            'localization_gate = perception.localization_gate:main',
         ],
     },
 )

@@ -26,23 +26,17 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-
-tracks=${TRACKS_DIR:-$HOME/ws/tracks}
-source /opt/ros/humble/setup.bash
-source "$HOME/ws/install/setup.bash"
+source "$(dirname "$0")/common.sh"
 
 if [ -e "$tracks/$name/map.pbstream" ]; then
     echo "$tracks/$name already has a map; pick another name or delete it" >&2
     exit 1
 fi
-
-# localization assumes the race starts where mapping started: the sim reset pose
-reset_sim_car() {
-    if ros2 topic info /autodrive/reset_command 2>/dev/null | grep -q 'Subscription count: [1-9]'; then
-        ros2 topic pub --times 3 -r 10 /autodrive/reset_command std_msgs/msg/Bool '{data: true}' >/dev/null
-        sleep 1
-    fi
-}
+# the Enter prompts read the terminal: without one, `read` fails and the mapping run is lost
+if ! { : </dev/tty; } 2>/dev/null; then
+    echo "map_track.sh needs a terminal (run it in an interactive shell, e.g. docker compose exec ros bash)" >&2
+    exit 1
+fi
 
 # stop a background launch started under job control: SIGINT to its process group, then SIGTERM
 stop_group() {
@@ -65,8 +59,11 @@ set +m
 follower=
 trap 'stop_group "$follower"; stop_group "$mapping"' EXIT
 
-sleep 3
-kill -0 "$mapping" 2>/dev/null || { echo "mapping failed to start, see $log" >&2; exit 1; }
+# ros2 launch stays alive when cartographer_node dies, so check the node's process (not
+# `ros2 node list`, which keeps a dead node listed until its DDS lease runs out)
+cartographer_up() { pgrep -g "$mapping" -f '^[^ ]*cartographer_ros/cartographer_node( |$)' >/dev/null; }
+sleep 3   # a node that crashes on its config dies within a second or two
+cartographer_up || { echo "Cartographer failed to start, see $log" >&2; exit 1; }
 echo "Mapping '$name' (log: $log)."
 
 if $wall_follow; then
@@ -79,10 +76,8 @@ if $wall_follow; then
     echo "Wall following $laps lap(s) (log: $follow_log). Press Enter to stop early and save the map."
     shown=0
     while kill -0 "$follower" 2>/dev/null; do
-        if read -r -t 1 _; then
+        if read -r -t 1 _ </dev/tty; then
             break
-        elif [ $? -le 128 ]; then
-            sleep 1             # stdin closed: wait for the laps
         fi
         done_laps=$(grep -c 'Lap [0-9]*/[0-9]* complete' "$follow_log" || true)
         if [ "$done_laps" -gt "$shown" ]; then
@@ -96,14 +91,20 @@ if $wall_follow; then
     follower=
     if $finished && [ "$laps" -gt 0 ] && [ "$shown" -lt "$laps" ]; then
         echo "The wall follower stopped after $shown of $laps lap(s), see $follow_log" >&2
-        read -rp "Press Enter to save the map anyway (Ctrl-C to abort)... "
+        read -rp "Press Enter to save the map anyway (Ctrl-C to abort)... " </dev/tty
     fi
 else
     echo "Drive 1-2 clean laps in another terminal: ros2 run autodrive_bridge teleop_keyboard"
-    read -rp "Stop the car, then press Enter to save the map... "
+    read -rp "Stop the car, then press Enter to save the map... " </dev/tty
 fi
 
-ros2 run perception save_map "$name"
+# keep mapping running on a failed save (the session is not on disk yet); save_map can be rerun
+until ros2 run perception save_map "$name"; do
+    cartographer_up || echo "cartographer_node is not running (see $log): the map cannot be saved" >&2
+    read -rp "save_map failed. Enter to retry, q + Enter to quit without a map... " ans </dev/tty
+    # a late failure may have written map.pbstream already, which blocks this name next time
+    [ "$ans" != q ] || { echo "no map saved; delete $tracks/$name before reusing the name" >&2; exit 1; }
+done
 stop_group "$mapping"
 trap - EXIT
 

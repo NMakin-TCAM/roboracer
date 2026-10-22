@@ -3,7 +3,7 @@
 <package format="3">
   <name>perception</name>
   <version>0.0.0</version>
-  <description>Cartographer mapping and localization, and saving maps to tracks/&lt;name&gt;/.</description>
+  <description>Cartographer mapping and localization, saving maps to tracks/&lt;name&gt;/, and an experimental IMU EKF velocity estimate.</description>
   <maintainer email="todo@todo.todo">SIGRobotics</maintainer>
   <license>TODO: License declaration</license>
 
@@ -12,9 +12,16 @@
   <exec_depend>rclpy</exec_depend>
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>cartographer_ros_msgs</exec_depend>
+  <exec_depend>robot_localization</exec_depend>   <!-- ekf.launch.py -->
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

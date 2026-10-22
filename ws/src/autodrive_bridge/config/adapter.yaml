@@ -1,16 +1,20 @@
-# AutoDRIVE RoboRacer (2026-iros practice build), measured 2026-10-04 (see adapter.py docstring).
+# AutoDRIVE RoboRacer (2026-iros practice build), measured 2026-10-04.
+# Parameters not listed here use the defaults in adapter.py / wheel_odom.py.
+# max_steering_angle and wheelbase come from control/config/vehicle.yaml.
 adapter:
   ros__parameters:
     vehicle_ns: /autodrive/roboracer_1
     odom_topic: /odom           # measured speed for the throttle loop (wheel_odom)
-    max_steering_angle: 0.524   # rad at steering_command = 1
     laser_x: 0.2733             # rear axle -> lidar
-    speed_kff: 0.04             # throttle per m/s; sim settles at ~25 m/s per unit throttle
+    speed_kff: 0.04             # throttle per m/s; the throttle is motor torque, settling at ~25 m/s per unit
     speed_kp: 0.006
+    speed_kp_brake: 0.1         # kp when faster than /drive: 8 -> 3 m/s gives throttle -0.38 (brakes); not yet tuned in sim
     speed_ki: 0.006
     speed_i_max: 1.0
     max_throttle: 1.0
-    cmd_timeout: 0.5
+    max_acceleration: 2.5       # m/s^2 ramp on the /drive speed (ForzaETH f1tenth_system's value); traction ~5.5
+    max_deceleration: 6.9       # m/s^2 = racecar.ini mue 0.7 * g: does not limit the planned braking at speed_scale <= 1
+    cmd_timeout: 0.5            # s; /drive gap that restarts the integral and the speed ramp from the measured speed (fast_bridge has its own, also 0.5 s, that stops the car)
     auto_unstick: false
 
 wheel_odom:
@@ -18,7 +22,5 @@ wheel_odom:
     vehicle_ns: /autodrive/roboracer_1
     wheel_radius: 0.0585        # m; calibrated 2026-10-11: /odom speed matches /ground_truth/odom
     speed_window: 0.1           # s; speed is averaged over this window
-    wheelbase: 0.324             # rear axle -> front axle
-    max_steering_angle: 0.524   # keep equal to the adapter's
     publish_tf: true            # TF odom -> base_link, as vesc_to_odom does; Cartographer adds map -> odom
     use_imu_yaw_rate: true      # gyro yaw rate; the steering model under-reads turns by ~45%

@@ -9,12 +9,14 @@ psi is TUM's heading convention: 0 = +y (north), counter-clockwise positive, in 
 i.e. psi = yaw - pi/2 with yaw the usual ROS angle from +x.
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 
 import numpy as np
+from scipy import ndimage
 
 HEADER = 's_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2'
 TUM_PYTHON = os.environ.get('TUM_PYTHON', '/opt/tum_venv/bin/python')
@@ -42,6 +44,7 @@ def run_mintime(centerline_csv, ini_path, python=TUM_PYTHON):
         log = proc.stdout
         # IPOPT's iteration table is long; keep the summary lines
         for line in log.splitlines():
+            line = re.sub(r'\x1b\[[0-9;]*m', '', line)   # TUM colours its ERROR / WARNING lines
             if line.startswith(('INFO', 'WARNING', 'EXIT', 'Spline', 'Number of Iterations',
                                 'Total seconds', 'ERROR')):
                 print('  [tum] ' + line)
@@ -52,7 +55,12 @@ def run_mintime(centerline_csv, ini_path, python=TUM_PYTHON):
             else:
                 why = f'optimizer failed (exit code {proc.returncode})'
             raise OptimizationError(f'mintime {why}. Last output:\n{tail}')
-        traj = np.loadtxt(out, comments='#', delimiter=';', ndmin=2)
+        try:
+            traj = np.loadtxt(out, comments='#', delimiter=';', ndmin=2)
+        except ValueError as e:
+            raise OptimizationError(f'mintime output is malformed: {e}')
+    if traj.shape[1] != 7:
+        raise OptimizationError(f'mintime output has {traj.shape[1]} columns, expected 7 ({HEADER})')
     return traj, dt
 
 
@@ -72,7 +80,6 @@ def lap_time(traj):
 
 def check_inside(traj, m, mask, half_width):
     """Smallest wall clearance of the raceline (centre to wall, m). Fails if the centre leaves the track."""
-    from scipy import ndimage
     dist = ndimage.distance_transform_edt(mask) * m.res - 0.5 * m.res
     rc = m.to_pixel(traj[:, 1:3])
     d = ndimage.map_coordinates(dist, rc.T, order=1, mode='constant', cval=-1.0)

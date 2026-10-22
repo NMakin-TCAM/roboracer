@@ -3,21 +3,22 @@
 <package format="3">
   <name>control</name>
   <version>0.0.0</version>
-  <description>f1tenth control algorithms</description>
+  <description>Pure pursuit on the generated raceline, follow the gap, and the race launch file.</description>
   <maintainer email="zzang@seas.upenn.edu">zzangupenn</maintainer>
   <maintainer email="billyzheng.bz@gmail.com">Hongrui Zheng</maintainer>
   <license>MIT</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>ackermann_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>ackermann_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ros2launch</exec_depend>
-  <exec_depend>perception</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>perception</exec_depend>   <!-- perception.tracks, localization.launch.py -->
 
   <test_depend>python3-pytest</test_depend>
+  <test_depend>python3-yaml</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

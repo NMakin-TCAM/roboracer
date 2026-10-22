@@ -1,0 +1,7 @@
+# AutoDRIVE RoboRacer / F1TENTH car geometry: the one place these are set (docs/pipeline.md).
+# Loaded by every node that needs them (pure_pursuit.launch.py, autodrive_launch.py; teleop_keyboard
+# reads this file). planning/config/racecar.ini mirrors them; test_vehicle_params.py checks it does.
+/**:
+  ros__parameters:
+    max_steering_angle: 0.524   # rad, steering lock (sim: steering_command 1.0)
+    wheelbase: 0.33             # m, rear axle (base_link) -> front axle

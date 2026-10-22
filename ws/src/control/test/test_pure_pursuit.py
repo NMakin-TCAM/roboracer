@@ -5,6 +5,7 @@ Needs a sourced ROS 2 environment with the control package built:
 """
 import math
 import os
+import random
 import signal
 import subprocess
 import tempfile
@@ -12,13 +13,16 @@ import time
 
 import numpy as np
 import pytest
+import yaml
 
 rclpy = pytest.importorskip('rclpy')
 from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 
 SPEED_SCALE = 0.5
-MAX_STEER = 0.524
+DOMAIN = random.randint(1, 101)  # not 0: the live stack (bridge, sim car) runs there
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'vehicle.yaml')) as f:
+    MAX_STEER = yaml.safe_load(f)['/**']['ros__parameters']['max_steering_angle']
 HEADER = '# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2'
 
 
@@ -36,6 +40,19 @@ def circle(radius, n):
     return np.column_stack([radius * np.cos(t), radius * np.sin(t)]), t + np.pi / 2
 
 
+def hairpin(length, gap, step):
+    """Counter-clockwise loop: +x along y = 0, a half turn, -x back along y = gap."""
+    x = np.arange(0.0, length, step)
+    t = np.linspace(-np.pi / 2, np.pi / 2, int(np.pi * gap / 2 / step), endpoint=False)
+    r = gap / 2
+    xy = np.concatenate([np.column_stack([x, np.zeros_like(x)]),
+                         np.column_stack([length + r * np.cos(t), r + r * np.sin(t)]),
+                         np.column_stack([length - x, np.full_like(x, gap)]),
+                         np.column_stack([-r * np.cos(t), r - r * np.sin(t)])])
+    seg = np.roll(xy, -1, axis=0) - xy
+    return xy, np.arctan2(seg[:, 1], seg[:, 0])
+
+
 @pytest.fixture(scope='module')
 def tracks_dir():
     with tempfile.TemporaryDirectory() as d:
@@ -45,12 +62,14 @@ def tracks_dir():
         write_raceline(d, 'straight', np.column_stack([x, np.zeros_like(x)]), np.zeros_like(x), 0.0, 3.0)
         xy, psi = circle(0.2, 10)  # every waypoint within the lookahead distance
         write_raceline(d, 'tiny', xy, psi, 5.0, 1.0)
+        xy, psi = hairpin(10.0, 1.0, 0.1)
+        write_raceline(d, 'hairpin', xy, psi, 0.0, 3.0)
         yield d
 
 
 @pytest.fixture(scope='module')
 def ros():
-    rclpy.init()
+    rclpy.init(domain_id=DOMAIN)
     node = rclpy.create_node('pure_pursuit_test')
     yield node
     node.destroy_node()
@@ -58,7 +77,7 @@ def ros():
 
 
 def launch(tracks_dir, track):
-    env = dict(os.environ, TRACKS_DIR=tracks_dir)
+    env = dict(os.environ, TRACKS_DIR=tracks_dir, ROS_DOMAIN_ID=str(DOMAIN))
     return subprocess.Popen(
         ['ros2', 'launch', 'control', 'pure_pursuit.launch.py', f'track:={track}',
          f'speed_scale:={SPEED_SCALE}'],
@@ -90,14 +109,16 @@ class Driver:
             assert time.time() < end, 'pure_pursuit_node did not subscribe to /tracked_pose'
             rclpy.spin_once(self.node, timeout_sec=0.1)
 
-    def drive(self, x, y, yaw, n=10):
-        """Publish the same pose n times (the lookahead adapts after the first) and return the last /drive."""
+    def drive(self, x, y, yaw, n=10, frame='map', age=0.0):
+        """Publish the same pose n times, stamped age s ago, and return the last /drive."""
         self.drives.clear()
         msg = PoseStamped()
-        msg.header.frame_id = 'map'
+        msg.header.frame_id = frame
         msg.pose.position.x, msg.pose.position.y = x, y
         msg.pose.orientation.z, msg.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         for _ in range(n):
+            t = self.node.get_clock().now().nanoseconds * 1e-9 - age
+            msg.header.stamp.sec, msg.header.stamp.nanosec = int(t), int((t % 1) * 1e9)
             self.pub.publish(msg)
             end = time.time() + 0.1
             while time.time() < end:
@@ -161,6 +182,27 @@ def test_tiny_raceline_within_lookahead(run):
     driver, _ = run('tiny')
     d = driver.drive(0.2, 0.0, math.pi / 2)
     assert d.speed == pytest.approx(1.0 * SPEED_SCALE)
+    # inside the loop: the target is the farthest point, to the left, not the point just behind (right)
+    assert driver.drive(0.1, 0.0, math.pi / 2).steering_angle > 0.0
+
+
+def test_hairpin_keeps_its_leg(run):
+    # 0.55 m off the +x leg, 0.45 m from the -x leg: steer back to its own leg, not onto the other
+    driver, _ = run('hairpin')
+    assert driver.drive(5.0, 0.55, 0.0).steering_angle < 0.0  # first pose: heading picks the leg
+    driver.drive(5.0, 0.0, 0.0)
+    assert driver.drive(5.1, 0.55, 0.0).steering_angle < 0.0  # drifted off: stays on the leg
+
+
+@pytest.mark.parametrize('bad', [dict(age=2.0), dict(frame='world'), dict(y=10.0)],
+                         ids=['stale', 'world_frame', 'off_line'])
+def test_bad_pose_stops(run, bad):
+    driver, _ = run('straight')
+    assert driver.drive(5.0, 0.0, 0.0).speed > 0.0
+    y = bad.pop('y', 0.0)
+    stopped = driver.drive(5.0, y, 0.0, **bad)
+    assert stopped.speed == 0.0 and stopped.steering_angle == 0.0
+    assert driver.drive(5.0, 0.0, 0.0).speed == pytest.approx(3.0 * SPEED_SCALE)  # resumes
 
 
 def test_missing_raceline(tracks_dir):

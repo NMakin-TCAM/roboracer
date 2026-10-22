@@ -1,9 +1,10 @@
 """Race a mapped track: Cartographer localization + pure pursuit on its raceline.
 
-    ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/tracked_pose]
+    ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
 
 Needs tracks/<name>/map.pbstream and raceline.csv (ws/scripts/map_track.sh <name>), and the car at
-the pose mapping started from (ws/scripts/race.sh resets the sim car there).
+the pose mapping started from (ws/scripts/race.sh resets the sim car there). /localized_pose is
+/tracked_pose once Cartographer has localized (localization_gate), so the car waits for that.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -19,8 +20,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('track', description='track name under ws/tracks/'),
-        DeclareLaunchArgument('pose_topic', default_value='/tracked_pose',
-                              description='/ground_truth/pose only if the raceline is in the sim world frame'),
+        DeclareLaunchArgument('pose_topic', default_value='/localized_pose',
+                              description="a localizer's PoseStamped in the map frame"),
         DeclareLaunchArgument('speed_scale', default_value='0.5', description='drive speed = raceline vx * speed_scale'),
         DeclareLaunchArgument('max_speed', default_value='0.0', description='cap on the drive speed [m/s], 0 = no cap'),
         include('perception', 'localization.launch.py', ['track']),

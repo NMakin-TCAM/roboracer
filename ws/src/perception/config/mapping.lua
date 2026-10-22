@@ -1,5 +1,6 @@
 -- Cartographer 2D mapping for the RoboRacer (sim: autodrive_bridge, car: f1tenth_system).
--- Inputs: /scan (frame laser), /odom + TF odom -> base_link. Output: TF map -> odom, /tracked_pose.
+-- Inputs: /scan (frame laser), /odom + TF odom -> base_link, imu (remapped to /sensors/imu/raw, frame
+-- imu at base_link). Output: TF map -> odom, /tracked_pose.
 -- Scan matching tuning from the first AutoDRIVE Cartographer setup (PR #3).
 include "map_builder.lua"
 include "trajectory_builder.lua"
@@ -23,7 +24,7 @@ options = {
   num_point_clouds = 0,
   lookup_transform_timeout_sec = 0.2,
   submap_publish_period_sec = 0.3,
-  pose_publish_period_sec = 5e-3,
+  pose_publish_period_sec = 1e-2,   -- 100 Hz /tracked_pose: odometry and IMU, its newest inputs, arrive at ~100 Hz
   trajectory_publish_period_sec = 30e-3,
   rangefinder_sampling_ratio = 1.,
   odometry_sampling_ratio = 1.,
@@ -34,12 +35,12 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
--- Lidar range_max is 10 m; returns beyond max_range are inserted as free space up to
--- missing_data_ray_length, so "no return" readings at range_max do not become walls.
+-- Lidar range_max is 10 m. Returns between max_range and range_max are inserted as free space up to
+-- missing_data_ray_length. No-return beams arrive as inf and are dropped (no free space carved).
 TRAJECTORY_BUILDER_2D.min_range = 0.15
 TRAJECTORY_BUILDER_2D.max_range = 9.5
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 5.0
-TRAJECTORY_BUILDER_2D.use_imu_data = false
+TRAJECTORY_BUILDER_2D.use_imu_data = true   -- gyro + gravity; the IMU frame must coincide with base_link
 
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.15

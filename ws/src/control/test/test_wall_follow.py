@@ -12,6 +12,7 @@ import time
 
 import numpy as np
 import pytest
+import yaml
 
 rclpy = pytest.importorskip('rclpy')
 from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
@@ -21,7 +22,8 @@ from sensor_msgs.msg import LaserScan  # noqa: E402
 from control.wall_follow_node import LapCounter  # noqa: E402
 
 SPEED = 1.0
-MAX_STEER = 0.524
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config', 'vehicle.yaml')) as f:
+    MAX_STEER = yaml.safe_load(f)['/**']['ros__parameters']['max_steering_angle']
 
 
 def circle_lap(radius=4.0, n=200):

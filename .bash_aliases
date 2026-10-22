@@ -1,13 +1,16 @@
 # ==============================================================================
 # ROS 2 Core & Workspace Management
 # ==============================================================================
+alias c="clear"
+
 # Quickly source ROS 2 Humble base and your local workspace
 alias sb="source /opt/ros/humble/setup.bash && source ~/ws/install/setup.bash"
 
 # Build options using colcon
 alias cb="cd ~/ws && colcon build --symlink-install"
 alias cbp="cd ~/ws && colcon build --symlink-install --packages-select"
-alias cbclean="cd ~/ws && rm -rf build/ install/ log/ && cb"
+# cbclean removes only colcon's own logs: log/ also holds map_track logs and analysis scripts
+alias cbclean="cd ~/ws && rm -rf build/ install/ log/build_* log/test_* log/latest* && cb"
 
 # ==============================================================================
 # AutoDRIVE Sim & Race Pipeline (docs/pipeline.md)
@@ -24,11 +27,12 @@ alias map-track="~/ws/scripts/map_track.sh"
 # Race a mapped track: race <name> [speed_scale:=0.5]
 alias race="~/ws/scripts/race.sh"
 
+# No-map fallback: follow the gap on /scan, no map or localization: ftg [speed:=1.0]
+# (stop it before race: both publish /drive)
+alias ftg="ros2 launch control follow_the_gap.launch.py"
+
 # Re-plan the raceline of an existing map: plan <name>
 alias plan="ros2 run planning build_raceline"
-
-# Open RViz2 configured with standard ROS 2 topic visualization
-alias rviz="rviz2"
 
 # Stop car instantly (publish 0 m/s speed and 0 rad steer)
 alias stop-car="ros2 topic pub -1 /drive ackermann_msgs/msg/AckermannDriveStamped '{header: {frame_id: \"base_link\"}, drive: {speed: 0.0, steering_angle: 0.0}}'"

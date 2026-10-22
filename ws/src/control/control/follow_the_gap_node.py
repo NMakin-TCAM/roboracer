@@ -36,6 +36,10 @@ class ReactiveFollowGap(Node):
         self.MAX_RANGE, self.DISPARITY_THRESHOLD, self.ALPHA, self.SPEED, self.CAR_WIDTH = (
             p.get_parameter_value().double_value for p in params
         )
+        # Steering lock (rad); default mirrors config/vehicle.yaml, which follow_the_gap.launch.py loads
+        self.MAX_STEERING_ANGLE = self.declare_parameter('max_steering_angle', 0.524).value
+        # Gaps are searched only within +-fov (rad) of straight ahead, not beside or behind the car
+        self.FOV = self.declare_parameter('fov', np.pi / 2).value
 
         self.lidar_processor = LidarProcessor(
             max_range=self.MAX_RANGE,
@@ -89,8 +93,14 @@ class ReactiveFollowGap(Node):
         # choose center of gap
         # best_idx = (start_i + end_i) / 2
 
-        # choose farthest distance within gap
-        best_idx = start_i + np.argmax(ranges[start_i:end_i + 1])
+        # choose farthest distance within gap: the middle of the run of farthest beams, since
+        # ranges are capped at max_range and argmax alone returns the run's first (rightmost) beam
+        gap = ranges[start_i:end_i + 1]
+        far = np.flatnonzero(gap == gap.max())
+        run_end = far[0]
+        while run_end + 1 < len(gap) and gap[run_end + 1] == gap[far[0]]:
+            run_end += 1
+        best_idx = start_i + (far[0] + run_end) // 2
 
         # TODO: idea - try to stay in midpoint
 
@@ -100,6 +110,8 @@ class ReactiveFollowGap(Node):
         """ Process each LiDAR scan as per the Follow Gap algorithm & publish an AckermannDriveStamped Message
         """
         proc_ranges = self.lidar_processor.process(data)
+        angles = data.angle_min + np.arange(len(proc_ranges)) * data.angle_increment
+        proc_ranges[np.abs(angles) > self.FOV] = 0.
 
         if len(proc_ranges) == 0:
             self.get_logger().warning(f"No ranges found from lidar scan")
@@ -118,7 +130,7 @@ class ReactiveFollowGap(Node):
         # Find the best point in the gap 
         best_idx = self.find_best_point(max_start, max_end, proc_ranges)
         
-        steering_angle = self.get_angle(data, best_idx)
+        steering_angle = float(np.clip(self.get_angle(data, best_idx), -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE))
 
         # Publish Drive message
         drive_msg = AckermannDriveStamped()

@@ -39,9 +39,11 @@ class LidarProcessor:
 
         np.nan_to_num(proc_ranges, copy=False)
         np.clip(proc_ranges, 0, self.max_range, out=proc_ranges)
+        invalid = proc_ranges == 0  # NaN / -inf: no reading, keep it out of the smoothing
 
         if self.ranges_window is not None and self.ranges_window.shape == proc_ranges.shape:
             proc_ranges = self.alpha * proc_ranges + (1  - self.alpha) * self.ranges_window
+        proc_ranges[invalid] = 0.
 
         self.ranges_window = proc_ranges.copy()
 
@@ -52,6 +54,8 @@ class LidarProcessor:
         i = closest_idx - 1
         lower_disp_idx = closest_idx
         while i >= 0:
+            if ranges[i] == 0:  # no reading: stop the walk, a bubble edge needs a real range
+                break
             # print(np.degrees(data.angle_min + i * data.angle_increment), ranges[i], ranges[i + 1])
             if ranges[i] - ranges[i + 1] > self.disparity_threshold or ranges[i] < self.avoid_threshold:
                 lower_disp_idx = i + 1
@@ -63,6 +67,8 @@ class LidarProcessor:
         upper_disp_idx = closest_idx
         i = closest_idx + 1
         while i < len(ranges):
+            if ranges[i] == 0:  # no reading: stop the walk, a bubble edge needs a real range
+                break
             # print(np.degrees(data.angle_min + i * data.angle_increment), ranges[i], ranges[i - 1])
             if ranges[i] - ranges[i - 1] > self.disparity_threshold or ranges[i] < self.avoid_threshold:
                 upper_disp_idx = i - 1
