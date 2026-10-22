@@ -5,7 +5,8 @@ every map and raceline is generated on the day, into `ws/tracks/<name>/` (git-ig
 
 ```
 new track ─► Cartographer mapping ─► centerline ─► TUM mintime raceline ─► localization + pure pursuit
-             (keyboard teleop lap)
+             (keyboard teleop or
+              wall follower lap)
 ```
 
 ## Commands
@@ -15,13 +16,14 @@ Inside the container (`docker compose exec ros bash`, working directory `~/ws`),
 ```bash
 ros2 launch autodrive_bridge autodrive_launch.py     # shell 1: bridge (always running)          alias: sim
 scripts/map_track.sh <name>                         # shell 2: map -> save -> centerline -> mintime   map-track
+scripts/map_track.sh <name> --wall-follow           #   ... or let the wall follower drive 2 laps (--laps N)
 ros2 run autodrive_bridge teleop_keyboard           # shell 3: drive the mapping lap(s)            kb
 scripts/race.sh <name> [speed_scale:=0.5]           # localization + pure pursuit                  race
 ros2 launch control follow_the_gap.launch.py [speed:=1.0]   # no-map fallback, instead of race.sh   ftg
 ```
 
 `map_track.sh` resets the sim car, starts Cartographer mapping, waits for you to finish driving and
-press Enter, runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
+press Enter (with `--wall-follow`: starts `control wall_follow.launch.py` and waits for its laps), runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
 It needs a terminal (it refuses to start without one) and exits early if `cartographer_node` dies on startup.
 If `save_map` fails, mapping keeps running and it asks to retry (Enter) or quit (`q`, the map is lost; delete `tracks/<name>` before reusing the name).
 `race.sh` resets the sim car (localization starts at the map origin = where mapping started) and
@@ -43,7 +45,7 @@ Check with `ros2 node list` and kill leftovers before the next launch.
 | `autodrive_bridge` | `fast_bridge`, `adapter`, `wheel_odom`, `teleop_keyboard`; `autodrive_launch.py`. Sim only: replaced by f1tenth_system on the car. |
 | `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
 | `planning` | `build_raceline` = `centerline` extraction + TUM `mintime` optimization |
-| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`. `follow_the_gap_node` (`follow_the_gap.launch.py`): reactive `/scan` -> `/drive`, needs no map, the fallback |
+| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`. `follow_the_gap_node` (`follow_the_gap.launch.py`): reactive `/scan` -> `/drive`, needs no map, the fallback. `wall_follow_node` (`wall_follow.launch.py`): drives the mapping laps (`map_track.sh --wall-follow`) |
 
 ## Interfaces
 
@@ -52,7 +54,7 @@ Check with `ros2 node list` and kill leftovers before the next launch.
 | `/scan` (frame `laser`) | `sensor_msgs/LaserScan` | adapter (sim) / urg_node (car) |
 | `/odom`, TF `odom -> base_link` | `nav_msgs/Odometry` | wheel_odom (sim) / vesc_to_odom (car) |
 | `/sensors/imu/raw` (frame `imu`) | `sensor_msgs/Imu`, accel includes gravity; Cartographer uses it | adapter (sim) / vesc (car) |
-| `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, pure_pursuit, follow_the_gap |
+| `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, wall_follow (mapping), pure_pursuit, follow_the_gap |
 | TF `map -> odom` | | Cartographer (mapping and localization) |
 | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
 | `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate: `/tracked_pose` relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
