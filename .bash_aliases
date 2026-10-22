@@ -18,7 +18,7 @@ alias sim="ros2 launch autodrive_bridge autodrive_launch.py"
 # Keyboard teleop on /drive (W/S speed, A/D steer, X stop, R reset)
 alias kb="ros2 run autodrive_bridge teleop_keyboard"
 
-# Map a new track and plan its min-time raceline: map-track <name>
+# Map a new track and plan its min-time raceline: map-track <name> [--wall-follow [--laps N]]
 alias map-track="~/ws/scripts/map_track.sh"
 
 # Race a mapped track: race <name> [speed_scale:=0.5]

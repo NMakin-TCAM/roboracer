@@ -5,7 +5,8 @@ every map and raceline is generated on the day, into `ws/tracks/<name>/` (git-ig
 
 ```
 new track ─► Cartographer mapping ─► centerline ─► TUM mintime raceline ─► localization + pure pursuit
-             (keyboard teleop lap)
+             (keyboard teleop or
+              wall follower lap)
 ```
 
 ## Commands
@@ -15,12 +16,13 @@ Inside the container (`docker compose exec ros bash`, working directory `~/ws`),
 ```bash
 ros2 launch autodrive_bridge autodrive_launch.py     # shell 1: bridge (always running)          alias: sim
 scripts/map_track.sh <name>                         # shell 2: map -> save -> centerline -> mintime   map-track
+scripts/map_track.sh <name> --wall-follow           #   ... or let the wall follower drive 2 laps (--laps N)
 ros2 run autodrive_bridge teleop_keyboard           # shell 3: drive the mapping lap(s)            kb
 scripts/race.sh <name> [speed_scale:=0.5]           # localization + pure pursuit                  race
 ```
 
 `map_track.sh` resets the sim car, starts Cartographer mapping, waits for you to finish driving and
-press Enter, runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
+press Enter (with `--wall-follow`: starts `control wall_follow.launch.py` and waits for its laps), runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
 `race.sh` resets the sim car (localization starts at the map origin = where mapping started) and
 launches `control race.launch.py` (perception `localization.launch.py` + control `pure_pursuit.launch.py`).
 
@@ -31,7 +33,7 @@ launches `control race.launch.py` (perception `localization.launch.py` + control
 | `autodrive_bridge` | `fast_bridge`, `adapter`, `wheel_odom`, `teleop_keyboard`; `autodrive_launch.py`. Sim only: replaced by f1tenth_system on the car. |
 | `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map` |
 | `planning` | `build_raceline` = `centerline` extraction + TUM `mintime` optimization |
-| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py` |
+| `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`; `wall_follow_node`, `wall_follow.launch.py` |
 
 ## Interfaces
 
@@ -40,7 +42,7 @@ launches `control race.launch.py` (perception `localization.launch.py` + control
 | `/scan` (frame `laser`) | `sensor_msgs/LaserScan` | adapter (sim) / urg_node (car) |
 | `/odom`, TF `odom -> base_link` | `nav_msgs/Odometry` | wheel_odom (sim) / vesc_to_odom (car) |
 | `/sensors/imu/raw` | `sensor_msgs/Imu` | adapter (sim) / vesc (car) |
-| `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, pure_pursuit |
+| `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, wall_follow (mapping), pure_pursuit |
 | TF `map -> odom` | | Cartographer (mapping and localization) |
 | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
 | `/ground_truth/pose`, TF `world -> ground_truth` | `geometry_msgs/PoseStamped`, frame `world` (sim) | adapter, debugging only |
