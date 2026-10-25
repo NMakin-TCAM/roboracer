@@ -1,6 +1,6 @@
 # control
 
-Pure pursuit on a generated raceline, and a wall follower for the mapping lap(s) (see below). `pure_pursuit_node` takes the car's pose in the `map` frame,
+Pure pursuit on a generated raceline, and two followers for the mapping lap(s): the wall follower (the default) and an experimental follow the gap with disparity extension (see below). `pure_pursuit_node` takes the car's pose in the `map` frame,
 finds the closest raceline waypoint, picks the first waypoint one lookahead ahead (lookahead =
 `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`]), steers on the arc
 through it and drives at the raceline speed scaled by `speed_scale`. The speed is taken at the target
@@ -15,19 +15,25 @@ gap within `fov` (default ±90°) of straight ahead in `/scan`, at a constant `s
 clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle.yaml`).
 `tools/lidar_plot.py` plots its scan processing live (WebAgg, not installed).
 
-`disparity_gap_node` is a follow the gap with disparity extension that drives the mapping lap(s) (see below).
+`disparity_gap_node` is a follow the gap with disparity extension that drives the mapping lap(s) (experimental, see below).
 
 ## Run
 
 ```bash
 ros2 launch control pure_pursuit.launch.py track:=<name>
 ros2 launch control pure_pursuit.launch.py track:=<name> speed_scale:=0.3
+ros2 launch control race.launch.py track:=<name> avoid:=true   # + obstacle avoidance
 ```
 
 Localization (Cartographer, `/tracked_pose`) must be running for the default pose topic.
 `race.launch.py` instead uses `/localized_pose` (localization_gate), so the car waits until
 Cartographer has localized (~2-3 s at the start and after each sim reset). The sim's `/ground_truth/pose` is in the sim `world` frame, not `map`
 (the offset is in `tracks/<name>/map_to_world.yaml`), so pure pursuit refuses it.
+
+With `avoid:=true`, pure pursuit steers on `/local_path` instead of the raceline: planning's
+`obstacle_spliner_node` (started by `race.launch.py avoid:=true`) publishes the raceline with its points
+shifted sideways around an obstacle the map did not have, one point per raceline point. Speeds stay the
+raceline's.
 
 ## Safety
 
@@ -36,7 +42,9 @@ warning (at most once a second), and driving resumes on the next good pose:
 
 - `header.frame_id` must be `map`;
 - the pose must be at most `max_pose_age` s old (an unstamped pose counts as stale);
-- the car must be within `max_offset` m of the raceline.
+- the car must be within `max_offset` m of the raceline (with `avoid`, of `/local_path`);
+- with `avoid`: a `/local_path` must have arrived, be at most `max_path_age` s old, have one pose per
+  raceline point in the `map` frame, and `/local_path/valid` must be true (a collision-free path exists).
 
 These are coarse. Cartographer extrapolates `/tracked_pose` (`use_pose_extrapolator` defaults to true;
 `pose_publish_period_sec` 1e-2), so its stamps stay fresh even when SLAM stalls: the age check only
@@ -50,6 +58,8 @@ poses stop arriving, `fast_bridge` stops the car after 0.5 s without `/drive`.
 |---|---|---|
 | `pose_topic` (`/tracked_pose`; race.launch.py: `/localized_pose`) | `geometry_msgs/PoseStamped` | subscribed, must be in the `map` frame |
 | `/drive` | `ackermann_msgs/AckermannDriveStamped` | published, one command per pose |
+| `/local_path` | `nav_msgs/Path` | subscribed with `avoid`, the path steered on |
+| `/local_path/valid` | `std_msgs/Bool` | subscribed with `avoid`, false = stop |
 
 ## Parameters
 
@@ -67,6 +77,8 @@ poses stop arriving, `fast_bridge` stops the car after 0.5 s without `/drive`.
 | `reacquire_distance` | `1.0` | m; farther than this from that point, the whole line is searched (points heading within 90 deg of the car) |
 | `max_pose_age` | `0.5` | s; an older pose gets a stop (same as `fast_bridge`'s `/drive` watchdog) |
 | `max_offset` | `3.0` | m; farther than this from the raceline, the pose is taken as bad and the car stops |
+| `avoid` | `false` | steer on `/local_path` (obstacle avoidance) instead of the raceline |
+| `max_path_age` | `0.5` | s; with `avoid`, an older `/local_path` gets a stop |
 | `wheelbase` | none | m, from `config/vehicle.yaml` (required) |
 | `max_steering_angle` | none | rad, steering is clipped to this; from `config/vehicle.yaml` (required) |
 
@@ -124,7 +136,7 @@ ros2 launch control disparity_gap.launch.py speed:=1.0              # on its own
 ```
 
 It never runs alongside `race.sh` or the other followers: they all publish `/drive`.
-It was tuned in the F1TENTH gym (Levine) and drives Porto in AutoDRIVE (2 laps at ~1 m/s, past an obstacle on the track).
+It was tuned in the F1TENTH gym (Levine) and drives Porto in AutoDRIVE (2 laps at ~1 m/s, past an obstacle at the side of the track; one dead ahead is untested).
 
 **Experimental: use `--wall-follow` for mapping.** Known issue: the gap follower takes the inside line through
 corners, so its mapping lap is ~13-15 % shorter than the centerline (Porto: 26.8 m vs 30.7 m; the wall follower
