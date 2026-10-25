@@ -16,7 +16,7 @@ raceline is generated into `ws/tracks/<name>/`.
 
 ```
 new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time ─► Cartographer localization
-             (keyboard or wall-follower laps)        raceline              + pure pursuit
+             (keyboard or wall-follower laps)        raceline              + pure pursuit (+ obstacle avoidance)
 ```
 
 > [!NOTE]
@@ -33,9 +33,9 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time 
 | **Simulator bridge** | `autodrive_bridge` | Socket.IO bridge to AutoDRIVE (`fast_bridge`), one sensor frame per sim frame; publishes `/scan`, `/sensors/imu/raw`, `/odom` (wheel odometry) and sim ground truth under the f1tenth_system names. A VESC stand-in (`adapter`) runs a speed loop on `/drive` with an acceleration ramp, as f1tenth_system does on the car. Detects sim resets and respawns, stops the car on them and announces them on `sim_reset`. Keyboard teleop. |
 | **Mapping** | `perception` | Cartographer 2D SLAM with LiDAR, wheel odometry and IMU. `save_map` waits for the final optimization and writes the pbstream, occupancy grid and the mapping lap's trajectory. |
 | **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. |
-| **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; a preview image of the result. |
-| **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. Follow the gap as a no-map fallback. A centring wall follower and a follow the gap with disparity extension, either of which drives the mapping laps by itself. |
-| **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 86 unit and integration tests. |
+| **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; a preview image of the result. Stationary-obstacle avoidance (`obstacle_spliner_node`): the raceline shifted sideways around obstacles the map did not have. |
+| **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. With `avoid:=true`, it follows the obstacle-avoiding path instead, and stops when there is no collision-free one. Follow the gap as a no-map fallback. A centring wall follower (the default) and an experimental follow the gap with disparity extension, either of which drives the mapping laps by itself. |
+| **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 124 unit and integration tests. |
 
 ## Repository layout
 
@@ -44,8 +44,8 @@ Dockerfile, docker-compose.yml   ROS 2 Humble environment (Linux, macOS or Windo
 .bash_aliases                    shortcuts inside the container (sim, kb, map-track, race, ftg, plan, ...)
 ws/src/autodrive_bridge/         AutoDRIVE <-> ROS 2 bridge, VESC stand-in, wheel odometry, teleop (sim only)
 ws/src/perception/               Cartographer configs and launches, save_map, localization_gate
-ws/src/planning/                 centerline extraction, TUM minimum-time raceline, racecar.ini
-ws/src/control/                  pure pursuit, follow the gap, wall follower, vehicle.yaml, race.launch.py
+ws/src/planning/                 centerline extraction, TUM minimum-time raceline, racecar.ini, obstacle spliner
+ws/src/control/                  pure pursuit, follow the gap, wall follower, disparity gap follower, vehicle.yaml, race.launch.py
 ws/scripts/                      map_track.sh, race.sh, common.sh
 ws/tracks/<name>/                generated per track (git-ignored)
 docs/pipeline.md                 interfaces, frames, track file formats and car parameters
@@ -85,8 +85,9 @@ In new container shells (`docker compose exec ros bash`), with the bridge runnin
 ```bash
 scripts/map_track.sh <name> --wall-follow    # map the track: the wall follower drives 2 laps (--laps N), then
                                              # the map is saved and the centerline and raceline are planned
-                                             # (--gap-follow: follow the gap with disparity extension drives them)
+                                             # (--gap-follow: follow the gap drives them; experimental, see ws/src/control/README.md)
 scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the saved map, pure pursuit on the raceline
+scripts/race.sh <name> avoid:=true           #   ... and pass obstacles the map did not have
 ```
 
 To drive the mapping laps by hand instead, run `scripts/map_track.sh <name>`, drive 1-2 clean laps with

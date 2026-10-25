@@ -172,6 +172,22 @@ def test_stops_on_all_nan_scan(make_node):
     assert msg.steering_angle == 0.0
 
 
+@pytest.mark.parametrize('bad', [np.nan, 0.0], ids=['nan', 'below_range_min'])
+def test_dropout_beams_do_not_block_the_road(make_node, bad):
+    # a straight corridor with a few invalid beams, one dead ahead: drive as if they weren't there
+    node = make_node(max_speed=5.0)
+    angles = ANGLE_MIN + np.arange(NUM_BEAMS) * ANGLE_INCREMENT
+    clean = cast_rays(corridor(1.0, -1.0), angles)
+    dropped = clean.copy()
+    dropped[[np.argmin(np.abs(angles)), 400, 700]] = bad
+
+    expected = drive(node, make_scan(clean))
+    msg = drive(node, make_scan(dropped))
+
+    assert msg.steering_angle == pytest.approx(expected.steering_angle, abs=0.02)
+    assert msg.speed == pytest.approx(expected.speed, rel=0.05)
+
+
 def test_steering_clipped_to_lock(make_node):
     node = make_node()
     # wall 0.5 m ahead, open only far to the left: the target is past the steering lock

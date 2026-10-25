@@ -14,6 +14,11 @@ reacquire_distance m away, the whole line is searched, among points heading with
 
 Safety: a pose not in the map frame, older than max_pose_age s, or more than max_offset m from the
 raceline gets a stop command (speed 0) instead; driving resumes on the next good pose.
+
+avoid: steer on /local_path (planning's obstacle_spliner_node: the raceline's points shifted sideways
+around an obstacle, one per raceline point) instead of the raceline; speeds stay the raceline's. No
+path yet, a path older than max_path_age s, one of another length, or /local_path/valid false (no
+collision-free path) gets a stop command.
 """
 import os
 
@@ -23,6 +28,8 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Path
+from std_msgs.msg import Bool
 
 from perception.tracks import track_dir
 
@@ -46,6 +53,8 @@ class PurePursuit(Node):
         self.reacquire_distance = p('reacquire_distance', 1.0).value   # m from the line
         self.max_pose_age = p('max_pose_age', 0.5).value   # s, as fast_bridge's /drive watchdog
         self.max_offset = p('max_offset', 3.0).value       # m from the line, farther = bad pose
+        self.avoid = p('avoid', False).value               # follow /local_path instead of the raceline
+        self.max_path_age = p('max_path_age', 0.5).value   # s
         # vehicle geometry comes only from config/vehicle.yaml (pure_pursuit.launch.py loads it)
         self.max_steering_angle = p('max_steering_angle', Parameter.Type.DOUBLE).value
         self.wheelbase = p('wheelbase', Parameter.Type.DOUBLE).value
@@ -66,11 +75,28 @@ class PurePursuit(Node):
         step = np.median(np.hypot(seg[:, 0], seg[:, 1]))
         self.window = max(1, int(np.ceil(search_window / step))) if step > 0 else len(self.xy)
         self.closest = None
+        self.path_xy, self.path_stamp, self.path_valid = None, 0.0, False
         self.get_logger().info(f'Loaded {path}: {len(self.waypoints)} points; lookahead '
                                f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m')
 
         self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+        if self.avoid:
+            self.create_subscription(Path, '/local_path', self.path_callback, 10)
+            self.create_subscription(Bool, '/local_path/valid', self.valid_callback, 10)
+            self.get_logger().info('Avoiding obstacles: following /local_path')
+
+    def path_callback(self, msg: Path):
+        if msg.header.frame_id != 'map' or len(msg.poses) != len(self.xy):
+            self.get_logger().warning(f"/local_path: {len(msg.poses)} poses in frame '{msg.header.frame_id}', "
+                                      f"expected {len(self.xy)} in 'map'", throttle_duration_sec=2.0)
+            self.path_xy = None
+            return
+        self.path_xy = np.array([[q.pose.position.x, q.pose.position.y] for q in msg.poses])
+        self.path_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+    def valid_callback(self, msg: Bool):
+        self.path_valid = msg.data
 
     def drive_speed(self, i):
         v = self.waypoints[i, VX] * self.speed_scale
@@ -110,8 +136,19 @@ class PurePursuit(Node):
             return self.stop(f'pose {age:.2f} s old')
         yaw = np.arctan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y ** 2 + q.z ** 2))
 
-        n = len(self.xy)
-        dists = np.hypot(self.xy[:, 0] - x, self.xy[:, 1] - y)
+        xy = self.xy
+        if self.avoid:
+            if self.path_xy is None:
+                return self.stop('no /local_path yet')
+            path_age = self.get_clock().now().nanoseconds * 1e-9 - self.path_stamp
+            if path_age > self.max_path_age:
+                return self.stop(f'/local_path {path_age:.2f} s old')
+            if not self.path_valid:
+                return self.stop('no collision-free /local_path')
+            xy = self.path_xy
+
+        n = len(xy)
+        dists = np.hypot(xy[:, 0] - x, xy[:, 1] - y)
         closest = self.find_closest(dists, yaw)
         if dists[closest] > self.max_offset:
             return self.stop(f'pose {dists[closest]:.1f} m from the raceline')
@@ -132,7 +169,7 @@ class PurePursuit(Node):
             return
 
         # target in the vehicle frame, then the arc through it: curvature = 2 y / d^2
-        dx, dy = self.xy[target, 0] - x, self.xy[target, 1] - y
+        dx, dy = xy[target, 0] - x, xy[target, 1] - y
         target_y = -dx * np.sin(yaw) + dy * np.cos(yaw)
         steering = np.arctan(self.wheelbase * 2 * target_y / target_dist ** 2)
 

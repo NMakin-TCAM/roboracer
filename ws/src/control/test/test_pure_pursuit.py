@@ -18,6 +18,8 @@ import yaml
 rclpy = pytest.importorskip('rclpy')
 from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
+from nav_msgs.msg import Path  # noqa: E402
+from std_msgs.msg import Bool  # noqa: E402
 
 SPEED_SCALE = 0.5
 DOMAIN = random.randint(1, 101)  # not 0: the live stack (bridge, sim car) runs there
@@ -76,11 +78,11 @@ def ros():
     rclpy.shutdown()
 
 
-def launch(tracks_dir, track):
+def launch(tracks_dir, track, *args):
     env = dict(os.environ, TRACKS_DIR=tracks_dir, ROS_DOMAIN_ID=str(DOMAIN))
     return subprocess.Popen(
         ['ros2', 'launch', 'control', 'pure_pursuit.launch.py', f'track:={track}',
-         f'speed_scale:={SPEED_SCALE}'],
+         f'speed_scale:={SPEED_SCALE}', *args],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
 
 
@@ -140,8 +142,8 @@ class Driver:
 def run(ros, tracks_dir):
     procs, drivers = [], []
 
-    def start(track):
-        proc = launch(tracks_dir, track)
+    def start(track, *args):
+        proc = launch(tracks_dir, track, *args)
         driver = Driver(ros)
         procs.append(proc)
         drivers.append(driver)
@@ -213,3 +215,62 @@ def test_missing_raceline(tracks_dir):
         pass
     out = stop(proc)
     assert 'Raceline not found' in out
+
+
+class LocalPath:
+    """Publishes /local_path (the straight raceline shifted by dy) and /local_path/valid, as the spliner does."""
+
+    def __init__(self, node):
+        self.node = node
+        self.path_pub = node.create_publisher(Path, '/local_path', 10)
+        self.valid_pub = node.create_publisher(Bool, '/local_path/valid', 10)
+
+    def send(self, dy, valid=True, n=100):
+        msg = Path()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.node.get_clock().now().to_msg()
+        for x in np.arange(0.0, 20.0, 0.2)[:n]:
+            pose = PoseStamped()
+            pose.pose.position.x, pose.pose.position.y = float(x), dy
+            msg.poses.append(pose)
+        end = time.time() + 1.0
+        while (self.path_pub.get_subscription_count() == 0 or self.valid_pub.get_subscription_count() == 0) \
+                and time.time() < end:
+            rclpy.spin_once(self.node, timeout_sec=0.05)
+        self.path_pub.publish(msg)
+        self.valid_pub.publish(Bool(data=valid))
+        end = time.time() + 0.2
+        while time.time() < end:
+            rclpy.spin_once(self.node, timeout_sec=0.02)
+
+    def close(self):
+        self.node.destroy_publisher(self.path_pub)
+        self.node.destroy_publisher(self.valid_pub)
+
+
+@pytest.fixture
+def local_path(ros):
+    lp = LocalPath(ros)
+    yield lp
+    lp.close()
+
+
+def test_avoid_follows_local_path(run, local_path):
+    driver, _ = run('straight', 'avoid:=true')
+    stopped = driver.drive(5.0, 0.0, 0.0)   # no /local_path yet
+    assert stopped.speed == 0.0
+    local_path.send(0.5)   # path 0.5 m to the left of the raceline
+    on_path = driver.drive(5.0, 0.5, 0.0, n=3)
+    assert on_path.steering_angle == pytest.approx(0.0, abs=1e-6)
+    assert on_path.speed == pytest.approx(3.0 * SPEED_SCALE)   # the raceline's speed
+    local_path.send(0.5)
+    assert driver.drive(5.0, 0.0, 0.0, n=3).steering_angle > 0.0   # on the raceline: steer left onto the path
+
+
+@pytest.mark.parametrize('bad', [dict(valid=False), dict(n=50)], ids=['not_valid', 'wrong_length'])
+def test_avoid_stops_without_a_good_path(run, local_path, bad):
+    driver, _ = run('straight', 'avoid:=true')
+    local_path.send(0.0)
+    assert driver.drive(5.0, 0.0, 0.0, n=3).speed > 0.0
+    local_path.send(0.0, **bad)
+    assert driver.drive(5.0, 0.0, 0.0, n=3).speed == 0.0

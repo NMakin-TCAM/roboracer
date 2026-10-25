@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Race a mapped track: Cartographer localization + pure pursuit on its minimum-time raceline.
 #
-#   ws/scripts/race.sh <name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
+#   ws/scripts/race.sh <name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose] [avoid:=false]
 #
 # Needs the bridge running and tracks/<name>/ from ws/scripts/map_track.sh <name>.
 # Resets the sim car first: localization starts from the pose mapping started from. The car waits
