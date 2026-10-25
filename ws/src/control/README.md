@@ -124,7 +124,7 @@ ros2 launch control disparity_gap.launch.py speed:=1.0              # on its own
 ```
 
 It never runs alongside `race.sh` or the other followers: they all publish `/drive`.
-It was tuned in the F1TENTH gym (Levine), not yet in AutoDRIVE.
+It was tuned in the F1TENTH gym (Levine) and drives Porto in AutoDRIVE (2 laps at ~1 m/s, past an obstacle on the track).
 
 | Topic | Type | |
 |---|---|---|
@@ -141,7 +141,7 @@ It was tuned in the F1TENTH gym (Levine), not yet in AutoDRIVE.
 | `speed_per_metre` | `0.6` | m/s per metre of clear road within ±8° ahead, halved at full steering |
 | `max_range` | `10.0` | m, longer returns are clipped to this |
 | `fov` | `π/2` | rad, only beams within ± this can be aimed at |
-| `car_width`, `safety_margin` | `0.31`, `0.05` | m, the extension radius is half the width plus the margin |
+| `car_width`, `safety_margin` | `0.27`, `0.05` | m, the extension radius is half the width plus the margin |
 | `disparity_jump` | `0.35` | m between neighbouring beams that counts as an obstacle edge |
 | `free_thresholds` | `[3.0, 2.0, 1.2, 0.6]` | m, tried in order until a gap exists |
 | `path_lookahead`, `path_cap` | `6.0`, `1.5` | m: how far along the path to look for its narrowest spot; room beyond the cap on a side counts as open |
