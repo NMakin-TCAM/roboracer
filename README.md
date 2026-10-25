@@ -85,7 +85,7 @@ In new container shells (`docker compose exec ros bash`), with the bridge runnin
 ```bash
 scripts/map_track.sh <name> --wall-follow    # map the track: the wall follower drives 2 laps (--laps N), then
                                              # the map is saved and the centerline and raceline are planned
-                                             # (--gap-follow: follow the gap with disparity extension drives them)
+                                             # (--gap-follow: follow the gap drives them; experimental, see ws/src/control/README.md)
 scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the saved map, pure pursuit on the raceline
 ```
 

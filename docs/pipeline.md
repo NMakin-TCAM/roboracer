@@ -16,8 +16,8 @@ Inside the container (`docker compose exec ros bash`, working directory `~/ws`),
 ```bash
 ros2 launch autodrive_bridge autodrive_launch.py     # shell 1: bridge (always running)          alias: sim
 scripts/map_track.sh <name>                         # shell 2: map -> save -> centerline -> mintime   map-track
-scripts/map_track.sh <name> --wall-follow           #   ... or let the wall follower drive 2 laps (--laps N)
-scripts/map_track.sh <name> --gap-follow            #   ... or follow the gap (disparity_gap_node)
+scripts/map_track.sh <name> --wall-follow           #   ... or let the wall follower drive 2 laps (--laps N), the default
+scripts/map_track.sh <name> --gap-follow            #   ... or follow the gap (experimental: planning can fail, control/README.md)
 ros2 run autodrive_bridge teleop_keyboard           # shell 3: drive the mapping lap(s)            kb
 scripts/race.sh <name> [speed_scale:=0.5]           # localization + pure pursuit                  race
 ros2 launch control follow_the_gap.launch.py [speed:=1.0]   # no-map fallback, instead of race.sh   ftg

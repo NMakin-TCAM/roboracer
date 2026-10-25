@@ -126,6 +126,12 @@ ros2 launch control disparity_gap.launch.py speed:=1.0              # on its own
 It never runs alongside `race.sh` or the other followers: they all publish `/drive`.
 It was tuned in the F1TENTH gym (Levine) and drives Porto in AutoDRIVE (2 laps at ~1 m/s, past an obstacle on the track).
 
+**Experimental: use `--wall-follow` for mapping.** Known issue: the gap follower takes the inside line through
+corners, so its mapping lap is ~13-15 % shorter than the centerline (Porto: 26.8 m vs 30.7 m; the wall follower
+drives 30.2 m). `build_raceline` rejects a centerline more than 15 % off the lap, so planning fails about every
+other run ("centerline is ... m but the mapping lap is ... m"). The map itself is fine (its centerline is within
+~5 cm median of a wall-follower map). Not fixed yet: drive closer to the centre, or replace the length check.
+
 | Topic | Type | |
 |---|---|---|
 | `/scan` | `sensor_msgs/LaserScan` | subscribed |
