@@ -24,7 +24,7 @@ depends on `message_generation`, `dynamic_reconfigure`, `rospy` and `tf`. Every 
 `ccma` smoothing library from race_stack's `f110_utils`. Adopting FSDP means adopting a
 meaningful slice of race_stack with it.
 
-**We have no Frenet frame.** FSDP is written entirely in Frenet coordinates and leans on
+**We had no Frenet frame.** FSDP is written entirely in Frenet coordinates and leans on
 `frenet_converter` throughout. Before this proposal there were zero references to Frenet
 anywhere in `ws/src`. This is not a defect in the stack; a Cartesian raceline with pure pursuit
 is a standard and perfectly good F1TENTH design. It simply was not built for local planning yet.
@@ -35,6 +35,35 @@ reactive and does not track anything. Nothing publishes an obstacle array, and t
 configured for a single car (`/autodrive/roboracer_1/*`). A perfect port would run and have
 nothing to plan against.
 
+## FSDP and Predictive Spliner are the same codebase
+
+FSDP is a fork of ForzaETH's Predictive Spliner, not an independent
+implementation. Diffing the two repos file by file:
+
+| File | Predictive Spliner | FSDP | Differing lines |
+|---|---|---|---|
+| `collision_prediction.py` | 303 | 303 | **0** |
+| `opponent_trajectory.py` | 492 | 492 | **0** |
+| `predictor_opponent_trajectory.py` | 271 | 271 | **0** |
+| `update_waypoints.py` | 135 | 135 | **0** |
+| `dynamic_collision_server.py` | 24 | 24 | 2 |
+| `dynamic_sqp_server.py` | 21 | 22 | 4 |
+| `gaussian_process_opp_traj.py` | 466 | 1158 | 767 |
+| `sqp_avoidance_node.py` | 549 | 1383 | 1065 |
+
+Around 1,250 lines are byte-identical. The entire algorithmic difference lives
+in two files: FSDP swaps the dense GP for a sparse one and replaces the SQP
+avoidance node with a bi-level QP plus differential flatness.
+
+This decides how the work is split. Porting Predictive Spliner on one branch and
+FSDP on another means rewriting the same 1,250 lines of ROS 1 twice, and
+rewriting them differently, after which any comparison between the branches
+measures two porting styles as much as it measures two planners. The shared
+infrastructure should be ported once into a common package that both branches
+import, leaving them to diverge only where the papers diverge. That is also how
+the FSDP paper runs its own comparison, which is what makes its numbers mean
+anything.
+
 ## The ladder
 
 Each rung is useful on its own, which is the point. None of this is wasted if FSDP never lands.
@@ -43,21 +72,36 @@ Each rung is useful on its own, which is the point. None of this is wasted if FS
 map-frame `(x, y)` and `(s, d)` against the centerline or raceline, with signed lap distance that
 behaves correctly across the start line. Needed by everything below.
 
-**2. Opponent detection and tracking.** Segment the LiDAR scan, reject returns that belong to
-known track boundaries using the map, cluster what remains, and track clusters across frames to
-get velocity rather than just position. Publish pose and velocity in both map and Frenet
-coordinates. This is the largest single piece and the one with the least existing code to build
-on.
+**2. The opponent interface, and a synthetic opponent behind it.** Done. `f1t_msgs/Obstacle`
+and `ObstacleArray` describe obstacles entirely in Frenet, with field names taken from
+ForzaETH's `f110_msgs` so their planner code ports unedited. `frenet_state_node` publishes our
+own car on `/car_state/odom_frenet`, which every planner subscribes to and nothing previously
+produced. `fake_opponent_node` publishes a synthetic opponent on `/perception/obstacles`, in
+static, constant-speed, weaving or replay modes, behind a sensor model with configurable range,
+rear blind spot, dropout, noise and latency.
 
-**3. Multi-agent simulation.** Run two vehicles in AutoDRIVE under separate topic namespaces, one
+The point of the sensor model deserves stating plainly, because publishing ground truth is the
+tempting shortcut. The GP inside both planners exists to turn noisy, intermittent sightings into
+a predicted trajectory; given clean data it has nothing to do, and a comparison between FSDP's
+sparse GP and Predictive Spliner's dense one would measure nothing at all. The noise is the
+independent variable, not decoration. The models are in `opponent_models.py` with no ROS imports,
+and are unit tested.
+
+**3. Real opponent detection and tracking.** Segment the LiDAR scan, reject returns that belong
+to known track boundaries using the map, cluster what remains, and track clusters across frames
+to get velocity rather than just position. This is the largest single piece and the one with the
+least existing code to build on. Because rung 2 fixed the interface first, it can be built and
+swapped in without touching anything downstream.
+
+**4. Multi-agent simulation.** Run two vehicles in AutoDRIVE under separate topic namespaces, one
 on a baseline line and one running our stack, so detection and overtaking can be tested at all.
 Needs a second bridge instance and namespacing throughout.
 
-**4. A baseline local planner.** Something simple that avoids a tracked obstacle by deviating in
+**5. A baseline local planner.** Something simple that avoids a tracked obstacle by deviating in
 `d` and rejoining the raceline. Not competitive, but it closes the loop end to end and gives a
 reference for whether anything fancier is actually better.
 
-**5. FSDP, or the parts of it worth having.** Only meaningful once 1 through 4 exist.
+**6. FSDP, or the parts of it worth having.** Only meaningful once 1 through 5 exist.
 
 ## What is reusable from FSDP today
 
