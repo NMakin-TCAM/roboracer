@@ -28,7 +28,7 @@ from control.wall_follow_node import LapCounter
 DEFAULTS = {
     'max_range': 10.0,          # m, longer returns are clipped to this
     'fov': np.pi / 2,           # rad, only beams within +/- this angle can be aimed at
-    'car_width': 0.31,          # m
+    'car_width': 0.27,          # m, the RoboRacer; mirrors planning/config/racecar.ini
     'safety_margin': 0.05,      # m, extra room added on each side of the car
     'disparity_jump': 0.35,     # m, a jump this big between neighbours is an obstacle edge
     'free_thresholds': [3.0, 2.0, 1.2, 0.6],  # m, tried in order until a gap exists
@@ -53,7 +53,7 @@ DEFAULTS = {
 class DisparityGapFollow(Node):
     """Follow the gap with disparity extension.
 
-    1. Clean the scan (NaN/inf, clip long returns).
+    1. Clean the scan (invalid beams and no returns count as far, clip long returns).
     2. Extend every obstacle edge sideways by half the car's width plus a margin,
        so every beam that is still long is a direction the whole car fits through
        (the closest-point bubble, applied to every edge instead of just one).
@@ -91,11 +91,17 @@ class DisparityGapFollow(Node):
     def param(self, name):
         return self.get_parameter(name).value
 
-    def preprocess_lidar(self, ranges, range_max):
-        """Replace NaN/inf and clip every return to max_range."""
+    def preprocess_lidar(self, ranges, range_min, range_max):
+        """Clip every return to max_range; return (ranges, valid).
+
+        No return (inf) is far. Invalid beams (NaN, below range_min) also count as far, as in
+        wall_follow_node: as 0 m each one would be an obstacle edge right at the car, and its
+        extension would blank most of the scan. A real gap that narrow is covered anyway by the
+        extension of its neighbours' edges."""
         limit = min(self.param('max_range'), range_max) if range_max > 0 else self.param('max_range')
-        proc = np.nan_to_num(np.asarray(ranges, dtype=float), nan=0.0, posinf=limit, neginf=0.0)
-        return np.clip(proc, 0.0, limit)
+        ranges = np.asarray(ranges, dtype=float)
+        valid = ~np.isnan(ranges) & (ranges >= range_min)
+        return np.clip(np.where(valid, ranges, limit), 0.0, limit), valid
 
     def extend_disparities(self, ranges, angle_increment):
         """At each obstacle edge, overwrite the beams beside it (on the far side)
@@ -225,8 +231,8 @@ class DisparityGapFollow(Node):
         lo = int(np.searchsorted(angles, -fov))
         hi = int(np.searchsorted(angles, fov, side='right'))
 
-        raw = self.preprocess_lidar(data.ranges, data.range_max)
-        if not np.any(raw[lo:hi] > 0):
+        raw, valid = self.preprocess_lidar(data.ranges, data.range_min, data.range_max)
+        if not np.any(valid[lo:hi]):
             self.get_logger().warning('No valid LiDAR returns ahead, stopping', throttle_duration_sec=1.0)
             self.publish_drive(0.0, 0.0)
             return
