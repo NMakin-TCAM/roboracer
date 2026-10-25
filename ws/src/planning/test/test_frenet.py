@@ -36,12 +36,19 @@ def test_offset_sign_is_left_of_travel(circle):
 
 
 def test_roundtrip_through_cartesian(circle):
+    """s returns with exactly the discretisation error the class docstring
+    predicts, |d| * spacing / (2R), because a point offset toward the inside of
+    a curve is genuinely nearer the neighbouring chord. Asserting the law rather
+    than a round number means a real regression cannot hide under a loose
+    tolerance. The lateral coordinate has no such term and round-trips tighter
+    by two orders of magnitude."""
     s = np.linspace(0, circle.length, 50, endpoint=False)
     d = np.linspace(-3, 3, 50)
     x, y = circle.to_cartesian(s, d)
     s2, d2 = circle.to_frenet(x, y)
-    assert np.allclose(s2, s, atol=1e-2)
-    assert np.allclose(d2, d, atol=1e-2)
+    spacing = circle.length / len(circle.xy)
+    assert np.all(np.abs(circle.ds(s, s2)) <= np.abs(d) * spacing / (2 * R) + 1e-3)
+    assert np.allclose(d2, d, atol=1e-3)
 
 
 def test_s_wraps(circle):
