@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
+"""Follow the gap with disparity extension: drives the mapping lap(s) without a map or localization.
 
-# Follow the gap with disparity extension, from Roboracer Lab 4: https://github.com/f1tenth/f1tenth_lab4_template
+Optionally counts laps on pose_topic and stops the car after `laps` of them.
+
+    ros2 launch control disparity_gap.launch.py [speed:=1.0] [laps:=2]
+
+Subscribes /scan (sensor_msgs/LaserScan) and pose_topic (geometry_msgs/PoseStamped, for laps only),
+publishes /drive (ackermann_msgs/AckermannDriveStamped). Used by scripts/map_track.sh --gap-follow.
+"""
+
+# From Roboracer Lab 4: https://github.com/f1tenth/f1tenth_lab4_template
+
+import time
 
 import numpy as np
 import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
 from ackermann_msgs.msg import AckermannDriveStamped
+from geometry_msgs.msg import PoseStamped
+from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
+from sensor_msgs.msg import LaserScan
+
+from control.wall_follow_node import LapCounter
 
 # Defaults for the ROS parameters. disparity_gap.launch.py loads max_steering_angle from config/vehicle.yaml
 # and sets max_speed from its speed argument.
@@ -27,6 +42,11 @@ DEFAULTS = {
     'path_cap': 1.5,            # m, room beyond this on a side counts as open
     'body_behind_lidar': 0.45,  # m, the car's body runs from this far behind the LiDAR...
     'body_ahead_of_lidar': 0.15,  # m, ...to this far in front of it
+    'laps': 0,                  # stop after this many laps, 0 = never
+    'pose_topic': '/tracked_pose',  # for lap counting only
+    'lap_leave_radius': 3.0,    # m, see LapCounter
+    'lap_return_radius': 1.5,   # m
+    'lap_min_distance': 10.0,   # m
 }
 
 
@@ -50,8 +70,23 @@ class DisparityGapFollow(Node):
         for name, value in DEFAULTS.items():
             self.declare_parameter(name, value)
 
+        self.laps = self.param('laps')
+        self.lap_counter = LapCounter(self.param('lap_leave_radius'), self.param('lap_return_radius'),
+                                      self.param('lap_min_distance'))
+        self.done = False
+        self.started = time.monotonic()
+        self.pose_warned = False
+
         self.sub = self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
         self.pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
+        max_speed = self.param('max_speed')
+        if self.laps > 0:
+            pose_topic = self.param('pose_topic')
+            self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
+            self.get_logger().info(f'Following the gap at up to {max_speed:.1f} m/s, stopping after '
+                                   f'{self.laps} lap(s) counted on {pose_topic}')
+        else:
+            self.get_logger().info(f'Following the gap at up to {max_speed:.1f} m/s until stopped')
 
     def param(self, name):
         return self.get_parameter(name).value
@@ -170,13 +205,21 @@ class DisparityGapFollow(Node):
     def publish_drive(self, steering_angle, speed):
         drive_msg = AckermannDriveStamped()
         drive_msg.header.stamp = self.get_clock().now().to_msg()
-        drive_msg.drive.steering_angle = steering_angle
-        drive_msg.drive.speed = speed
+        drive_msg.header.frame_id = 'base_link'
+        drive_msg.drive.steering_angle = float(steering_angle)
+        drive_msg.drive.speed = float(speed)
         self.pub.publish(drive_msg)
 
     def lidar_callback(self, data: LaserScan):
         """Process each LiDAR scan as per the Follow Gap algorithm & publish an AckermannDriveStamped Message
         """
+        if self.done:
+            return
+        if self.laps > 0 and self.lap_counter.start is None and not self.pose_warned \
+                and time.monotonic() - self.started > 5.0:
+            self.get_logger().warn('No pose received yet: laps are not being counted')
+            self.pose_warned = True
+
         angles = data.angle_min + np.arange(len(data.ranges)) * data.angle_increment
         fov = self.param('fov')
         lo = int(np.searchsorted(angles, -fov))
@@ -197,14 +240,33 @@ class DisparityGapFollow(Node):
 
         self.publish_drive(steering_angle, self.choose_speed(ranges, angles, steering_angle))
 
+    def pose_callback(self, msg):
+        if self.done or not self.lap_counter.update(msg.pose.position.x, msg.pose.position.y):
+            return
+        self.get_logger().info(f'Lap {self.lap_counter.laps}/{self.laps} complete')
+        if self.lap_counter.laps >= self.laps:
+            self.done = True
 
-def main(args=None):
-    rclpy.init(args=args)
+    def stop(self):
+        self.get_logger().info('Stopping: sending zero speed and steering')
+        for _ in range(3):   # repeat and wait, so the commands are delivered before the node exits
+            self.publish_drive(0.0, 0.0)
+            time.sleep(0.05)
+
+
+def main():
+    # Handle Ctrl+C ourselves, as wall_follow_node does: rclpy's default handler shuts ROS down first,
+    # so stop() could never publish and the car would coast until the adapter's command timeout
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = DisparityGapFollow()
-    rclpy.spin(node)
-
+    try:
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except KeyboardInterrupt:
+        pass
+    node.stop()                 # always leave the car stopped
     node.destroy_node()
-    rclpy.shutdown()
+    rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

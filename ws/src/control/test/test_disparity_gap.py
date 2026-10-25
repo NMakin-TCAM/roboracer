@@ -1,6 +1,6 @@
-"""Tests for disparity_gap_node: find_max_gap and find_best_point on hand-checkable arrays, and
+"""Tests for disparity_gap_node: find_max_gap and find_best_point on hand-checkable arrays,
 lidar_callback on ray-cast scenes (a pillar ahead, a corridor with the car near one wall, a dead end
-with a side exit), each also mirrored left/right.
+with a side exit), each also mirrored left/right, and stopping after `laps` laps.
 
 The car sits at the origin facing +x; +y is left, so a positive steering angle turns left.
 
@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 rclpy = pytest.importorskip('rclpy')
+from geometry_msgs.msg import PoseStamped  # noqa: E402
 from rclpy.parameter import Parameter  # noqa: E402
 from sensor_msgs.msg import LaserScan  # noqa: E402
 
@@ -194,6 +195,44 @@ def test_speed_drops_when_road_ahead_is_short(make_node):
     wall_ahead = drive(node, scene_scan(corridor(1.0, -1.0) + [((1.5, -1.0), (1.5, 1.0))])).speed
 
     assert wall_ahead < open_road
+
+
+def drive_laps(node, laps, radius=4.0, n=100):
+    """Feed poses around a circle of the given radius, starting and ending at (radius, 0)."""
+    for k in range(int(laps * n) + 1):
+        msg = PoseStamped()
+        msg.pose.position.x = radius * np.cos(2 * np.pi * k / n)
+        msg.pose.position.y = radius * np.sin(2 * np.pi * k / n)
+        node.pose_callback(msg)
+
+
+def test_stops_driving_after_laps(make_node):
+    node = make_node(laps=2)
+    drive_laps(node, 1)
+    assert node.lap_counter.laps == 1 and not node.done
+
+    drive_laps(node, 1)
+    assert node.done
+
+    msgs = []
+    node.pub = SimpleNamespace(publish=msgs.append)
+    node.lidar_callback(scene_scan(corridor(1.0, -1.0)))
+    assert msgs == []   # done: no more drive commands until stop()
+
+
+def test_laps_zero_counts_no_laps(make_node):
+    topics = [sub.topic_name for sub in make_node().subscriptions]
+    assert topics == ['/scan']   # no pose subscription, so it drives until stopped
+
+
+def test_stop_publishes_zero(make_node):
+    node = make_node()
+    msgs = []
+    node.pub = SimpleNamespace(publish=msgs.append)
+
+    node.stop()
+
+    assert msgs and all(m.drive.speed == 0.0 and m.drive.steering_angle == 0.0 for m in msgs)
 
 
 def test_max_steering_angle_default_matches_vehicle_yaml(make_node):

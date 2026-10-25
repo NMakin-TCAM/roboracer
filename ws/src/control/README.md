@@ -15,7 +15,7 @@ gap within `fov` (default ±90°) of straight ahead in `/scan`, at a constant `s
 clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle.yaml`).
 `tools/lidar_plot.py` plots its scan processing live (WebAgg, not installed).
 
-`disparity_gap_node` is a second follow the gap, with disparity extension (see below).
+`disparity_gap_node` is a follow the gap with disparity extension that drives the mapping lap(s) (see below).
 
 ## Run
 
@@ -107,30 +107,36 @@ ros2 launch control wall_follow.launch.py speed:=1.0 debug:=true     # on its ow
 
 ## Follow the gap with disparity extension
 
-`disparity_gap_node` needs only `/scan`, like `follow_the_gap_node`. At every jump of more than
+`disparity_gap_node` drives the mapping lap(s) of an unseen track, like the wall follower: it needs
+only `/scan`, no map or localization. At every jump of more than
 `disparity_jump` between neighbouring beams it extends the nearer range sideways by half the car's
 width plus `safety_margin`, so every beam that is still long is a direction the whole car fits through.
 It then takes the runs of beams longer than the first of `free_thresholds` (relaxing it if there are
 none) within `fov`, picks the deepest run (the widest among near-equal depths), aims at its deepest
 point, shifted to the middle of the narrowest spot along the way, and never turns toward something
 beside the car's body. Speed scales with the clear distance straight ahead, between `min_speed` and
-`max_speed`.
+`max_speed`. With `laps > 0` it counts returns to its start position on `pose_topic` (the wall
+follower's `LapCounter`), then stops the car and exits.
 
 ```bash
-ros2 launch control disparity_gap.launch.py [speed:=1.0]   # speed sets max_speed
+scripts/map_track.sh <name> --gap-follow [--laps 2] [speed:=1.0]   # mapping with follow the gap
+ros2 launch control disparity_gap.launch.py speed:=1.0              # on its own, until Ctrl+C
 ```
 
-Run it instead of `follow_the_gap.launch.py` or `race.sh`, never alongside them: they all publish `/drive`.
+It never runs alongside `race.sh` or the other followers: they all publish `/drive`.
 It was tuned in the F1TENTH gym (Levine), not yet in AutoDRIVE.
 
 | Topic | Type | |
 |---|---|---|
 | `/scan` | `sensor_msgs/LaserScan` | subscribed |
-| `/drive` | `ackermann_msgs/AckermannDriveStamped` | published, one command per scan; a stop when no beam ahead has a return |
+| `pose_topic` (`/tracked_pose`) | `geometry_msgs/PoseStamped` | subscribed when `laps > 0` (Cartographer, also while mapping) |
+| `/drive` | `ackermann_msgs/AckermannDriveStamped` | published, one command per scan; a stop when no beam ahead has a return, and zero on exit |
 
 | Parameter | Default | |
 |---|---|---|
-| `max_speed` | `1.0` | m/s cap; the launch file's `speed` |
+| `max_speed` | `1.0` | m/s cap; the launch file's `speed`. Keep it low for clean scan matching |
+| `laps` | `0` | stop after this many laps, 0 = never |
+| `lap_leave_radius`, `lap_return_radius`, `lap_min_distance` | `3.0`, `1.5`, `10.0` | m, as for the wall follower |
 | `min_speed` | `0.5` | m/s, unless `max_speed` is lower |
 | `speed_per_metre` | `0.6` | m/s per metre of clear road within ±8° ahead, halved at full steering |
 | `max_range` | `10.0` | m, longer returns are clipped to this |
