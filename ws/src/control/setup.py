@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'pure_pursuit_node = control.pure_pursuit_node:main',
             'follow_the_gap_node = control.follow_the_gap_node:main',
+            'disparity_gap_node = control.disparity_gap_node:main',
             'wall_follow_node = control.wall_follow_node:main',
         ],
     },

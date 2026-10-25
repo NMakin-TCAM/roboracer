@@ -15,6 +15,8 @@ gap within `fov` (default ±90°) of straight ahead in `/scan`, at a constant `s
 clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle.yaml`).
 `tools/lidar_plot.py` plots its scan processing live (WebAgg, not installed).
 
+`disparity_gap_node` is a follow the gap with disparity extension that drives the mapping lap(s) (see below).
+
 ## Run
 
 ```bash
@@ -102,6 +104,50 @@ ros2 launch control wall_follow.launch.py speed:=1.0 debug:=true     # on its ow
 | `laps` | `0` | stop after this many laps, 0 = never |
 | `lap_leave_radius`, `lap_return_radius`, `lap_min_distance` | `3.0`, `1.5`, `10.0` | m: a lap is leaving the start by the first, coming back within the second, after driving at least the third |
 | `debug` | `false` | log wall distances, steering and speed |
+
+## Follow the gap with disparity extension
+
+`disparity_gap_node` drives the mapping lap(s) of an unseen track, like the wall follower: it needs
+only `/scan`, no map or localization. At every jump of more than
+`disparity_jump` between neighbouring beams it extends the nearer range sideways by half the car's
+width plus `safety_margin`, so every beam that is still long is a direction the whole car fits through.
+It then takes the runs of beams longer than the first of `free_thresholds` (relaxing it if there are
+none) within `fov`, picks the deepest run (the widest among near-equal depths), aims at its deepest
+point, shifted to the middle of the narrowest spot along the way, and never turns toward something
+beside the car's body. Speed scales with the clear distance straight ahead, between `min_speed` and
+`max_speed`. With `laps > 0` it counts returns to its start position on `pose_topic` (the wall
+follower's `LapCounter`), then stops the car and exits.
+
+```bash
+scripts/map_track.sh <name> --gap-follow [--laps 2] [speed:=1.0]   # mapping with follow the gap
+ros2 launch control disparity_gap.launch.py speed:=1.0              # on its own, until Ctrl+C
+```
+
+It never runs alongside `race.sh` or the other followers: they all publish `/drive`.
+It was tuned in the F1TENTH gym (Levine), not yet in AutoDRIVE.
+
+| Topic | Type | |
+|---|---|---|
+| `/scan` | `sensor_msgs/LaserScan` | subscribed |
+| `pose_topic` (`/tracked_pose`) | `geometry_msgs/PoseStamped` | subscribed when `laps > 0` (Cartographer, also while mapping) |
+| `/drive` | `ackermann_msgs/AckermannDriveStamped` | published, one command per scan; a stop when no beam ahead has a return, and zero on exit |
+
+| Parameter | Default | |
+|---|---|---|
+| `max_speed` | `1.0` | m/s cap; the launch file's `speed`. Keep it low for clean scan matching |
+| `laps` | `0` | stop after this many laps, 0 = never |
+| `lap_leave_radius`, `lap_return_radius`, `lap_min_distance` | `3.0`, `1.5`, `10.0` | m, as for the wall follower |
+| `min_speed` | `0.5` | m/s, unless `max_speed` is lower |
+| `speed_per_metre` | `0.6` | m/s per metre of clear road within ±8° ahead, halved at full steering |
+| `max_range` | `10.0` | m, longer returns are clipped to this |
+| `fov` | `π/2` | rad, only beams within ± this can be aimed at |
+| `car_width`, `safety_margin` | `0.31`, `0.05` | m, the extension radius is half the width plus the margin |
+| `disparity_jump` | `0.35` | m between neighbouring beams that counts as an obstacle edge |
+| `free_thresholds` | `[3.0, 2.0, 1.2, 0.6]` | m, tried in order until a gap exists |
+| `path_lookahead`, `path_cap` | `6.0`, `1.5` | m: how far along the path to look for its narrowest spot; room beyond the cap on a side counts as open |
+| `side_clearance`, `push_gain` | `0.08`, `2.0` | m kept beside the body; rad per metre something is inside it |
+| `body_behind_lidar`, `body_ahead_of_lidar` | `0.45`, `0.15` | m, the car's body along x relative to the LiDAR |
+| `max_steering_angle` | `0.524` | rad, steering is clipped to this; the launch file loads it from `config/vehicle.yaml` |
 
 ## Test
 

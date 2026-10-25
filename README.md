@@ -34,7 +34,7 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time 
 | **Mapping** | `perception` | Cartographer 2D SLAM with LiDAR, wheel odometry and IMU. `save_map` waits for the final optimization and writes the pbstream, occupancy grid and the mapping lap's trajectory. |
 | **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. |
 | **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; a preview image of the result. |
-| **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. Follow the gap as a no-map fallback. A centring wall follower that drives the mapping laps by itself. |
+| **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. Follow the gap as a no-map fallback. A centring wall follower and a follow the gap with disparity extension, either of which drives the mapping laps by itself. |
 | **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 86 unit and integration tests. |
 
 ## Repository layout
@@ -85,6 +85,7 @@ In new container shells (`docker compose exec ros bash`), with the bridge runnin
 ```bash
 scripts/map_track.sh <name> --wall-follow    # map the track: the wall follower drives 2 laps (--laps N), then
                                              # the map is saved and the centerline and raceline are planned
+                                             # (--gap-follow: follow the gap with disparity extension drives them)
 scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the saved map, pure pursuit on the raceline
 ```
 
