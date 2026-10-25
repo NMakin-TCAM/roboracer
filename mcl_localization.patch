@@ -1,0 +1,909 @@
+diff --git a/README.md b/README.md
+index f9f71d0..a46130f 100644
+--- a/README.md
++++ b/README.md
+@@ -32,7 +32,7 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time
+ |---|---|---|
+ | **Simulator bridge** | `autodrive_bridge` | Socket.IO bridge to AutoDRIVE (`fast_bridge`), one sensor frame per sim frame; publishes `/scan`, `/sensors/imu/raw`, `/odom` (wheel odometry) and sim ground truth under the f1tenth_system names. A VESC stand-in (`adapter`) runs a speed loop on `/drive` with an acceleration ramp, as f1tenth_system does on the car. Detects sim resets and respawns, stops the car on them and announces them on `sim_reset`. Keyboard teleop. |
+ | **Mapping** | `perception` | Cartographer 2D SLAM with LiDAR, wheel odometry and IMU. `save_map` waits for the final optimization and writes the pbstream, occupancy grid and the mapping lap's trajectory. |
+-| **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. |
++| **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. Alternative: a Monte Carlo localization particle filter (`mcl_node`, `localizer:=mcl`) on the saved `map.yaml`. |
+ | **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; a preview image of the result. |
+ | **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. Follow the gap as a no-map fallback. A centring wall follower that drives the mapping laps by itself. |
+ | **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 86 unit and integration tests. |
+@@ -95,6 +95,21 @@ car and press Enter.
+ Check `tracks/<name>/preview.png` before racing. To re-plan an existing map (for example after changing
+ the car parameters in `ws/src/planning/config/racecar.ini`): `ros2 run planning build_raceline <name>`.
+ 
++### Particle filter (MCL) instead of Cartographer localization
++
++```bash
++scripts/race.sh <name> speed_scale:=0.5 localizer:=mcl     # or: ros2 launch control race.launch.py track:=<name> localizer:=mcl
++```
++
++`perception`'s `mcl_node` is a numpy particle filter with a likelihood-field lidar model (no range_libc
++build) on `tracks/<name>/map.yaml`. It publishes the same `map -> odom` and `/localized_pose` as the
++Cartographer path, so pure pursuit is unchanged, plus `/mcl/particles` and `/map` for Foxglove. It starts at
++the map origin (where `race.sh` resets the car), drives only once the cloud is tight, withdraws the pose if
++the cloud spreads (the car stops), and restarts after every sim reset. To start elsewhere, publish a
++`/initialpose` (Foxglove or RViz). It has no global localization. Parameters: `ws/src/perception/config/mcl.yaml`;
++`ros2 launch perception mcl.launch.py track:=<name> particles:=2000`. Never run it with `localization.launch.py`:
++both publish `map -> odom`.
++
+ ### No map
+ 
+ If mapping fails, `ros2 launch control follow_the_gap.launch.py [speed:=1.0]` (alias `ftg`) drives on the
+diff --git a/docs/pipeline.md b/docs/pipeline.md
+index dad5adc..525ebe7 100644
+--- a/docs/pipeline.md
++++ b/docs/pipeline.md
+@@ -43,7 +43,7 @@ Check with `ros2 node list` and kill leftovers before the next launch.
+ | Package | Contents |
+ |---|---|
+ | `autodrive_bridge` | `fast_bridge`, `adapter`, `wheel_odom`, `teleop_keyboard`; `autodrive_launch.py`. Sim only: replaced by f1tenth_system on the car. |
+-| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
++| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Particle filter localization instead of Cartographer's: `mcl.launch.py` (`mcl_node`, `mcl.py`, `config/mcl.yaml`). Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
+ | `planning` | `build_raceline` = `centerline` extraction + TUM `mintime` optimization |
+ | `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`. `follow_the_gap_node` (`follow_the_gap.launch.py`): reactive `/scan` -> `/drive`, needs no map, the fallback. `wall_follow_node` (`wall_follow.launch.py`): drives the mapping laps (`map_track.sh --wall-follow`) |
+ 
+@@ -57,7 +57,7 @@ Check with `ros2 node list` and kill leftovers before the next launch.
+ | `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, wall_follow (mapping), pure_pursuit, follow_the_gap |
+ | TF `map -> odom` | | Cartographer (mapping and localization) |
+ | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
+-| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate: `/tracked_pose` relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
++| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate (or `mcl_node`): `/tracked_pose` (or the filter pose) relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
+ | `/autodrive/roboracer_1/sim_reset` | `std_msgs/String`, the reason | fast_bridge (sim only): one event per sim reset. Reset commands always; respawns and other teleports (collision count change, position jump) only with restricted topics. fast_bridge also replies zeros for `reset_frames` frames |
+ | `/ground_truth/pose`, TF `world -> ground_truth` | `geometry_msgs/PoseStamped`, frame `world` (sim) | adapter, debugging only |
+ 
+diff --git a/ws/scripts/race.sh b/ws/scripts/race.sh
+index 22bb115..408a7bf 100755
+--- a/ws/scripts/race.sh
++++ b/ws/scripts/race.sh
+@@ -2,6 +2,7 @@
+ # Race a mapped track: Cartographer localization + pure pursuit on its minimum-time raceline.
+ #
+ #   ws/scripts/race.sh <name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
++#                          [localizer:=mcl]    particle filter on map.yaml instead of Cartographer localization
+ #
+ # Needs the bridge running and tracks/<name>/ from ws/scripts/map_track.sh <name>.
+ # Resets the sim car first: localization starts from the pose mapping started from. The car waits
+diff --git a/ws/src/control/launch/race.launch.py b/ws/src/control/launch/race.launch.py
+index f2b2965..60df89f 100644
+--- a/ws/src/control/launch/race.launch.py
++++ b/ws/src/control/launch/race.launch.py
+@@ -1,22 +1,28 @@
+-"""Race a mapped track: Cartographer localization + pure pursuit on its raceline.
++"""Race a mapped track: localization + pure pursuit on its raceline.
+ 
+     ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
++        [localizer:=cartographer|mcl]
+ 
+-Needs tracks/<name>/map.pbstream and raceline.csv (ws/scripts/map_track.sh <name>), and the car at
+-the pose mapping started from (ws/scripts/race.sh resets the sim car there). /localized_pose is
+-/tracked_pose once Cartographer has localized (localization_gate), so the car waits for that.
++Needs tracks/<name>/map.pbstream (map.yaml for localizer:=mcl) and raceline.csv (ws/scripts/map_track.sh
++<name>), and the car at the pose mapping started from (ws/scripts/race.sh resets the sim car there).
++/localized_pose is published once the localizer has localized (Cartographer: localization_gate; mcl: the
++particle cloud has converged), so the car waits for that. localizer:=mcl is the particle filter
++(perception mcl.launch.py); the default is Cartographer pure localization.
+ """
+ from launch import LaunchDescription
+ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch.conditions import IfCondition, UnlessCondition
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
+ from launch_ros.substitutions import FindPackageShare
+ 
+ 
+ def generate_launch_description():
+-    def include(package, launch_file, args):
++    def include(package, launch_file, args, condition=None):
+         return IncludeLaunchDescription(
+             PathJoinSubstitution([FindPackageShare(package), 'launch', launch_file]),
+-            launch_arguments={a: LaunchConfiguration(a) for a in args}.items())
++            launch_arguments={a: LaunchConfiguration(a) for a in args}.items(), condition=condition)
++
++    use_mcl = PythonExpression(["'", LaunchConfiguration('localizer'), "' == 'mcl'"])
+ 
+     return LaunchDescription([
+         DeclareLaunchArgument('track', description='track name under ws/tracks/'),
+@@ -24,6 +30,9 @@ def generate_launch_description():
+                               description="a localizer's PoseStamped in the map frame"),
+         DeclareLaunchArgument('speed_scale', default_value='0.5', description='drive speed = raceline vx * speed_scale'),
+         DeclareLaunchArgument('max_speed', default_value='0.0', description='cap on the drive speed [m/s], 0 = no cap'),
+-        include('perception', 'localization.launch.py', ['track']),
++        DeclareLaunchArgument('localizer', default_value='cartographer',
++                              description='cartographer: pure localization on map.pbstream; mcl: particle filter on map.yaml'),
++        include('perception', 'localization.launch.py', ['track'], UnlessCondition(use_mcl)),
++        include('perception', 'mcl.launch.py', ['track'], IfCondition(use_mcl)),
+         include('control', 'pure_pursuit.launch.py', ['track', 'pose_topic', 'speed_scale', 'max_speed']),
+     ])
+diff --git a/ws/src/perception/config/mcl.yaml b/ws/src/perception/config/mcl.yaml
+new file mode 100644
+index 0000000..ba3e428
+--- /dev/null
++++ b/ws/src/perception/config/mcl.yaml
+@@ -0,0 +1,24 @@
++# Parameters of mcl_node (mcl.launch.py). Every key is optional; these are the defaults.
++mcl:
++  ros__parameters:
++    # particles: set by the launch argument particles:= (default 1000; ~2000 is fine for numpy at 40 Hz scans)
++    beams: 60                  # lidar beams used per update, evenly spaced
++    sigma_hit: 0.15            # m, std of a wall hit in the likelihood field (map resolution + lidar noise)
++    z_hit: 0.8                 # weight of "the endpoint is on a wall"
++    z_rand: 0.2                # floor per beam: unknown space, obstacles, outliers do not zero a particle
++    likelihood_scale: 0.4      # < 1 tempers the (correlated) beams; lower = a more diverse cloud
++    max_dist: 2.0              # m, distance-field cap
++    noise_x: [0.10, 0.02]      # motion std per m travelled, per rad turned: along the car
++    noise_y: [0.05, 0.05]      #                                              sideways
++    noise_yaw: [0.05, 0.10]    #                                              heading [rad]
++    update_min_d: 0.05         # m of odometry between filter updates once localized
++    update_min_a: 0.05         # rad
++    init_std_xy: 0.15          # m, cloud around the start pose (map origin after a reset, or /initialpose)
++    init_std_yaw: 0.10         # rad
++    converged_std_xy: 0.10     # m  \  localized (the car may drive) after converged_updates updates
++    converged_std_yaw: 0.08    # rad / below both
++    converged_updates: 3
++    lost_std_xy: 0.60          # m, the pose is withdrawn (the car stops) if the cloud spreads beyond this
++    debounce: 0.5              # s after a sim reset event before restarting the cloud
++    still_speed: 0.1           # m/s, "the car has stopped" after a reset
++    publish_particles: true    # /mcl/particles for Foxglove
+diff --git a/ws/src/perception/launch/mcl.launch.py b/ws/src/perception/launch/mcl.launch.py
+new file mode 100644
+index 0000000..958ef9b
+--- /dev/null
++++ b/ws/src/perception/launch/mcl.launch.py
+@@ -0,0 +1,26 @@
++"""ros2 launch perception mcl.launch.py track:=<name>
++
++Monte Carlo localization (particle filter) on tracks/<track>/map.yaml, instead of Cartographer:
++TF map -> odom, /localized_pose (once the particle cloud has converged), /mcl/particles, /map.
++Same outputs as localization.launch.py, so control race.launch.py works with either (localizer:=mcl).
++Never run it together with localization.launch.py: both publish map -> odom.
++Parameters: config/mcl.yaml; override one with  ros2 launch perception mcl.launch.py track:=x particles:=2000
++"""
++from launch import LaunchDescription
++from launch.actions import DeclareLaunchArgument
++from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
++from launch_ros.actions import Node
++from launch_ros.parameter_descriptions import ParameterValue
++from launch_ros.substitutions import FindPackageShare
++
++
++def generate_launch_description():
++    return LaunchDescription([
++        DeclareLaunchArgument('track', description='track name, loads tracks/<track>/map.yaml'),
++        DeclareLaunchArgument('particles', default_value='1000', description='number of particles'),
++        Node(package='perception', executable='mcl_node', name='mcl', output='screen',
++             parameters=[PathJoinSubstitution([FindPackageShare('perception'), 'config', 'mcl.yaml']), {
++                 'track': ParameterValue(LaunchConfiguration('track'), value_type=str),
++                 'particles': ParameterValue(LaunchConfiguration('particles'), value_type=int),
++             }]),
++    ])
+diff --git a/ws/src/perception/package.xml b/ws/src/perception/package.xml
+index 4e8a2fc..2418e8d 100644
+--- a/ws/src/perception/package.xml
++++ b/ws/src/perception/package.xml
+@@ -3,7 +3,7 @@
+ <package format="3">
+   <name>perception</name>
+   <version>0.0.0</version>
+-  <description>Cartographer mapping and localization, saving maps to tracks/&lt;name&gt;/, and an experimental IMU EKF velocity estimate.</description>
++  <description>Cartographer mapping and localization, particle filter (MCL) localization, saving maps to tracks/&lt;name&gt;/, and an experimental IMU EKF velocity estimate.</description>
+   <maintainer email="todo@todo.todo">SIGRobotics</maintainer>
+   <license>TODO: License declaration</license>
+ 
+@@ -20,6 +20,9 @@
+   <exec_depend>visualization_msgs</exec_depend>
+   <exec_depend>python3-yaml</exec_depend>
+   <exec_depend>python3-numpy</exec_depend>
++  <exec_depend>python3-scipy</exec_depend>      <!-- mcl: distance field -->
++  <exec_depend>python3-pil</exec_depend>        <!-- mcl: map.pgm -->
++  <exec_depend>tf2_ros</exec_depend>            <!-- mcl: map -> odom, base_link -> laser -->
+ 
+   <test_depend>python3-pytest</test_depend>
+ 
+diff --git a/ws/src/perception/perception/mcl.py b/ws/src/perception/perception/mcl.py
+new file mode 100644
+index 0000000..1ffbf18
+--- /dev/null
++++ b/ws/src/perception/perception/mcl.py
+@@ -0,0 +1,188 @@
++"""Monte Carlo localization (particle filter) with a likelihood-field sensor model, in numpy.
++
++No ROS imports: mcl_node.py wires this to topics, test_mcl.py tests it on synthetic tracks.
++
++Why a likelihood field and not ray casting: the weight of a particle comes from where the lidar
++endpoints would land if the car were at that pose, looked up in a distance-to-nearest-wall grid.
++That needs no range_libc (no Cython/CUDA build), runs on amd64 and arm64, and is a few vectorized
++numpy operations per scan.
++
++The filter tracks from a known start pose (the map origin after a sim reset, or an /initialpose); it has no
++global localization: on a track with similar-looking corridors a converged-looking cloud can sit on the wrong
++copy of the track, so it cannot be trusted to find its own start.
++
++Poses are (x, y, yaw) of base_link (the rear axle) in the map frame. The map is the map.pgm/map.yaml
++that save_map writes (ROS map_server format, trinary).
++"""
++import math
++import os
++
++import numpy as np
++import yaml
++from PIL import Image
++from scipy import ndimage
++
++
++def wrap(a):
++    return (a + np.pi) % (2.0 * np.pi) - np.pi
++
++
++def compose(a, b):
++    """SE(2) a * b: pose b, given in the frame of pose a, expressed in a's parent frame."""
++    c, s = math.cos(a[2]), math.sin(a[2])
++    return (a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], float(wrap(a[2] + b[2])))
++
++
++def inverse(a):
++    c, s = math.cos(a[2]), math.sin(a[2])
++    return (-(c * a[0] + s * a[1]), s * a[0] - c * a[1], float(wrap(-a[2])))
++
++
++def relative(a, b):
++    """Pose b expressed in the frame of pose a (a^-1 * b)."""
++    return compose(inverse(a), b)
++
++
++class LikelihoodMap:
++    """Occupancy grid plus its distance-to-nearest-occupied-cell field (metres, capped at max_dist)."""
++
++    def __init__(self, occupied, free, resolution, origin_xy, max_dist=2.0):
++        """occupied, free: bool arrays in image order (row 0 = max y); origin = lower-left corner."""
++        if not occupied.any():
++            raise ValueError('map has no occupied cells')
++        self.h, self.w = occupied.shape
++        self.res = float(resolution)
++        self.ox, self.oy = float(origin_xy[0]), float(origin_xy[1])
++        self.max_dist = float(max_dist)
++        self.occupied = occupied
++        self.free = free
++        self.dist = np.minimum(ndimage.distance_transform_edt(~occupied) * self.res,
++                               self.max_dist).astype(np.float32)
++
++    @classmethod
++    def from_yaml(cls, path, max_dist=2.0):
++        with open(path) as f:
++            meta = yaml.safe_load(f)
++        image = meta['image']
++        if not os.path.isabs(image):
++            image = os.path.join(os.path.dirname(os.path.abspath(path)), image)
++        origin = meta['origin']
++        if abs(origin[2]) > 1e-6:
++            raise ValueError(f'{path}: a rotated map origin (yaw {origin[2]}) is not supported')
++        pix = np.asarray(Image.open(image).convert('L'), dtype=np.float64)
++        p = pix / 255.0 if meta.get('negate', 0) else (255.0 - pix) / 255.0   # occupancy probability
++        occupied = p > float(meta.get('occupied_thresh', 0.65))
++        free = p < float(meta.get('free_thresh', 0.196))
++        return cls(occupied, free, meta['resolution'], origin[:2], max_dist)
++
++    def occupancy_grid(self):
++        """int8 values for nav_msgs/OccupancyGrid.data (row 0 = min y): 100 occupied, 0 free, -1 unknown."""
++        grid = np.full((self.h, self.w), -1, dtype=np.int8)
++        grid[self.free] = 0
++        grid[self.occupied] = 100
++        return np.flipud(grid).ravel()
++
++    def distance(self, x, y):
++        """Distance to the nearest wall at map points (any shape); max_dist outside the map."""
++        col = np.floor((x - self.ox) / self.res).astype(np.int64)
++        row = self.h - 1 - np.floor((y - self.oy) / self.res).astype(np.int64)
++        inside = (col >= 0) & (col < self.w) & (row >= 0) & (row < self.h)
++        d = self.dist[np.clip(row, 0, self.h - 1), np.clip(col, 0, self.w - 1)]
++        return np.where(inside, d, self.max_dist)
++
++
++def select_beams(ranges, angle_min, angle_increment, n_beams, range_min, range_max):
++    """About n_beams evenly spaced beams of a scan, without invalid ones and max-range (no-hit) returns."""
++    ranges = np.asarray(ranges, dtype=np.float64)
++    step = max(1, int(round(len(ranges) / max(1, n_beams))))
++    idx = np.arange(0, len(ranges), step)
++    r = ranges[idx]
++    ok = np.isfinite(r) & (r > range_min) & (r < range_max * 0.999)
++    return r[ok], angle_min + idx[ok] * angle_increment
++
++
++class ParticleFilter:
++    def __init__(self, n=1000, seed=None, sigma_hit=0.15, z_hit=0.8, z_rand=0.2, likelihood_scale=0.4,
++                 noise_x=(0.10, 0.02), noise_y=(0.05, 0.05), noise_yaw=(0.05, 0.10), resample_ratio=0.5,
++                 wall_penalty=1e-3):
++        """noise_*: standard deviation of the motion per metre travelled and per radian turned."""
++        self.n = int(n)
++        self.rng = np.random.default_rng(None if seed is None or seed < 0 else seed)
++        self.sigma_hit, self.z_hit, self.z_rand = sigma_hit, z_hit, z_rand
++        self.likelihood_scale = likelihood_scale   # <1 tempers the beams' correlation: keeps the cloud diverse
++        self.noise_x, self.noise_y, self.noise_yaw = noise_x, noise_y, noise_yaw
++        self.resample_ratio = resample_ratio
++        self.wall_penalty = wall_penalty
++        self.p = np.zeros((self.n, 3))
++        self.w = np.full(self.n, 1.0 / self.n)
++
++    # ---------------- initialization ----------------
++    def init_gaussian(self, pose, std_xy, std_yaw):
++        self.p[:, 0] = pose[0] + self.rng.normal(0.0, std_xy, self.n)
++        self.p[:, 1] = pose[1] + self.rng.normal(0.0, std_xy, self.n)
++        self.p[:, 2] = wrap(pose[2] + self.rng.normal(0.0, std_yaw, self.n))
++        self.w[:] = 1.0 / self.n
++
++    # ---------------- motion ----------------
++    def predict(self, delta):
++        """Move every particle by the odometry delta (x, y, yaw in the previous base_link frame) plus noise
++        that grows with the distance travelled and the angle turned (no motion, no noise)."""
++        dx, dy, dyaw = delta
++        trans, rot = math.hypot(dx, dy), abs(dyaw)
++        if trans < 1e-9 and rot < 1e-9:
++            return
++        n = self.n
++        ndx = dx + self.rng.normal(0.0, self.noise_x[0] * trans + self.noise_x[1] * rot, n)
++        ndy = dy + self.rng.normal(0.0, self.noise_y[0] * trans + self.noise_y[1] * rot, n)
++        ndyaw = dyaw + self.rng.normal(0.0, self.noise_yaw[0] * trans + self.noise_yaw[1] * rot, n)
++        c, s = np.cos(self.p[:, 2]), np.sin(self.p[:, 2])
++        self.p[:, 0] += c * ndx - s * ndy
++        self.p[:, 1] += s * ndx + c * ndy
++        self.p[:, 2] = wrap(self.p[:, 2] + ndyaw)
++
++    # ---------------- sensor ----------------
++    def update_sensor(self, ranges, angles, sensor_pose, lmap):
++        """Reweight by how well each particle's lidar endpoints sit on walls. sensor_pose = laser in base_link."""
++        if not len(ranges):
++            return
++        lx, ly, lyaw = sensor_pose
++        x, y, th = self.p[:, 0], self.p[:, 1], self.p[:, 2]
++        c, s = np.cos(th), np.sin(th)
++        sx, sy, sth = x + c * lx - s * ly, y + s * lx + c * ly, th + lyaw
++        a = sth[:, None] + np.asarray(angles)[None, :]
++        ex = sx[:, None] + np.asarray(ranges)[None, :] * np.cos(a)
++        ey = sy[:, None] + np.asarray(ranges)[None, :] * np.sin(a)
++        d = lmap.distance(ex, ey)
++        pz = self.z_hit * np.exp(-0.5 * (d / self.sigma_hit) ** 2) + self.z_rand
++        loglik = self.likelihood_scale * np.log(pz).sum(axis=1)
++        w = self.w * np.exp(loglik - loglik.max())
++        w[lmap.distance(x, y) <= 0.0] *= self.wall_penalty   # the car itself cannot be inside a wall
++        total = w.sum()
++        self.w = w / total if total > 0.0 and np.isfinite(total) else np.full(self.n, 1.0 / self.n)
++
++    def neff(self):
++        return 1.0 / float(np.sum(self.w ** 2))
++
++    def resample(self, force=False):
++        """Low-variance resampling when the effective sample size drops below resample_ratio * n."""
++        if not force and self.neff() >= self.resample_ratio * self.n:
++            return False
++        positions = (self.rng.random() + np.arange(self.n)) / self.n
++        cumulative = np.cumsum(self.w)
++        cumulative[-1] = 1.0
++        self.p = self.p[np.searchsorted(cumulative, positions)]
++        self.w[:] = 1.0 / self.n
++        return True
++
++    # ---------------- estimate ----------------
++    def estimate(self):
++        w, p = self.w, self.p
++        return (float(w @ p[:, 0]), float(w @ p[:, 1]),
++                float(math.atan2(w @ np.sin(p[:, 2]), w @ np.cos(p[:, 2]))))
++
++    def spread(self):
++        """(position std [m], yaw circular std [rad]) of the weighted cloud."""
++        mx, my, _ = self.estimate()
++        pos = math.sqrt(float(self.w @ ((self.p[:, 0] - mx) ** 2 + (self.p[:, 1] - my) ** 2)))
++        r = min(1.0, math.hypot(float(self.w @ np.sin(self.p[:, 2])), float(self.w @ np.cos(self.p[:, 2]))))
++        return pos, math.sqrt(-2.0 * math.log(max(r, 1e-12)))
+diff --git a/ws/src/perception/perception/mcl_node.py b/ws/src/perception/perception/mcl_node.py
+new file mode 100644
+index 0000000..f3371c5
+--- /dev/null
++++ b/ws/src/perception/perception/mcl_node.py
+@@ -0,0 +1,295 @@
++#!/usr/bin/env python3
++"""Monte Carlo localization on the saved map: a drop-in for Cartographer localization + localization_gate.
++
++Started by mcl.launch.py. Same outputs as localization.launch.py:
++  TF map -> odom      the filter's pose in the map composed with the inverse of odom -> base_link
++  /localized_pose     PoseStamped in 'map' (base_link = rear axle), published at /odom rate, and only while
++                      localized, so pure pursuit does not drive before that (as with localization_gate)
++Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
++
++  start:     particles around the map origin (the car starts where mapping started: race.sh resets the sim
++             car there). Until the cloud is tight (converged_*), scans are used even though the car stands
++             still, so the car can start driving; afterwards a scan is used after update_min_d / update_min_a
++             of odometry motion.
++  sim reset: fast_bridge's /autodrive/roboracer_1/sim_reset event: the pose is withheld at once; after
++             debounce s with the car still, the cloud restarts at the ground truth pose mapped through
++             map_to_world.yaml (the map origin if there is none, as on the real car).
++  lost:      the cloud spreading beyond lost_std_xy withdraws the pose, so the car stops instead of driving
++             on a wrong pose.
++  manual:    a PoseWithCovarianceStamped on /initialpose (RViz, Foxglove) restarts the cloud there.
++"""
++import math
++import os
++import time
++
++import rclpy
++import yaml
++from geometry_msgs.msg import Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped, TransformStamped
++from nav_msgs.msg import OccupancyGrid, Odometry
++from rclpy.executors import ExternalShutdownException
++from rclpy.node import Node
++from rclpy.time import Time
++from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
++from sensor_msgs.msg import LaserScan
++from std_msgs.msg import String
++from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
++
++from perception.map_origin import pose2d
++from perception.mcl import LikelihoodMap, ParticleFilter, compose, inverse, relative, select_beams
++from perception.tracks import track_dir
++
++LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
++MAX_PARTICLES_SHOWN = 200
++MIN_BEAMS = 10
++MAP_ORIGIN = (0.0, 0.0, 0.0)   # where the car starts after a sim reset: the pose mapping started from
++
++
++def world_to_map(origin, x, y, yaw):
++    """Car pose in the sim world -> map frame; origin = (x, y, yaw) of the map origin in the world."""
++    ox, oy, oyaw = origin
++    c, s = math.cos(oyaw), math.sin(oyaw)
++    dx, dy = x - ox, y - oy
++    return c * dx + s * dy, -s * dx + c * dy, math.atan2(math.sin(yaw - oyaw), math.cos(yaw - oyaw))
++
++
++def yaw_quaternion(yaw):
++    return math.sin(yaw / 2.0), math.cos(yaw / 2.0)   # z, w
++
++
++class MclNode(Node):
++    def __init__(self):
++        super().__init__('mcl')
++        p = self.declare_parameter
++        track = p('track', '').value
++        self.beams = p('beams', 60).value
++        self.update_min_d = p('update_min_d', 0.05).value           # m of odometry between scan updates
++        self.update_min_a = p('update_min_a', 0.05).value           # rad
++        self.max_jump = p('max_jump', 1.0).value                    # m: a bigger odometry step is a teleport
++        self.init_std_xy = p('init_std_xy', 0.15).value
++        self.init_std_yaw = p('init_std_yaw', 0.10).value
++        self.conv_xy = p('converged_std_xy', 0.10).value
++        self.conv_yaw = p('converged_std_yaw', 0.08).value
++        self.conv_updates = p('converged_updates', 3).value
++        self.lost_xy = p('lost_std_xy', 0.60).value
++        self.debounce = p('debounce', 0.5).value                    # s after the last reset event
++        self.still_speed = p('still_speed', 0.1).value              # m/s: the car has stopped after a reset
++        self.timeout = p('timeout', 10.0).value
++        self.publish_particles = p('publish_particles', True).value
++        self.frame = 'map'
++
++        self.lmap = LikelihoodMap.from_yaml(os.path.join(track_dir(track), 'map.yaml'),
++                                            max_dist=p('max_dist', 2.0).value)
++        self.pf = ParticleFilter(
++            n=p('particles', 1000).value, seed=p('seed', -1).value, sigma_hit=p('sigma_hit', 0.15).value,
++            z_hit=p('z_hit', 0.8).value, z_rand=p('z_rand', 0.2).value,
++            likelihood_scale=p('likelihood_scale', 0.4).value,
++            noise_x=tuple(p('noise_x', [0.10, 0.02]).value), noise_y=tuple(p('noise_y', [0.05, 0.05]).value),
++            noise_yaw=tuple(p('noise_yaw', [0.05, 0.10]).value))
++
++        self.origin = None   # map origin in the sim world, for relocalizing after a reset
++        path = os.path.join(track_dir(track), 'map_to_world.yaml')
++        if os.path.isfile(path):
++            with open(path) as f:
++                w = yaml.safe_load(f)
++            self.origin = (w['x_m'], w['y_m'], w['yaw_rad'])
++
++        self.odom = None              # (pose, stamp msg, speed)
++        self.last_odom_pose = None    # odom pose of the last filter update
++        self.map_T_odom = None
++        self.sensor_pose = {}         # scan frame -> pose in base_link
++        self.initial_pose = MAP_ORIGIN   # the start pose until an /initialpose
++        self.initialized = False
++        self.localized = False
++        self.good = 0
++        self.pending = None           # monotonic time of the last reset signal
++        self.gt = None                # /ground_truth/odom: (x, y, yaw, speed) in the sim world
++        self.updates = 0
++        self.warn_t = 0.0
++
++        self.tf_buffer = Buffer()
++        self.tf_listener = TransformListener(self.tf_buffer, self)
++        self.tf_broadcaster = TransformBroadcaster(self)
++        self.pose_pub = self.create_publisher(PoseStamped, '/localized_pose', 10)
++        self.particles_pub = self.create_publisher(PoseArray, '/mcl/particles', 1)
++        map_pub = self.create_publisher(OccupancyGrid, '/map', LATCHED)
++        self.publish_map(map_pub)
++
++        # first: rclpy runs ready subscriptions in creation order, so a reset closes the relay before a
++        # pose that arrived with it is relayed
++        self.create_subscription(String, '/autodrive/roboracer_1/sim_reset', self.reset_cb, 10)
++        self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.initialpose_cb, 10)
++        self.create_subscription(Odometry, '/ground_truth/odom', self.gt_cb, 10)
++        self.create_subscription(Odometry, '/odom', self.odom_cb, qos_profile_sensor_data)
++        self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
++        self.create_timer(0.05, self.tick)
++        self.get_logger().info(f'{self.pf.n} particles on {self.lmap.w}x{self.lmap.h} map '
++                               f'({self.lmap.res:.3f} m), waiting for /odom and /scan')
++
++    # ---------------- setup ----------------
++    def publish_map(self, pub):
++        msg = OccupancyGrid()
++        msg.header.frame_id = self.frame
++        msg.header.stamp = self.get_clock().now().to_msg()
++        msg.info.resolution = self.lmap.res
++        msg.info.width, msg.info.height = self.lmap.w, self.lmap.h
++        msg.info.origin.position.x, msg.info.origin.position.y = self.lmap.ox, self.lmap.oy
++        msg.info.origin.orientation.w = 1.0
++        msg.data = self.lmap.occupancy_grid().tolist()
++        pub.publish(msg)
++
++    def init_filter(self, pose, reason):
++        self.pf.init_gaussian(pose, self.init_std_xy, self.init_std_yaw)
++        self.localized = False
++        self.good = 0
++        self.pending = None
++        self.get_logger().info(f'{reason}: particles at x={pose[0]:.2f} y={pose[1]:.2f} yaw={pose[2]:.2f}')
++        if self.odom is None:   # odom_cb finishes the start with this pose
++            self.initial_pose = pose
++            self.initialized = False
++            return
++        self.initialized = True
++        self.last_odom_pose = self.odom[0]
++        self.map_T_odom = compose(pose, inverse(self.odom[0]))
++
++    # ---------------- odometry: TF and pose at the odom rate ----------------
++    def odom_cb(self, msg):
++        pose = pose2d(msg.pose.pose)
++        v = msg.twist.twist.linear
++        self.odom = (pose, msg.header.stamp, math.hypot(v.x, v.y))
++        if not self.initialized:
++            self.init_filter(self.initial_pose, 'start')
++        if self.map_T_odom is None:
++            return
++        self.broadcast(msg.header.stamp)
++        if self.localized:
++            x, y, yaw = compose(self.map_T_odom, pose)
++            out = PoseStamped()
++            out.header.stamp, out.header.frame_id = msg.header.stamp, self.frame
++            out.pose.position.x, out.pose.position.y = x, y
++            out.pose.orientation.z, out.pose.orientation.w = yaw_quaternion(yaw)
++            self.pose_pub.publish(out)
++
++    def broadcast(self, stamp):
++        x, y, yaw = self.map_T_odom
++        t = TransformStamped()
++        t.header.stamp, t.header.frame_id, t.child_frame_id = stamp, self.frame, 'odom'
++        t.transform.translation.x, t.transform.translation.y = x, y
++        t.transform.rotation.z, t.transform.rotation.w = yaw_quaternion(yaw)
++        self.tf_broadcaster.sendTransform(t)
++
++    # ---------------- scans: the filter update ----------------
++    def get_sensor_pose(self, frame):
++        if frame not in self.sensor_pose:
++            try:
++                t = self.tf_buffer.lookup_transform('base_link', frame, Time())
++            except TransformException as e:
++                if time.monotonic() - self.warn_t > 2.0:
++                    self.warn_t = time.monotonic()
++                    self.get_logger().warning(f'waiting for TF base_link -> {frame}: {e}')
++                return None
++            q = t.transform.rotation
++            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
++            self.sensor_pose[frame] = (t.transform.translation.x, t.transform.translation.y, yaw)
++        return self.sensor_pose[frame]
++
++    def scan_cb(self, msg):
++        if self.odom is None or not self.initialized or self.pending is not None:
++            return
++        sensor = self.get_sensor_pose(msg.header.frame_id)
++        if sensor is None:
++            return
++        odom_pose = self.odom[0]
++        delta = relative(self.last_odom_pose, odom_pose)
++        trans = math.hypot(delta[0], delta[1])
++        if trans > self.max_jump:
++            self.get_logger().warning(f'odometry jumped {trans:.2f} m (reset or respawn?): not moving the cloud')
++            self.last_odom_pose = odom_pose
++            return
++        moved = trans >= self.update_min_d or abs(delta[2]) >= self.update_min_a
++        if not moved and self.localized:
++            return
++        if moved:   # before localizing, scans are used while standing still: the start pose is known
++            self.pf.predict(delta)
++            self.last_odom_pose = odom_pose
++        ranges, angles = select_beams(msg.ranges, msg.angle_min, msg.angle_increment, self.beams,
++                                      max(msg.range_min, 0.05), msg.range_max)
++        if len(ranges) < MIN_BEAMS:
++            return
++        self.pf.update_sensor(ranges, angles, sensor, self.lmap)
++        self.pf.resample()
++        self.map_T_odom = compose(self.pf.estimate(), inverse(odom_pose))
++        self.check_localized(*self.pf.spread())
++        self.updates += 1
++        if self.publish_particles and self.updates % 5 == 0:
++            self.publish_cloud(msg.header.stamp)
++
++    def check_localized(self, pos_std, yaw_std):
++        if self.localized:
++            if pos_std > self.lost_xy:
++                self.localized, self.good = False, 0
++                self.get_logger().error(f'lost: particles spread {pos_std:.2f} m, not driving')
++        else:
++            self.good = self.good + 1 if pos_std <= self.conv_xy and yaw_std <= self.conv_yaw else 0
++            if self.good >= self.conv_updates:
++                self.localized = True
++                self.get_logger().info(f'localized (spread {pos_std:.3f} m, {yaw_std:.3f} rad), driving')
++
++    def publish_cloud(self, stamp):
++        msg = PoseArray()
++        msg.header.stamp, msg.header.frame_id = stamp, self.frame
++        step = max(1, self.pf.n // MAX_PARTICLES_SHOWN)
++        for x, y, yaw in self.pf.p[::step]:
++            pose = Pose()
++            pose.position.x, pose.position.y = float(x), float(y)
++            pose.orientation.z, pose.orientation.w = yaw_quaternion(float(yaw))
++            msg.poses.append(pose)
++        self.particles_pub.publish(msg)
++
++    # ---------------- resets and manual initial poses ----------------
++    def reset_cb(self, msg):
++        if self.localized or self.pending is None:
++            self.get_logger().warning(f'sim reset ({msg.data}): relocalizing, not driving')
++        self.localized = False
++        self.good = 0
++        self.pending = time.monotonic()
++
++    def initialpose_cb(self, msg):
++        if msg.header.frame_id not in ('', self.frame):
++            self.get_logger().warning(f"/initialpose in frame '{msg.header.frame_id}', needs '{self.frame}'")
++            return
++        self.init_filter(pose2d(msg.pose.pose), '/initialpose')
++
++    def gt_cb(self, msg):
++        x, y, yaw = pose2d(msg.pose.pose)
++        v = msg.twist.twist.linear
++        self.gt = (x, y, yaw, math.hypot(v.x, v.y))
++
++    def tick(self):
++        """After a reset: restart the cloud once the car has settled."""
++        if self.pending is None or self.odom is None:
++            return
++        waited = time.monotonic() - self.pending
++        speed = self.gt[3] if self.gt is not None else self.odom[2]
++        if waited < self.debounce or (speed >= self.still_speed and waited < self.timeout):
++            return
++        if self.gt is not None and self.origin is not None:
++            self.init_filter(world_to_map(self.origin, *self.gt[:3]), 'relocalizing')
++        else:
++            self.get_logger().warning('no ground truth or map_to_world.yaml: assuming the car is at the map origin')
++            self.init_filter(MAP_ORIGIN, 'relocalizing')
++
++
++def main():
++    rclpy.init()
++    node = MclNode()
++    try:
++        rclpy.spin(node)
++    except (KeyboardInterrupt, ExternalShutdownException):
++        pass
++    finally:
++        node.destroy_node()
++        rclpy.try_shutdown()
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/ws/src/perception/setup.py b/ws/src/perception/setup.py
+index 958fcdb..e7f9175 100644
+--- a/ws/src/perception/setup.py
++++ b/ws/src/perception/setup.py
+@@ -18,7 +18,7 @@ setup(
+     zip_safe=True,
+     maintainer='SIGRobotics',
+     maintainer_email='todo@todo.todo',
+-    description='Cartographer mapping and localization, and saving maps to tracks/<name>/.',
++    description='Cartographer mapping and localization, particle filter (MCL) localization, and saving maps to tracks/<name>/.',
+     license='TODO: License declaration',
+     tests_require=['pytest'],
+     entry_points={
+@@ -27,6 +27,7 @@ setup(
+             'map_origin = perception.map_origin:main',
+             'corrector = perception.corrector:main',
+             'localization_gate = perception.localization_gate:main',
++            'mcl_node = perception.mcl_node:main',
+         ],
+     },
+ )
+diff --git a/ws/src/perception/test/test_mcl.py b/ws/src/perception/test/test_mcl.py
+new file mode 100644
+index 0000000..faea3a9
+--- /dev/null
++++ b/ws/src/perception/test/test_mcl.py
+@@ -0,0 +1,182 @@
++"""mcl: map loading, SE(2) helpers, motion model, and localization on a synthetic track with a simulated lidar."""
++import math
++
++import numpy as np
++import pytest
++from PIL import Image
++
++from perception.mcl import (LikelihoodMap, ParticleFilter, compose, inverse, relative, select_beams, wrap)
++
++RES = 0.05
++LASER = (0.27, 0.0, 0.0)          # laser in base_link (rear axle)
++ANGLE_MIN, ANGLE_INC, N_SCAN, RANGE_MAX = -math.radians(135), math.radians(1.0), 271, 10.0
++
++
++def make_track():
++    """20 x 12 m loop corridor (2.5 m wide) with an asymmetric wall notch and a pillar. Image order."""
++    h, w = int(12 / RES), int(20 / RES)
++    occ = np.zeros((h, w), dtype=bool)
++
++    def box(x0, y0, x1, y1):   # metres, y up
++        occ[h - int(y1 / RES):h - int(y0 / RES), int(x0 / RES):int(x1 / RES)] = True
++
++    box(0, 0, 20, 0.2), box(0, 11.8, 20, 12), box(0, 0, 0.2, 12), box(19.8, 0, 20, 12)   # outer walls
++    box(2.7, 2.7, 17.3, 9.3)                                                             # island
++    box(9.0, 0.2, 10.5, 1.0)                                                             # notch
++    box(15.0, 10.2, 15.4, 11.0)                                                          # wall stub
++    box(3.0, 9.3, 3.4, 10.0)                                                             # stub on the island
++    free = ~occ
++    free[:int(0.2 / RES)] = free[-int(0.2 / RES):] = False
++    return LikelihoodMap(occ, free, RES, (0.0, 0.0))
++
++
++def lap(step=0.08):
++    """Poses (x, y, yaw) along the corridor centre line (rounded rectangle), counter-clockwise."""
++    x0, y0, x1, y1, r = 1.45, 1.45, 18.55, 10.55, 0.9
++    pts = []
++
++    def seg(a, b):
++        n = max(1, int(math.dist(a, b) / step))
++        pts.extend((a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n) for i in range(n))
++
++    def arc(cx, cy, a0):
++        n = max(1, int(r * math.pi / 2 / step))
++        pts.extend((cx + r * math.cos(a0 + math.pi / 2 * i / n), cy + r * math.sin(a0 + math.pi / 2 * i / n))
++                   for i in range(n))
++
++    seg((x0 + r, y0), (x1 - r, y0)), arc(x1 - r, y0 + r, -math.pi / 2)
++    seg((x1, y0 + r), (x1, y1 - r)), arc(x1 - r, y1 - r, 0.0)
++    seg((x1 - r, y1), (x0 + r, y1)), arc(x0 + r, y1 - r, math.pi / 2)
++    seg((x0, y1 - r), (x0, y0 + r)), arc(x0 + r, y0 + r, math.pi)
++    pts.append(pts[0])
++    return [(p[0], p[1], math.atan2(q[1] - p[1], q[0] - p[0])) for p, q in zip(pts[:-1], pts[1:])]
++
++
++def scan_from(lmap, pose, rng):
++    """Simulated lidar at a base_link pose: ray march through the occupancy grid (+ 1 cm noise)."""
++    x, y, th = compose(pose, LASER)
++    angles = th + ANGLE_MIN + ANGLE_INC * np.arange(N_SCAN)
++    t = np.arange(0.1, RANGE_MAX, 0.02)
++    px = x + t[None, :] * np.cos(angles)[:, None]
++    py = y + t[None, :] * np.sin(angles)[:, None]
++    col = np.floor(px / RES).astype(int)
++    row = lmap.h - 1 - np.floor(py / RES).astype(int)
++    inside = (col >= 0) & (col < lmap.w) & (row >= 0) & (row < lmap.h)
++    hit = np.where(inside, lmap.occupied[np.clip(row, 0, lmap.h - 1), np.clip(col, 0, lmap.w - 1)], False)
++    first = np.where(hit.any(axis=1), hit.argmax(axis=1), len(t) - 1)
++    r = t[first] + rng.normal(0.0, 0.01, N_SCAN)
++    r[~hit.any(axis=1)] = RANGE_MAX
++    return r
++
++
++def drive(pf, lmap, poses, rng, odom_bias=1.03, every=3):
++    """Run the filter along a lap with biased, noisy wheel odometry; yields (true pose, estimate)."""
++    odom_prev = poses[0]
++    odom = poses[0]
++    for i in range(every, len(poses), every):
++        true_delta = relative(poses[i - every], poses[i])
++        noisy = (true_delta[0] * odom_bias + rng.normal(0, 0.003), true_delta[1] + rng.normal(0, 0.003),
++                 true_delta[2] + rng.normal(0, 0.003))
++        odom = compose(odom, noisy)
++        pf.predict(relative(odom_prev, odom))
++        odom_prev = odom
++        r, a = select_beams(scan_from(lmap, poses[i], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
++        pf.update_sensor(r, a, LASER, lmap)
++        pf.resample()
++        yield poses[i], pf.estimate()
++
++
++def pose_error(true, est):
++    return math.hypot(true[0] - est[0], true[1] - est[1]), abs(float(wrap(true[2] - est[2])))
++
++
++@pytest.fixture(scope='module')
++def lmap():
++    return make_track()
++
++
++def test_se2_helpers():
++    a, b = (1.0, 2.0, 0.7), (-0.5, 0.3, -1.2)
++    assert compose(a, inverse(a)) == pytest.approx((0.0, 0.0, 0.0), abs=1e-12)
++    assert relative(a, compose(a, b)) == pytest.approx(b)
++    assert compose((0, 0, math.pi / 2), (1, 0, 0)) == pytest.approx((0, 1, math.pi / 2))
++    assert abs(float(wrap(3 * math.pi))) == pytest.approx(math.pi)
++    assert float(wrap(0.1 + 2 * math.pi)) == pytest.approx(0.1)
++
++
++def test_map_yaml_matches_save_map_format(tmp_path):
++    pix = np.full((20, 40), 254, dtype=np.uint8)   # 2 x 1 m at 0.05
++    pix[:, 0] = 0                                  # wall at x in [0, 0.05)
++    pix[0, :] = 205                                # unknown top row
++    Image.fromarray(pix).save(tmp_path / 'map.pgm')
++    (tmp_path / 'map.yaml').write_text('image: map.pgm\nmode: trinary\nresolution: 0.05\n'
++                                       'origin: [-1.0, 3.0, 0.0]\nnegate: 0\noccupied_thresh: 0.65\n'
++                                       'free_thresh: 0.196\n')
++    m = LikelihoodMap.from_yaml(tmp_path / 'map.yaml')
++    assert m.distance(np.array([-0.975]), np.array([3.5]))[0] == 0.0          # in the wall column
++    assert m.distance(np.array([-0.475]), np.array([3.5]))[0] == pytest.approx(0.5, abs=0.06)
++    assert m.distance(np.array([50.0]), np.array([3.5]))[0] == m.max_dist     # outside the map
++    assert not m.free[0].any() and m.free[5, 5]                               # unknown is not free
++    grid = m.occupancy_grid().reshape(20, 40)                                 # row 0 = min y (image flipped)
++    assert grid[0, 0] == 100 and grid[0, 5] == 0 and (grid[-1] == -1).all()
++
++
++def test_map_with_rotated_origin_is_rejected(tmp_path):
++    Image.fromarray(np.zeros((4, 4), dtype=np.uint8)).save(tmp_path / 'map.pgm')
++    (tmp_path / 'map.yaml').write_text('image: map.pgm\nresolution: 0.05\norigin: [0, 0, 0.5]\nnegate: 0\n')
++    with pytest.raises(ValueError):
++        LikelihoodMap.from_yaml(tmp_path / 'map.yaml')
++
++
++def test_select_beams_drops_invalid_and_max_range():
++    r = np.array([np.nan, 0.05, 2.0, np.inf, 9.5, 3.0])
++    ranges, angles = select_beams(r, -1.0, 0.1, 6, 0.15, 9.5)
++    assert ranges.tolist() == [2.0, 3.0]
++    assert angles == pytest.approx([-1.0 + 0.2, -1.0 + 0.5])
++
++
++def test_predict_without_motion_adds_no_noise_and_with_motion_moves_the_cloud():
++    pf = ParticleFilter(n=2000, seed=1)
++    pf.init_gaussian((1.0, 1.0, math.pi / 2), 0.0, 0.0)
++    pf.predict((0.0, 0.0, 0.0))
++    assert np.allclose(pf.p, [1.0, 1.0, math.pi / 2])
++    pf.predict((1.0, 0.0, 0.0))                    # 1 m forward along +y
++    assert pf.estimate()[:2] == pytest.approx((1.0, 2.0), abs=0.02)
++    assert 0.02 < pf.spread()[0] < 0.3
++
++
++def test_stationary_updates_converge_from_a_known_start(lmap):
++    """What the node does before driving: the start pose is known to ~15 cm, the car waits for 'localized'."""
++    rng = np.random.default_rng(0)
++    start = lap()[0]
++    pf = ParticleFilter(n=1000, seed=0)
++    pf.init_gaussian(start, 0.15, 0.1)
++    r, a = select_beams(scan_from(lmap, start, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
++    for _ in range(8):
++        pf.update_sensor(r, a, LASER, lmap)
++        pf.resample()
++    pos, yaw = pf.spread()
++    assert pos < 0.1 and yaw < 0.08
++    assert pose_error(start, pf.estimate())[0] < 0.1
++
++
++def test_tracks_a_lap(lmap):
++    rng = np.random.default_rng(1)
++    poses = lap()
++    pf = ParticleFilter(n=1000, seed=1)
++    pf.init_gaussian(poses[0], 0.15, 0.1)
++    errors = [pose_error(t, e) for t, e in drive(pf, lmap, poses, rng, odom_bias=1.0)]
++    assert max(e[0] for e in errors) < 0.2 and max(e[1] for e in errors) < 0.1
++    assert np.mean([e[0] for e in errors]) < 0.08
++
++
++def test_tracks_a_lap_with_3_percent_odometry_scale_error(lmap):
++    """The corridor straights only constrain the lateral position, so the along-track error grows between
++    features (the notch, the corners) and is pulled back there: bounded, not zero."""
++    rng = np.random.default_rng(1)
++    poses = lap()
++    pf = ParticleFilter(n=1000, seed=1)
++    pf.init_gaussian(poses[0], 0.15, 0.1)
++    errors = [pose_error(t, e) for t, e in drive(pf, lmap, poses, rng, odom_bias=1.03)]
++    assert max(e[0] for e in errors) < 0.35 and max(e[1] for e in errors) < 0.15
++    assert np.mean([e[0] for e in errors]) < 0.12
