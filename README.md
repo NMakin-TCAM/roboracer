@@ -32,10 +32,10 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time 
 |---|---|---|
 | **Simulator bridge** | `autodrive_bridge` | Socket.IO bridge to AutoDRIVE (`fast_bridge`), one sensor frame per sim frame; publishes `/scan`, `/sensors/imu/raw`, `/odom` (wheel odometry) and sim ground truth under the f1tenth_system names. A VESC stand-in (`adapter`) runs a speed loop on `/drive` with an acceleration ramp, as f1tenth_system does on the car. Detects sim resets and respawns, stops the car on them and announces them on `sim_reset`. Keyboard teleop. |
 | **Mapping** | `perception` | Cartographer 2D SLAM with LiDAR, wheel odometry and IMU. `save_map` waits for the final optimization and writes the pbstream, occupancy grid and the mapping lap's trajectory. |
-| **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. |
+| **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. Alternative: a Monte Carlo localization particle filter (`mcl_node`, `localizer:=mcl`) on the saved `map.yaml`. |
 | **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; a preview image of the result. Stationary-obstacle avoidance (`obstacle_spliner_node`): the raceline shifted sideways around obstacles the map did not have. |
 | **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. With `avoid:=true`, it follows the obstacle-avoiding path instead, and stops when there is no collision-free one. Follow the gap as a no-map fallback. A centring wall follower (the default) and an experimental follow the gap with disparity extension, either of which drives the mapping laps by itself. |
-| **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 124 unit and integration tests. |
+| **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 132 unit and integration tests. |
 
 ## Repository layout
 
@@ -96,6 +96,21 @@ car and press Enter.
 
 Check `tracks/<name>/preview.png` before racing. To re-plan an existing map (for example after changing
 the car parameters in `ws/src/planning/config/racecar.ini`): `ros2 run planning build_raceline <name>`.
+
+### Particle filter (MCL) instead of Cartographer localization
+
+```bash
+scripts/race.sh <name> speed_scale:=0.5 localizer:=mcl     # or: ros2 launch control race.launch.py track:=<name> localizer:=mcl
+```
+
+`perception`'s `mcl_node` is a numpy particle filter with a likelihood-field lidar model (no range_libc
+build) on `tracks/<name>/map.yaml`. It publishes the same `map -> odom` and `/localized_pose` as the
+Cartographer path, so pure pursuit is unchanged, plus `/mcl/particles` and `/map` for Foxglove. It starts at
+the map origin (where `race.sh` resets the car), drives only once the cloud is tight, withdraws the pose if
+the cloud spreads (the car stops), and restarts after every sim reset. To start elsewhere, publish a
+`/initialpose` (Foxglove or RViz). It has no global localization. Parameters: `ws/src/perception/config/mcl.yaml`;
+`ros2 launch perception mcl.launch.py track:=<name> particles:=2000`. Never run it with `localization.launch.py`:
+both publish `map -> odom`.
 
 ### No map
 
