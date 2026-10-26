@@ -48,7 +48,7 @@ Check with `ros2 node list` and kill leftovers before the next launch.
 | Package | Contents |
 |---|---|
 | `autodrive_bridge` | `fast_bridge`, `adapter`, `wheel_odom`, `teleop_keyboard`; `autodrive_launch.py`. Sim only: replaced by f1tenth_system on the car. |
-| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
+| `perception` | Cartographer configs, `mapping.launch.py`, `localization.launch.py`, `save_map`, `map_origin`. Particle filter localization instead of Cartographer's: `mcl.launch.py` (`mcl_node`, `mcl.py`, `config/mcl.yaml`). Experimental, not in the pipeline: `ekf.launch.py` (robot_localization IMU EKF + `corrector`, a drift-corrected forward speed on `/odometry/corrected`, sim only) |
 | `planning` | `build_raceline` = `centerline` extraction + TUM `mintime` optimization. `obstacle_spliner_node`: stationary-obstacle avoidance, `/local_path` (`race.launch.py avoid:=true`) |
 | `control` | `pure_pursuit_node`, `pure_pursuit.launch.py`, `race.launch.py`. `follow_the_gap_node` (`follow_the_gap.launch.py`): reactive `/scan` -> `/drive`, needs no map, the fallback. `wall_follow_node` (`wall_follow.launch.py`): drives the mapping laps (`map_track.sh --wall-follow`), the default. `disparity_gap_node` (`disparity_gap.launch.py`): follow the gap with disparity extension, also drives the mapping laps (`map_track.sh --gap-follow`, experimental: see control/README.md) |
 
@@ -60,9 +60,9 @@ Check with `ros2 node list` and kill leftovers before the next launch.
 | `/odom`, TF `odom -> base_link` | `nav_msgs/Odometry` | wheel_odom (sim) / vesc_to_odom (car) |
 | `/sensors/imu/raw` (frame `imu`) | `sensor_msgs/Imu`, accel includes gravity; Cartographer uses it | adapter (sim) / vesc (car) |
 | `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, wall_follow or disparity_gap (mapping), pure_pursuit, follow_the_gap |
-| TF `map -> odom` | | Cartographer (mapping and localization) |
+| TF `map -> odom` | | Cartographer (mapping and localization), or `mcl_node` with `localizer:=mcl` |
 | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
-| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate: `/tracked_pose` relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
+| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate (or `mcl_node`): `/tracked_pose` (or the filter pose) relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
 | `/autodrive/roboracer_1/sim_reset` | `std_msgs/String`, the reason | fast_bridge (sim only): one event per sim reset. Reset commands always; respawns and other teleports (collision count change, position jump) only with restricted topics. fast_bridge also replies zeros for `reset_frames` frames |
 | `/local_path` | `nav_msgs/Path`, frame `map`, one pose per raceline point | obstacle_spliner_node: the raceline, shifted around the nearest obstacle in the way; pure_pursuit follows it with `avoid:=true` |
 | `/local_path/valid` | `std_msgs/Bool` | obstacle_spliner_node: false when its pose or scan is stale or no side is collision-free (pure_pursuit then stops) |
