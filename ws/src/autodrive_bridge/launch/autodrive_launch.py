@@ -3,6 +3,7 @@
 fast_bridge: AutoDRIVE app <-> ROS 2 over Socket.IO on :4567 (/autodrive/roboracer_1/*)
 adapter:     sim sensors -> /scan, /sensors/imu/raw, /ground_truth/odom;  /drive -> throttle/steering
 wheel_odom:  rear-wheel encoders -> /odom + TF odom -> base_link (sim stand-in for vesc_to_odom)
+map_view:    /map + TF map -> base_link -> the app's Mapping tab (TCP to the host's :4581)
 foxglove_bridge on :8765
 
 Teleop runs in its own terminal: ros2 run autodrive_bridge teleop_keyboard
@@ -30,5 +31,6 @@ def generate_launch_description():
              parameters=[vehicle, config]),
         Node(package='autodrive_bridge', executable='wheel_odom', name='wheel_odom', output='screen',
              parameters=[vehicle, config]),
+        Node(package='autodrive_bridge', executable='map_view', name='map_view', output='screen'),
         Node(package='foxglove_bridge', executable='foxglove_bridge', name='foxglove_bridge'),
     ])
