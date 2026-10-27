@@ -18,15 +18,21 @@ mcl:
     converged_std_xy: 0.10     # m  \  localized (the car may drive) after converged_updates updates
     converged_std_yaw: 0.08    # rad / below both
     converged_updates: 3
-    lost_std_xy: 0.60          # m, the pose is withdrawn (the car stops) if the cloud spreads beyond this
+    lost_std_xy: 0.60          # m, the only way the pose is withdrawn (the car stops): the cloud spreads
     debounce: 0.5              # s after a sim reset event before searching for the car
     still_speed: 0.1           # m/s, "the car has stopped" after a reset
     publish_particles: true    # /mcl/particles for Foxglove
-    # finding the car (global scan matching: start, sim reset, lost)
+    # finding the car (global scan matching in a worker thread: start, sim reset, lost)
     min_fit: 0.5               # a search result fitting the scan worse than this (0..1) is not a pose
-    ambiguity: 0.97            # a 2nd place fitting >= this x the best: tie, broken by the last known pose
-    prior_radius: 3.0          # m, "near the last known pose" (or the map origin) for that tie-break
-    search_period: 0.5         # s between search attempts while the car is not found
+    ambiguity: 0.97            # a 2nd place fitting >= this x the best: tie, settled from the last known pose
+    prior_radius: 3.0          # m, "near the last known pose" (or the map origin) for that
+    yaw_scale: 1.0             # m per rad of heading difference when comparing places to the last pose
+    search_period: 0.5         # s between search attempts while the car is not found ...
+    search_period_max: 2.0     # s ... backing off to this
+    force_after: 4             # failed attempts before a best guess (with relaxed_min_fit) instead of waiting
+    relaxed_min_fit: 0.3
+    validate_distance: 5.0     # m of driving after a guess: the other places that fit are ruled out ...
+    validate_margin: 0.05      # ... unless one keeps fitting better by this (mean fit): switch to it
     # thrown off while driving (wheel slip, a stalled sensor stream)
     fit_drop: 0.75             # fit below this x its running level for fit_bad_updates updates: local search
     fit_bad_updates: 3
@@ -38,5 +44,5 @@ mcl:
     recheck_gain: 0.03         # fit gain that counts as better; re-anchors only when two rechecks agree
     recheck_min_shift: 0.08    # m, smaller offsets are left to the filter
     recheck_agree: 0.1         # m between the two rechecks' offsets
-    lost_fit: 0.4              # fit below this x its level for lost_time s: lost, the car stops and searches
-    lost_time: 1.0             # s
+    doubt_fit: 0.4             # fit below this x its level for doubt_updates updates in a row: a global search
+    doubt_updates: 10          # in the background, moving the car only if it is clearly elsewhere

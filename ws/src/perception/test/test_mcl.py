@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from perception.mcl import (LikelihoodMap, ParticleFilter, ScanMatcher, compose, inverse, relative, select_beams,
-                            wrap)
+from perception.mcl import (Alternatives, LikelihoodMap, ParticleFilter, ScanMatcher, choose_pose, compose, inverse,
+                            relative, select_beams, wrap)
 
 RES = 0.05
 LASER = (0.27, 0.0, 0.0)          # laser in base_link (rear axle)
@@ -252,3 +252,74 @@ def test_local_search_reanchors_a_filter_thrown_off_by_the_odometry(lmap, matche
     best, fit = matcher.search_local(stale, r, a, LASER)
     assert pose_error(true, best)[0] < 0.08 and pose_error(true, best)[1] < math.radians(2)
     assert fit > 0.8
+
+
+MAP_ORIGIN = (0.0, 0.0, 0.0)
+
+
+def global_hyps(lmap, matcher, pose, seed):
+    """search_global's hypotheses for a scan at pose, and the refine callable choose_pose takes."""
+    rng = np.random.default_rng(seed)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    return matcher.search_global(r, a, LASER), lambda q: matcher.search_local(q, r, a, LASER, radius=1.0,
+                                                                              yaw_range=math.radians(10))
+
+
+@pytest.mark.parametrize('i', [0, 100, 200, 300, 340, 360, 380, 400, 420])
+def test_choose_pose_resolves_ties_with_a_good_prior(lmap, matcher, i):
+    """The review's stuck cases (340: the same spot facing the other way; 360-400: along the top straight):
+    with the car's last pose as the prior, a pick is made and it is the right one."""
+    pose = lap()[i]
+    hyps, refine = global_hyps(lmap, matcher, pose, i)
+    choice = choose_pose(hyps, [pose, MAP_ORIGIN], refine=refine)
+    assert choice is not None
+    assert pose_error(pose, choice[0])[0] < 0.15 and pose_error(pose, choice[0])[1] < math.radians(3)
+
+
+def test_choose_pose_waits_on_a_useless_prior_then_guesses_with_alternatives(lmap, matcher):
+    pose = lap()[380]                                  # top straight: many places fit
+    hyps, refine = global_hyps(lmap, matcher, pose, 7)
+    far = (10.0, 6.0, 0.0)                             # inside the island: near nothing
+    assert choose_pose(hyps, [far], refine=refine) is None
+    pick, alternatives, _ = choose_pose(hyps, [far], force=True)
+    assert alternatives
+    assert any(pose_error(pose, p)[0] < 0.15 for p in [pick] + alternatives)
+
+
+def test_choose_pose_takes_a_unique_best_regardless_of_the_prior(lmap, matcher):
+    pose = (9.75, 1.45, 0.0)                           # beside the notch
+    pick, alternatives, _ = choose_pose(global_hyps(lmap, matcher, pose, 2)[0], [(18.0, 10.0, 3.0)])
+    assert pose_error(pose, pick)[0] < 0.1 and alternatives == []
+
+
+def test_alternatives_switch_to_the_true_pose_once_the_car_moves(lmap, matcher):
+    """A wrong guess 1.2 m along the bottom straight, with the notch coming up: carried along with the true
+    alternative, the scans rule it out within a few metres of driving."""
+    rng = np.random.default_rng(8)
+    poses = lap()
+    start = 45
+    true = poses[start]
+    wrong = compose(true, (1.2, 0.0, 0.0))             # 1.2 m further along the same straight
+    alts = Alternatives([true], odom_pose=true)        # odometry frame = map frame here
+    switched = None
+    for k in range(start + 3, start + 60, 3):
+        moved = relative(poses[start], poses[k])
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        switched = alts.update(matcher, compose(wrong, moved), poses[k], r, a, LASER)
+        if switched or alts.done:
+            break
+    assert switched is not None
+    assert pose_error(poses[k], switched[0])[0] < 0.1
+
+
+def test_alternatives_keep_a_correct_pick(lmap, matcher):
+    rng = np.random.default_rng(9)
+    poses = lap()
+    start = 45
+    alts = Alternatives([compose(poses[start], (1.2, 0.0, 0.0))], odom_pose=poses[start])
+    for k in range(start + 3, start + 100, 3):
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        assert alts.update(matcher, poses[k], poses[k], r, a, LASER) is None
+        if alts.done:
+            break
+    assert alts.done

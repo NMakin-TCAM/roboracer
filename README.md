@@ -108,10 +108,12 @@ build) on `tracks/<name>/map.yaml`. It publishes the same `map -> odom` and `/lo
 Cartographer path, so pure pursuit is unchanged, plus `/mcl/particles` and `/map` for Foxglove. It finds the
 car by itself with a scan-matching search over the whole track (~0.2 s, standing still, any heading): at the
 start, after every sim reset or crash, and when lost; no sim ground truth, so it behaves as on the real car. If
-two places on the track look the same to the lidar, it takes the one near the last known pose (or the map
-origin) and otherwise waits; a `/initialpose` (Foxglove or RViz) settles it. While driving, it re-anchors the
-pose when the scan stops fitting the map (wheel slip, a stalled sensor stream) without stopping the car, and
-withdraws the pose (the car stops) only when the cloud spreads or the scan has not fit for a second.
+two places on the track look the same to the lidar, it settles it from the last known pose (or the map origin);
+when even that cannot tell, it takes its best guess after a few tries and keeps the other places, switching if
+one of them fits better as the car drives (a `/initialpose` from Foxglove or RViz also settles it). While
+driving, it re-anchors the pose when the scan stops fitting the map (wheel slip, a stalled sensor stream), and
+a scan that keeps not fitting (something the map does not have, or the car moved far) only starts a background
+search: the car stops only when the particle cloud itself spreads.
 Parameters: `ws/src/perception/config/mcl.yaml`; `ros2 launch perception mcl.launch.py track:=<name> particles:=2000`.
 Never run it with `localization.launch.py`: both publish `map -> odom`.
 

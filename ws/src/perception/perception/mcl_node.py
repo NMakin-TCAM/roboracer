@@ -8,19 +8,25 @@ Started by mcl.launch.py. Same outputs as localization.launch.py:
 Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
 
   find:      the car finds itself with a global scan-matching search (ScanMatcher) over the whole drivable
-             area: at the start, after a sim reset, and when lost. No ground truth is used, so the sim behaves
-             like the real car. If several places fit the scan about as well (ambiguity), the one near the
-             last known pose (or the map origin, where race.sh puts the car) wins; with no such tie-break the
-             car waits and retries every search_period s (or takes an /initialpose).
+             area, in a worker thread (the pose and TF keep flowing): at the start, after a sim reset, and when
+             lost. No ground truth is used, so the sim behaves like the real car. If several places fit the
+             scan about as well, choose_pose refines from the last known pose (or the map origin, where race.sh
+             puts the car). If that cannot decide, the search retries (backing off to search_period_max); after
+             force_after tries it takes its best guess (and a relaxed_min_fit floor) and keeps the other places
+             as alternatives, scored against the scans as the car drives until one fits clearly better (switch)
+             or validate_distance m rule them out.
   converge:  the cloud starts around the pose found; until it is tight (converged_*), scans are used even
              though the car stands still, then the car may drive. Afterwards a scan is used after
              update_min_d / update_min_a of odometry motion.
   thrown off: each update scores how well the scan fits the map at the estimate. When the fit stays below
              fit_drop x its running level for fit_bad_updates updates (wheel slip, a stalled sensor stream),
-             a local search re-anchors the cloud if it finds a clearly better pose; the car keeps driving.
-             Things the map does not have (obstacles) also lower the fit, so a low fit alone never stops the car.
-  lost:      the cloud spreading beyond lost_std_xy, or the fit below lost_fit x its level for lost_time s,
-             withdraws the pose (the car stops) and starts a global search.
+             a local search re-anchors the cloud if it finds a clearly better pose; every recheck_updates
+             updates a small local search catches what the fit does not show (along a straight). The car keeps
+             driving through both.
+  doubt:     the fit below doubt_fit x its level for doubt_updates updates in a row (beyond the local search's
+             reach, or something the map does not have): a global search in the background, re-anchoring only
+             if it finds the car clearly elsewhere. A low fit alone never stops the car.
+  lost:      only the cloud spreading beyond lost_std_xy withdraws the pose (the car stops) and starts a search.
   sim reset: fast_bridge's /autodrive/roboracer_1/sim_reset event: the pose is withheld at once; after
              debounce s with the car still, a global search.
   manual:    a PoseWithCovarianceStamped on /initialpose (RViz, Foxglove) restarts the cloud there.
@@ -28,6 +34,7 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped, TransformStamped
@@ -41,8 +48,8 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformBroadcaster, TransformException, TransformListener
 
 from perception.map_origin import pose2d
-from perception.mcl import (LikelihoodMap, ParticleFilter, ScanMatcher, compose, inverse, relative,
-                            select_beams, wrap)
+from perception.mcl import (Alternatives, LikelihoodMap, ParticleFilter, ScanMatcher, choose_pose, compose,
+                            inverse, pose_distance, relative, select_beams, wrap)
 from perception.tracks import track_dir
 
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -51,6 +58,7 @@ MIN_BEAMS = 10
 MAP_ORIGIN = (0.0, 0.0, 0.0)   # where race.sh puts the car: the pose mapping started from
 LOG_PERIOD = 2.0               # s between re-anchor log lines
 SLIP_COUNT = 5                 # re-anchors in a LOG_PERIOD: the scan keeps contradicting the odometry
+FIND_LOG_PERIOD = 5.0          # s between repeats of the same "cannot find the car" warning
 
 
 def yaw_quaternion(yaw):
@@ -80,10 +88,16 @@ class MclNode(Node):
         self.ambiguity = p('ambiguity', 0.97).value                 # 2nd place fitting this x the best: a tie
         self.prior_radius = p('prior_radius', 3.0).value            # m around the last known pose: tie-break
         self.search_period = p('search_period', 0.5).value          # s between global search attempts
+        self.search_period_max = p('search_period_max', 2.0).value  # s, backing off while they fail
+        self.force_after = p('force_after', 4).value                # failed attempts before a best guess
+        self.relaxed_min_fit = p('relaxed_min_fit', 0.3).value      # min_fit once guessing
+        self.yaw_scale = p('yaw_scale', 1.0).value                  # m per rad when comparing poses to priors
+        self.validate_distance = p('validate_distance', 5.0).value  # m of driving to rule out alternatives
+        self.validate_margin = p('validate_margin', 0.05).value     # mean fit an alternative must win by
         self.fit_drop = p('fit_drop', 0.75).value                   # x the fit's level: try a local search
         self.fit_bad_updates = p('fit_bad_updates', 3).value
-        self.lost_fit = p('lost_fit', 0.4).value                    # x the fit's level for lost_time s: lost
-        self.lost_time = p('lost_time', 1.0).value
+        self.doubt_fit = p('doubt_fit', 0.4).value                  # x the fit's level for doubt_updates
+        self.doubt_updates = p('doubt_updates', 10).value           # updates in a row: a background search
         self.local_radius = p('local_radius', 0.8).value            # m
         self.local_yaw = p('local_yaw', 0.26).value                 # rad
         self.snap_gain = p('snap_gain', 0.1).value                  # fit a re-anchored pose must gain
@@ -115,9 +129,16 @@ class MclNode(Node):
         self.search = 'start'         # why a global search is due, None while tracking
         self.priors = [MAP_ORIGIN]    # poses the car is likely near: tie-break for an ambiguous search
         self.last_search = 0.0
+        self.search_wait = self.search_period
+        self.attempts = 0             # failed global searches since the search started
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.job = None               # (future, kind, odom pose at the scan, generation, start time)
+        self.generation = 0           # bumped whenever a running search's result would be stale
+        self.alternatives = None      # Alternatives after a guessed pick
+        self.find_log = ('', 0.0)     # last "cannot find" warning and when
         self.fit_level = None         # running level of the fit while tracking
         self.fit_bad = 0
-        self.fit_low_since = None
+        self.doubt = 0
         self.rechecks = 0
         self.recheck_offset = None    # offset (in the car's frame) the last recheck found, waiting to agree
         self.anchors = []             # monotonic times of recent re-anchors
@@ -156,10 +177,11 @@ class MclNode(Node):
         msg.data = self.lmap.occupancy_grid().tolist()
         pub.publish(msg)
 
-    def init_filter(self, pose, reason, keep_localized=False, quiet=False):
-        """Cloud around pose. keep_localized: a re-anchor while driving (a scan-matched pose, so a tighter
-        cloud), the car does not stop for it."""
-        k = 0.3 if keep_localized else 1.0
+    def init_filter(self, pose, reason, keep_localized=False, quiet=False, matched=False):
+        """Cloud around pose. matched: a scan-matched pose, known to a few cm, so a tighter cloud (a loose one
+        never tightens along a featureless straight while the car stands, and the car would wait forever).
+        keep_localized: a re-anchor while driving (always matched), the car does not stop for it."""
+        k = 0.3 if keep_localized or matched else 1.0
         self.pf.init_gaussian(pose, k * self.init_std_xy, k * self.init_std_yaw)
         if not keep_localized:
             self.localized = False
@@ -167,7 +189,11 @@ class MclNode(Node):
         self.pending = None
         self.search = None
         self.fit_bad = 0
-        self.fit_low_since = None
+        self.doubt = 0
+        self.rechecks = 0
+        self.recheck_offset = None
+        self.alternatives = None
+        self.generation += 1
         if not quiet:
             self.get_logger().info(f'{reason}: particles at x={pose[0]:.2f} y={pose[1]:.2f} yaw={pose[2]:.2f}')
         self.initialized = True
@@ -182,6 +208,10 @@ class MclNode(Node):
         self.good = 0
         self.search = reason
         self.last_search = 0.0
+        self.search_wait = self.search_period
+        self.attempts = 0
+        self.alternatives = None
+        self.generation += 1
 
     # ---------------- odometry: TF and pose at the odom rate ----------------
     def odom_cb(self, msg):
@@ -232,15 +262,25 @@ class MclNode(Node):
                                       max(msg.range_min, 0.05), msg.range_max)
         if len(ranges) < MIN_BEAMS:
             return
+        self.poll_search()
         if self.search is not None:
-            self.find(ranges, angles, sensor)
+            now = time.monotonic()
+            if self.job is None and now - self.last_search >= self.search_wait:
+                self.last_search = now
+                force = self.attempts >= self.force_after
+                self.submit_search('find', ranges, angles, sensor, self.priors, force,
+                                   self.relaxed_min_fit if force else self.min_fit)
             return
         odom_pose = self.odom[0]
         delta = relative(self.last_odom_pose, odom_pose)
         trans = math.hypot(delta[0], delta[1])
-        if trans > self.max_jump:
-            self.get_logger().warning(f'odometry jumped {trans:.2f} m (reset or respawn?): not moving the cloud')
+        if trans > self.max_jump:   # the odometry frame jumped (restart, respawn): keep the pose, then check it
+            self.get_logger().warning(f'odometry jumped {trans:.2f} m (reset or respawn?): keeping the pose, '
+                                      'checking it against the map')
             self.last_odom_pose = odom_pose
+            self.map_T_odom = compose(self.pf.estimate(), inverse(odom_pose))
+            if self.localized and self.job is None:
+                self.submit_search('check', ranges, angles, sensor, [self.pf.estimate()], False, self.min_fit)
             return
         moved = trans >= self.update_min_d or abs(delta[2]) >= self.update_min_a
         if not moved and self.localized:
@@ -252,36 +292,104 @@ class MclNode(Node):
         self.pf.resample()
         self.map_T_odom = compose(self.pf.estimate(), inverse(odom_pose))
         self.check_localized(*self.pf.spread())
-        if self.localized:
+        if self.localized and self.search is None:
             self.check_fit(ranges, angles, sensor, odom_pose)
+        if self.localized and self.alternatives is not None and self.search is None:
+            self.validate(ranges, angles, sensor, odom_pose)
         self.updates += 1
         if self.publish_particles and self.updates % 5 == 0:
             self.publish_cloud(msg.header.stamp)
 
-    def find(self, ranges, angles, sensor):
-        """Global search, at most every search_period s; starts the cloud on an unambiguous result."""
-        now = time.monotonic()
-        if now - self.last_search < self.search_period:
-            return
-        self.last_search = now
-        t0 = time.monotonic()
+    # ---------------- global search, in the worker thread ----------------
+    def submit_search(self, kind, ranges, angles, sensor, priors, force, floor):
+        """kind 'find': the car is not localized; 'check': localized, but the scan has not fit for a while."""
+        self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor),
+                    kind, self.odom[0], self.generation, time.monotonic())
+
+    def search_job(self, ranges, angles, sensor, priors, force, floor):
+        """Worker thread: search_global, then choose_pose. Uses no node state but the (read-only) matcher."""
         hyps = self.matcher.search_global(ranges, angles, sensor)
-        ms = (time.monotonic() - t0) * 1000.0
-        if not hyps or hyps[0][1] < self.min_fit:
-            self.get_logger().warning(f'{self.search}: no pose fits the scan (best fit '
-                                      f'{hyps[0][1] if hyps else 0.0:.2f} < {self.min_fit}), retrying')
+        if not hyps or hyps[0][1] < floor:
+            return hyps, None
+
+        def refine(q):
+            return self.matcher.search_local(q, ranges, angles, sensor, radius=1.0, yaw_range=math.radians(10.0))
+
+        return hyps, choose_pose(hyps, priors, self.ambiguity, self.prior_radius, self.yaw_scale, force, refine)
+
+    def poll_search(self):
+        if self.job is None or not self.job[0].done():
             return
-        tied = [h for h in hyps if h[1] >= self.ambiguity * hyps[0][1]]
-        pick, how = tied[0], f'fit {tied[0][1]:.2f}'
-        if len(tied) > 1:
-            near = [h for h in tied if min(math.hypot(h[0][0] - q[0], h[0][1] - q[1]) for q in self.priors)
-                    <= self.prior_radius]
-            if len(near) != 1:
-                self.get_logger().warning(f'{self.search}: {len(tied)} places fit the scan about as well and '
-                                          f'{len(near)} are near the last known pose: waiting (or /initialpose)')
-                return
-            pick, how = near[0], f'fit {near[0][1]:.2f}, {len(tied)} places fit, chose the one near the last pose'
-        self.init_filter(pick[0], f'{self.search}: found the car in {ms:.0f} ms ({how})')
+        future, kind, odom_then, generation, t0 = self.job
+        self.job = None
+        if generation != self.generation:
+            return   # a reset, /initialpose or new search since it started
+        try:
+            hyps, choice = future.result()
+        except Exception as e:   # never let a search failure kill the node: it is retried
+            self.get_logger().error(f'global search failed: {e!r}')
+            return
+        ms = (time.monotonic() - t0) * 1000.0
+        moved = relative(odom_then, self.odom[0])   # the car may have moved during the search
+        if kind == 'check':
+            self.on_check(choice, moved, ms)
+        else:
+            self.on_find(hyps, choice, moved, ms)
+
+    def on_find(self, hyps, choice, moved, ms):
+        if choice is None:
+            self.attempts += 1
+            self.search_wait = min(self.search_wait * 1.5, self.search_period_max)
+            best = ', '.join(f'({h[0][0]:.1f}, {h[0][1]:.1f}, {math.degrees(h[0][2]):.0f} deg) fit {h[1]:.2f}'
+                             for h in hyps[:3])
+            why = ('no pose fits the scan' if not hyps or hyps[0][1] < self.min_fit else
+                   f'{sum(h[1] >= self.ambiguity * hyps[0][1] for h in hyps)} places fit about as well and the '
+                   'last known pose cannot tell')
+            self.warn_find(f'{self.search}: {why} (best: {best or "none"}); retrying, a best guess after '
+                           f'{self.force_after} tries (or /initialpose)')
+            return
+        pose, alternatives, how = choice
+        self.init_filter(compose(pose, moved), f'{self.search}: found the car in {ms:.0f} ms ({how})', matched=True)
+        if alternatives:
+            self.alternatives = Alternatives([compose(a, moved) for a in alternatives], self.odom[0],
+                                             margin=self.validate_margin, distance=self.validate_distance)
+
+    def on_check(self, choice, moved, ms):
+        if choice is None or not self.localized:
+            return
+        pose = compose(choice[0], moved)
+        est = self.pf.estimate()
+        if pose_distance(pose, est, self.yaw_scale) < self.local_radius:
+            return   # the car is where the filter has it: something the map does not have
+        self.get_logger().warning(f'relocated {math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m by a global '
+                                  f'search ({ms:.0f} ms, {choice[2]})')
+        self.init_filter(pose, 'relocate', keep_localized=True, quiet=True)
+
+    def warn_find(self, text):
+        now = time.monotonic()
+        if text != self.find_log[0] or now - self.find_log[1] > FIND_LOG_PERIOD:
+            self.find_log = (text, now)
+            self.get_logger().warning(text)
+
+    def validate(self, ranges, angles, sensor, odom_pose):
+        """After a guessed pick: switch to an alternative that keeps fitting clearly better."""
+        alt = self.alternatives
+        est = self.pf.estimate()
+        switch = alt.update(self.matcher, est, odom_pose, ranges, angles, sensor)
+        if switch is not None:
+            pose, fit_alt, fit_pick = switch
+            moved = relative(alt.odom0, odom_pose)
+            others = [q for q in (compose(a, moved) for a in alt.poses)
+                      if pose_distance(q, pose, self.yaw_scale) > 1.0] + [est]
+            self.get_logger().warning(f'the guess was wrong: switching {math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m '
+                                      f'to another place that fits (mean fit {fit_alt:.2f} vs {fit_pick:.2f})')
+            self.init_filter(pose, 'switch', keep_localized=True, quiet=True)
+            self.alternatives = Alternatives(others, odom_pose, margin=self.validate_margin,
+                                             distance=self.validate_distance)
+        elif alt.done:
+            self.get_logger().info(f'guess confirmed: {alt.travelled:.1f} m of driving ruled out '
+                                   f'{len(alt.poses)} other place(s)')
+            self.alternatives = None
 
     def check_fit(self, ranges, angles, sensor, odom_pose):
         """Re-anchor the cloud when the scan stops fitting where it is (see the module docstring)."""
@@ -289,16 +397,10 @@ class MclNode(Node):
         fit = self.matcher.fit(est, ranges, angles, sensor)
         if self.fit_level is None:
             self.fit_level = fit
-        now = time.monotonic()
-        if fit < self.lost_fit * self.fit_level:
-            self.fit_low_since = self.fit_low_since or now
-            if now - self.fit_low_since > self.lost_time:
-                self.get_logger().error(f'lost: the scan has not fit the map for {self.lost_time:.1f} s '
-                                        f'(fit {fit:.2f}, usually {self.fit_level:.2f}), not driving')
-                self.start_search('lost')
-                return
-        else:
-            self.fit_low_since = None
+        self.doubt = self.doubt + 1 if fit < self.doubt_fit * self.fit_level else 0
+        if self.doubt >= self.doubt_updates and self.job is None:
+            self.doubt = 0
+            self.submit_search('check', ranges, angles, sensor, [est], False, self.min_fit)
         if fit >= self.fit_drop * self.fit_level:
             self.fit_bad = 0
             self.fit_level += 0.02 * (fit - self.fit_level)
@@ -344,7 +446,6 @@ class MclNode(Node):
     def reanchor(self, pose, odom_pose, what):
         """Move the cloud to a scan-matched pose without stopping the car; log at most every LOG_PERIOD s."""
         self.init_filter(pose, 're-anchor', keep_localized=True, quiet=True)
-        self.map_T_odom = compose(pose, inverse(odom_pose))
         now = time.monotonic()
         self.anchors = [t for t in self.anchors if now - t < LOG_PERIOD] + [now]
         if now - self.anchor_log_t < LOG_PERIOD:
@@ -385,6 +486,8 @@ class MclNode(Node):
             self.get_logger().warning(f'sim reset ({msg.data}): relocalizing, not driving')
         self.localized = False
         self.good = 0
+        self.alternatives = None
+        self.generation += 1
         self.pending = time.monotonic()
 
     def initialpose_cb(self, msg):
@@ -415,6 +518,7 @@ def main():
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.pool.shutdown(wait=False, cancel_futures=True)
         node.destroy_node()
         rclpy.try_shutdown()
 

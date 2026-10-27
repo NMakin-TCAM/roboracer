@@ -190,6 +190,9 @@ class ParticleFilter:
         return pos, math.sqrt(-2.0 * math.log(max(r, 1e-12)))
 
 
+CENTRE_PULL = 0.005   # fit units per m (or rad) from the search centre: breaks ties toward it
+
+
 class ScanMatcher:
     """Correlative scan matching on the likelihood field: the fit of a pose is the mean over the beams of
     exp(-d^2 / 2 sigma^2), d = distance from the beam's endpoint to the nearest wall (1 = every endpoint on a
@@ -244,24 +247,27 @@ class ScanMatcher:
             out[i:i + chunk] = v.mean(axis=2)
         return out
 
-    def fit(self, pose, ranges, angles, sensor_pose):
-        """Fit of one pose (fine sigma)."""
+    def fit(self, pose, ranges, angles, sensor_pose, coarse=False):
+        """Fit of one pose (fine sigma; coarse: the forgiving one, for poses carried by odometry alone)."""
         if not len(ranges):
             return 0.0
-        return float(self._scores(self.fine, np.array([pose[:2]]), np.array([pose[2]]),
-                                  ranges, angles, sensor_pose)[0, 0])
+        return float(self._scores(self.coarse if coarse else self.fine, np.array([pose[:2]]),
+                                  np.array([pose[2]]), ranges, angles, sensor_pose)[0, 0])
 
     def search_local(self, pose, ranges, angles, sensor_pose, radius=0.8, yaw_range=math.radians(15.0),
                      step=None, yaw_step=math.radians(1.5)):
-        """Best (pose, fit) within radius / yaw_range of pose, on a grid of step (default: map resolution)."""
+        """Best (pose, fit) within radius / yaw_range of pose, on a grid of step (default: map resolution).
+        Among (nearly) equal fits the one closest to pose wins: along a featureless corridor the scan cannot
+        place the car, so the search does not move it."""
         step = step or self.lmap.res
         d = np.arange(-radius, radius + 1e-9, step)
         gx, gy = np.meshgrid(pose[0] + d, pose[1] + d)
         xy = np.c_[gx.ravel(), gy.ravel()]
-        yaws = pose[2] + np.arange(-yaw_range, yaw_range + 1e-9, yaw_step)
-        sc = self._scores(self.fine, xy, yaws, ranges, angles, sensor_pose)
-        i, j = np.unravel_index(int(np.argmax(sc)), sc.shape)
-        return (float(xy[i, 0]), float(xy[i, 1]), float(wrap(yaws[j]))), float(sc[i, j])
+        dyaw = np.arange(-yaw_range, yaw_range + 1e-9, yaw_step)
+        sc = self._scores(self.fine, xy, pose[2] + dyaw, ranges, angles, sensor_pose)
+        pull = CENTRE_PULL * (np.hypot(xy[:, 0] - pose[0], xy[:, 1] - pose[1])[:, None] + np.abs(dyaw)[None, :])
+        i, j = np.unravel_index(int(np.argmax(sc - pull)), sc.shape)
+        return (float(xy[i, 0]), float(xy[i, 1]), float(wrap(pose[2] + dyaw[j]))), float(sc[i, j])
 
     def search_global(self, ranges, angles, sensor_pose, seeds=40, separation=1.0,
                       separation_yaw=math.radians(30.0)):
@@ -291,3 +297,86 @@ class ScanMatcher:
                    or abs(float(wrap(pose[2] - q[0][2]))) > separation_yaw for q in out):
                 out.append((pose, score))
         return out
+
+
+def pose_distance(a, b, yaw_scale=1.0):
+    """Distance between two poses: metres, plus yaw_scale metres per radian of heading difference (the same
+    spot facing the other way is far)."""
+    return math.hypot(a[0] - b[0], a[1] - b[1]) + yaw_scale * abs(float(wrap(a[2] - b[2])))
+
+
+def choose_pose(hyps, priors, ambiguity=0.97, prior_radius=3.0, yaw_scale=1.0, force=False, refine=None):
+    """Pick the car's pose from search_global's hypotheses [(pose, fit), ...].
+
+    One hypothesis fitting clearly best: that one. Several tied (fit >= ambiguity x the best): the one
+    one at a prior pose (where the car was), within prior_radius: refine(prior) -> (pose, fit), a local
+    search from the prior that the scan moves only as far as it can tell (search_global's hypotheses sit ~1 m
+    apart at arbitrary places along a featureless corridor), if it fits as well as the tie; without refine, or
+    if it fits worse, the hypothesis clearly closest (pose_distance) to a prior. Otherwise None (the scan
+    cannot tell), unless force: then the closest to a prior within prior_radius, else the best fit.
+    Returns (pose, alternatives, how): alternatives are the other tied poses, to rule out once the car moves.
+    """
+    if not hyps:
+        return None
+    tied = [h for h in hyps if h[1] >= ambiguity * hyps[0][1]]
+    if len(tied) == 1:
+        return tied[0][0], [], f'fit {tied[0][1]:.2f}'
+
+    def dist(pose):
+        return min((pose_distance(pose, q, yaw_scale) for q in priors), default=math.inf)
+
+    ranked = sorted(tied, key=lambda h: dist(h[0]))
+    d0, d1 = dist(ranked[0][0]), dist(ranked[1][0])
+    pick = None
+    if d0 <= prior_radius and refine is not None:
+        prior = min(priors, key=lambda q: pose_distance(ranked[0][0], q, yaw_scale))
+        pose, fit = refine(prior)
+        if fit >= ambiguity * hyps[0][1]:
+            pick, how = pose, f'{len(tied)} places fit, refined from the last pose (fit {fit:.2f})'
+    if pick is None and d0 <= prior_radius and d1 > 2.0 * d0 + 0.5:
+        pick, how = ranked[0][0], f'{len(tied)} places fit, the one {d0:.1f} from the last pose'
+    if pick is None:
+        if not force:
+            return None
+        pick = ranked[0][0] if d0 <= prior_radius else tied[0][0]
+        how = f'{len(tied)} places fit, guessed the {"closest" if d0 <= prior_radius else "best"}; checking the others'
+    alternatives = [h[0] for h in tied if pose_distance(h[0], pick, yaw_scale) > 1.0]
+    return pick, alternatives, how
+
+
+class Alternatives:
+    """Poses the car might also be at after an ambiguous pick: carried along by the odometry and scored on
+    every update against the filter's pose, until one fits clearly better on average (switch to it) or the car
+    has driven far enough that the track no longer looks the same (they are ruled out)."""
+
+    def __init__(self, poses, odom_pose, margin=0.05, min_updates=5, distance=5.0):
+        self.poses = list(poses)
+        self.odom0 = odom_pose
+        self.last_odom = odom_pose
+        self.margin, self.min_updates, self.distance = margin, min_updates, distance
+        self.sums = np.zeros(len(self.poses))
+        self.sum_pick = 0.0
+        self.n = 0
+        self.travelled = 0.0
+
+    @property
+    def done(self):
+        return not self.poses or self.travelled >= self.distance
+
+    def update(self, matcher, pick, odom_pose, ranges, angles, sensor_pose):
+        """pick: the filter's pose now. Returns (alternative pose now, its mean fit, the pick's) to switch to,
+        or None."""
+        step = relative(self.last_odom, odom_pose)
+        self.travelled += math.hypot(step[0], step[1])
+        self.last_odom = odom_pose
+        moved = relative(self.odom0, odom_pose)
+        now = [compose(p, moved) for p in self.poses]
+        self.sum_pick += matcher.fit(pick, ranges, angles, sensor_pose, coarse=True)
+        self.sums += [matcher.fit(p, ranges, angles, sensor_pose, coarse=True) for p in now]
+        self.n += 1
+        if self.n < self.min_updates:
+            return None
+        j = int(np.argmax(self.sums))
+        if self.sums[j] / self.n > self.sum_pick / self.n + self.margin:
+            return now[j], self.sums[j] / self.n, self.sum_pick / self.n
+        return None
