@@ -19,6 +19,24 @@ mcl:
     converged_std_yaw: 0.08    # rad / below both
     converged_updates: 3
     lost_std_xy: 0.60          # m, the pose is withdrawn (the car stops) if the cloud spreads beyond this
-    debounce: 0.5              # s after a sim reset event before restarting the cloud
+    debounce: 0.5              # s after a sim reset event before searching for the car
     still_speed: 0.1           # m/s, "the car has stopped" after a reset
     publish_particles: true    # /mcl/particles for Foxglove
+    # finding the car (global scan matching: start, sim reset, lost)
+    min_fit: 0.5               # a search result fitting the scan worse than this (0..1) is not a pose
+    ambiguity: 0.97            # a 2nd place fitting >= this x the best: tie, broken by the last known pose
+    prior_radius: 3.0          # m, "near the last known pose" (or the map origin) for that tie-break
+    search_period: 0.5         # s between search attempts while the car is not found
+    # thrown off while driving (wheel slip, a stalled sensor stream)
+    fit_drop: 0.75             # fit below this x its running level for fit_bad_updates updates: local search
+    fit_bad_updates: 3
+    local_radius: 0.8          # m  \ local search window around the estimate
+    local_yaw: 0.26            # rad /
+    snap_gain: 0.1             # the local result must fit this much better to re-anchor (else: an obstacle)
+    recheck_updates: 5         # every this many updates, a small local search (catches along-straight error)
+    recheck_radius: 0.5        # m
+    recheck_gain: 0.03         # fit gain that counts as better; re-anchors only when two rechecks agree
+    recheck_min_shift: 0.08    # m, smaller offsets are left to the filter
+    recheck_agree: 0.1         # m between the two rechecks' offsets
+    lost_fit: 0.4              # fit below this x its level for lost_time s: lost, the car stops and searches
+    lost_time: 1.0             # s

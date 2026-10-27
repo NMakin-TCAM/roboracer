@@ -7,9 +7,11 @@ endpoints would land if the car were at that pose, looked up in a distance-to-ne
 That needs no range_libc (no Cython/CUDA build), runs on amd64 and arm64, and is a few vectorized
 numpy operations per scan.
 
-The filter tracks from a known start pose (the map origin after a sim reset, or an /initialpose); it has no
-global localization: on a track with similar-looking corridors a converged-looking cloud can sit on the wrong
-copy of the track, so it cannot be trusted to find its own start.
+The filter tracks a pose; ScanMatcher finds one. Its global search scores every pose in the drivable area
+(coarse to fine) against one scan, so the car can find itself standing still: at the start, after a crash, or
+when the filter is lost. It reports a second, distinct pose that fits almost as well (a track with
+similar-looking corridors), so the caller can refuse to guess. Its local search re-anchors a filter that the
+odometry has thrown off (wheel slip, a stalled sensor stream) faster than the cloud can diffuse back.
 
 Poses are (x, y, yaw) of base_link (the rear axle) in the map frame. The map is the map.pgm/map.yaml
 that save_map writes (ROS map_server format, trinary).
@@ -186,3 +188,106 @@ class ParticleFilter:
         pos = math.sqrt(float(self.w @ ((self.p[:, 0] - mx) ** 2 + (self.p[:, 1] - my) ** 2)))
         r = min(1.0, math.hypot(float(self.w @ np.sin(self.p[:, 2])), float(self.w @ np.cos(self.p[:, 2]))))
         return pos, math.sqrt(-2.0 * math.log(max(r, 1e-12)))
+
+
+class ScanMatcher:
+    """Correlative scan matching on the likelihood field: the fit of a pose is the mean over the beams of
+    exp(-d^2 / 2 sigma^2), d = distance from the beam's endpoint to the nearest wall (1 = every endpoint on a
+    wall, 0 = none near one). Brute force over a pose grid, vectorized."""
+    PASS_BACK = 0.3   # m before a beam's endpoint that must be free space
+
+    def __init__(self, lmap, sigma=0.10, coarse_step=0.2, coarse_sigma=0.3, yaw_step=math.radians(5.0),
+                 clearance=0.1):
+        """coarse_step: m between the global search's candidate positions, drivable cells only (free and at
+        least clearance from a wall); coarse_sigma: forgiving fit for that coarse grid."""
+        self.lmap = lmap
+        self.fine = np.exp(-0.5 * (lmap.dist / sigma) ** 2).astype(np.float32)
+        self.coarse = np.exp(-0.5 * (lmap.dist / coarse_sigma) ** 2).astype(np.float32)
+        self.passable = lmap.free.astype(np.float32)
+        self.coarse_step = coarse_step
+        self.yaw_step = yaw_step
+        k = max(1, int(round(coarse_step / lmap.res)))
+        rows, cols = np.nonzero(lmap.free & (lmap.dist >= clearance))
+        keep = (rows % k == 0) & (cols % k == 0)
+        rows, cols = rows[keep], cols[keep]
+        self.candidates = np.c_[lmap.ox + (cols + 0.5) * lmap.res, lmap.oy + (lmap.h - rows - 0.5) * lmap.res]
+
+    def _lookup(self, grid, x, y):
+        m = self.lmap
+        col = np.floor((x - m.ox) / m.res).astype(np.int64)
+        row = m.h - 1 - np.floor((y - m.oy) / m.res).astype(np.int64)
+        inside = (col >= 0) & (col < m.w) & (row >= 0) & (row < m.h)
+        return np.where(inside, grid[np.clip(row, 0, m.h - 1), np.clip(col, 0, m.w - 1)], 0.0)
+
+    def _scores(self, grid, xy, yaws, ranges, angles, sensor_pose):
+        """Fit of every (position, yaw) pair: array (len(xy), len(yaws)). A beam counts only if the space it
+        crossed is free in the map (sampled halfway and PASS_BACK before its endpoint): an endpoint that lands
+        inside a wall block, or a beam that passes through a wall, does not fit."""
+        lx, ly, lyaw = sensor_pose
+        ranges, angles = np.asarray(ranges), np.asarray(angles)
+        c, s = np.cos(yaws), np.sin(yaws)
+        dirx, diry = np.cos(lyaw + angles), np.sin(lyaw + angles)
+
+        def offsets(r):   # points at range r along each beam, relative to base_link's position: (yaws, beams)
+            bx, by = lx + r * dirx, ly + r * diry
+            return c[:, None] * bx[None, :] - s[:, None] * by[None, :], s[:, None] * bx[None, :] + c[:, None] * by[None, :]
+
+        ends = offsets(ranges)
+        passes = [offsets(0.5 * ranges), offsets(np.maximum(ranges - self.PASS_BACK, 0.0))]
+        out = np.empty((len(xy), len(yaws)), dtype=np.float32)
+        chunk = max(1, 600_000 // max(1, ends[0].size))
+        for i in range(0, len(xy), chunk):
+            px, py = xy[i:i + chunk, 0, None, None], xy[i:i + chunk, 1, None, None]
+            v = self._lookup(grid, px + ends[0][None], py + ends[1][None])
+            for ox, oy in passes:
+                v = v * self._lookup(self.passable, px + ox[None], py + oy[None])
+            out[i:i + chunk] = v.mean(axis=2)
+        return out
+
+    def fit(self, pose, ranges, angles, sensor_pose):
+        """Fit of one pose (fine sigma)."""
+        if not len(ranges):
+            return 0.0
+        return float(self._scores(self.fine, np.array([pose[:2]]), np.array([pose[2]]),
+                                  ranges, angles, sensor_pose)[0, 0])
+
+    def search_local(self, pose, ranges, angles, sensor_pose, radius=0.8, yaw_range=math.radians(15.0),
+                     step=None, yaw_step=math.radians(1.5)):
+        """Best (pose, fit) within radius / yaw_range of pose, on a grid of step (default: map resolution)."""
+        step = step or self.lmap.res
+        d = np.arange(-radius, radius + 1e-9, step)
+        gx, gy = np.meshgrid(pose[0] + d, pose[1] + d)
+        xy = np.c_[gx.ravel(), gy.ravel()]
+        yaws = pose[2] + np.arange(-yaw_range, yaw_range + 1e-9, yaw_step)
+        sc = self._scores(self.fine, xy, yaws, ranges, angles, sensor_pose)
+        i, j = np.unravel_index(int(np.argmax(sc)), sc.shape)
+        return (float(xy[i, 0]), float(xy[i, 1]), float(wrap(yaws[j]))), float(sc[i, j])
+
+    def search_global(self, ranges, angles, sensor_pose, seeds=40, separation=1.0,
+                      separation_yaw=math.radians(30.0)):
+        """Distinct pose hypotheses [(pose, fit), ...], best first: every candidate position at every yaw_step
+        on the coarse field, then the best seeds refined on the fine field. Two hypotheses are distinct when
+        more than separation m or separation_yaw rad apart."""
+        if not len(ranges) or not len(self.candidates):
+            return []
+        yaws = np.arange(-math.pi, math.pi, self.yaw_step)
+        sc = self._scores(self.coarse, self.candidates, yaws, ranges, angles, sensor_pose)
+        flat = np.argsort(sc, axis=None)[::-1]
+        picked = []
+        for f in flat:   # the best seeds, at most one per coarse neighbourhood
+            i, j = np.unravel_index(int(f), sc.shape)
+            seed = (self.candidates[i, 0], self.candidates[i, 1], yaws[j])
+            if all(math.hypot(seed[0] - q[0], seed[1] - q[1]) > self.coarse_step * 1.5
+                   or abs(float(wrap(seed[2] - q[2]))) > self.yaw_step * 1.5 for q in picked):
+                picked.append(seed)
+                if len(picked) >= seeds:
+                    break
+        refined = [self.search_local(q, ranges, angles, sensor_pose, radius=self.coarse_step,
+                                     yaw_range=self.yaw_step, yaw_step=math.radians(1.0)) for q in picked]
+        refined.sort(key=lambda r: -r[1])
+        out = []
+        for pose, score in refined:
+            if all(math.hypot(pose[0] - q[0][0], pose[1] - q[0][1]) > separation
+                   or abs(float(wrap(pose[2] - q[0][2]))) > separation_yaw for q in out):
+                out.append((pose, score))
+        return out
