@@ -7,9 +7,12 @@ Started by mcl.launch.py. Same outputs as localization.launch.py:
                       localized, so pure pursuit does not drive before that (as with localization_gate)
 Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
 
-  find:      the car finds itself with a global scan-matching search (ScanMatcher) over the whole drivable
-             area, in a worker thread (the pose and TF keep flowing): at the start, after a sim reset, and when
-             lost. No ground truth is used, so the sim behaves like the real car. If several places fit the
+  find:      the car finds itself with a global scan-matching search (ScanMatcher), in a worker thread (the pose
+             and TF keep flowing): at the start, after a sim reset, and when lost. Hybrid: first only near the
+             track's raceline, heading along it either way (~5x faster); if that fits well (hybrid_min_fit) and
+             is decided, the car may go at once while the search over the whole drivable area at every heading
+             runs in the background to verify it (moving the car if it is clearly elsewhere, keeping places that
+             fit as well as alternatives). Otherwise, or with no raceline.csv, the whole-area search decides. No ground truth is used, so the sim behaves like the real car. If several places fit the
              scan about as well, choose_pose refines from the last known pose (or the map origin, where race.sh
              puts the car). If that cannot decide, the search retries (backing off to search_period_max); after
              force_after tries it takes its best guess (and a relaxed_min_fit floor) and keeps the other places
@@ -36,6 +39,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
@@ -94,6 +98,9 @@ class MclNode(Node):
         self.yaw_scale = p('yaw_scale', 1.0).value                  # m per rad when comparing poses to priors
         self.validate_distance = p('validate_distance', 5.0).value  # m of driving to rule out alternatives
         self.validate_margin = p('validate_margin', 0.05).value     # mean fit an alternative must win by
+        hybrid = p('hybrid', True).value                            # raceline-first search, verified after
+        self.hybrid_min_fit = p('hybrid_min_fit', 0.8).value        # a raceline-only result fitting worse: full
+        self.hybrid_seeds = p('hybrid_seeds', 15).value
         self.fit_drop = p('fit_drop', 0.75).value                   # x the fit's level: try a local search
         self.fit_bad_updates = p('fit_bad_updates', 3).value
         self.doubt_fit = p('doubt_fit', 0.4).value                  # x the fit's level for doubt_updates
@@ -117,6 +124,13 @@ class MclNode(Node):
             noise_x=tuple(p('noise_x', [0.10, 0.02]).value), noise_y=tuple(p('noise_y', [0.05, 0.05]).value),
             noise_yaw=tuple(p('noise_yaw', [0.05, 0.10]).value))
         self.matcher = ScanMatcher(self.lmap)
+        self.hybrid = False
+        raceline = os.path.join(track_dir(track), 'raceline.csv')
+        if hybrid and os.path.isfile(raceline):
+            line = np.loadtxt(raceline, delimiter=';', comments='#', ndmin=2)[:, 1:3]   # TUM: s; x; y; ...
+            self.matcher.set_track(line, radius=p('hybrid_radius', 0.6).value,
+                                   yaw_window=p('hybrid_yaw', math.radians(25.0)).value)
+            self.hybrid = True
 
         self.odom = None              # (pose, stamp msg, speed)
         self.last_odom_pose = None    # odom pose of the last filter update
@@ -162,8 +176,9 @@ class MclNode(Node):
         self.create_subscription(LaserScan, '/scan', self.scan_cb, qos_profile_sensor_data)
         self.create_timer(0.05, self.tick)
         self.get_logger().info(f'{self.pf.n} particles on {self.lmap.w}x{self.lmap.h} map '
-                               f'({self.lmap.res:.3f} m), {len(self.matcher.candidates)} search positions, '
-                               f'waiting for /odom and /scan')
+                               f'({self.lmap.res:.3f} m), {len(self.matcher.candidates)} search positions'
+                               + (f', {self.matcher.track_poses} raceline-first poses' if self.hybrid else
+                                  ', no raceline-first search') + ', waiting for /odom and /scan')
 
     # ---------------- setup ----------------
     def publish_map(self, pub):
@@ -301,31 +316,44 @@ class MclNode(Node):
             self.publish_cloud(msg.header.stamp)
 
     # ---------------- global search, in the worker thread ----------------
-    def submit_search(self, kind, ranges, angles, sensor, priors, force, floor):
-        """kind 'find': the car is not localized; 'check': localized, but the scan has not fit for a while."""
-        self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor),
-                    kind, self.odom[0], self.generation, time.monotonic())
+    def submit_search(self, kind, ranges, angles, sensor, priors, force, floor, odom_then=None):
+        """kind 'find': the car is not localized; 'check': localized, but the scan has not fit for a while;
+        'verify': the whole-area search behind a raceline-first answer. odom_then: the odometry pose at the
+        scan (default: now)."""
+        hybrid = self.hybrid and kind == 'find'
+        self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor, hybrid),
+                    kind, odom_then or self.odom[0], self.generation, time.monotonic(),
+                    (ranges, angles, sensor, list(priors)))
 
-    def search_job(self, ranges, angles, sensor, priors, force, floor):
-        """Worker thread: search_global, then choose_pose. Uses no node state but the (read-only) matcher."""
-        hyps = self.matcher.search_global(ranges, angles, sensor)
-        if not hyps or hyps[0][1] < floor:
-            return hyps, None
-
+    def search_job(self, ranges, angles, sensor, priors, force, floor, hybrid):
+        """Worker thread: search_global (raceline first if hybrid), then choose_pose. Returns (stage, hypotheses,
+        choice). Uses no node state but the (read-only) matcher."""
         def refine(q):
             return self.matcher.search_local(q, ranges, angles, sensor, radius=1.0, yaw_range=math.radians(10.0))
 
-        return hyps, choose_pose(hyps, priors, self.ambiguity, self.prior_radius, self.yaw_scale, force, refine)
+        def choose(hyps, force):
+            return choose_pose(hyps, priors, self.ambiguity, self.prior_radius, self.yaw_scale, force, refine)
+
+        if hybrid:
+            hyps = self.matcher.search_global(ranges, angles, sensor, seeds=self.hybrid_seeds, track_only=True)
+            if hyps and hyps[0][1] >= max(floor, self.hybrid_min_fit):
+                choice = choose(hyps, False)
+                if choice is not None:
+                    return 'raceline', hyps, choice
+        hyps = self.matcher.search_global(ranges, angles, sensor)
+        if not hyps or hyps[0][1] < floor:
+            return 'full', hyps, None
+        return 'full', hyps, choose(hyps, force)
 
     def poll_search(self):
         if self.job is None or not self.job[0].done():
             return
-        future, kind, odom_then, generation, t0 = self.job
+        future, kind, odom_then, generation, t0, scan = self.job
         self.job = None
         if generation != self.generation:
             return   # a reset, /initialpose or new search since it started
         try:
-            hyps, choice = future.result()
+            stage, hyps, choice = future.result()
         except Exception as e:   # never let a search failure kill the node: it is retried
             self.get_logger().error(f'global search failed: {e!r}')
             return
@@ -333,10 +361,14 @@ class MclNode(Node):
         moved = relative(odom_then, self.odom[0])   # the car may have moved during the search
         if kind == 'check':
             self.on_check(choice, moved, ms)
+        elif kind == 'verify':
+            self.on_verify(hyps, choice, moved, ms)
         else:
-            self.on_find(hyps, choice, moved, ms)
+            self.on_find(hyps, choice, moved, ms, stage)
+            if stage == 'raceline' and self.search is None:   # found: verify with the whole-area search
+                self.submit_search('verify', *scan, False, self.min_fit, odom_then=odom_then)
 
-    def on_find(self, hyps, choice, moved, ms):
+    def on_find(self, hyps, choice, moved, ms, stage):
         if choice is None:
             self.attempts += 1
             self.search_wait = min(self.search_wait * 1.5, self.search_period_max)
@@ -349,10 +381,34 @@ class MclNode(Node):
                            f'{self.force_after} tries (or /initialpose)')
             return
         pose, alternatives, how = choice
-        self.init_filter(compose(pose, moved), f'{self.search}: found the car in {ms:.0f} ms ({how})', matched=True)
+        self.init_filter(compose(pose, moved), f'{self.search}: found the car in {ms:.0f} ms ({how}'
+                         + (', near the raceline; verifying' if stage == 'raceline' else '') + ')', matched=True)
         if alternatives:
             self.alternatives = Alternatives([compose(a, moved) for a in alternatives], self.odom[0],
                                              margin=self.validate_margin, distance=self.validate_distance)
+
+    def on_verify(self, hyps, choice, moved, ms):
+        """The whole-area search behind a raceline-first answer: confirm it, move the car if it is clearly
+        elsewhere, or keep the places that fit as well as alternatives for driving to settle."""
+        est = self.pf.estimate()
+        if choice is not None and pose_distance(compose(choice[0], moved), est, self.yaw_scale) > self.local_radius:
+            pose = compose(choice[0], moved)
+            self.get_logger().warning(f'verify: the whole-area search puts the car '
+                                      f'{math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m away ({choice[2]}, '
+                                      f'{ms:.0f} ms): moving it there')
+            self.init_filter(pose, 'verify', keep_localized=self.localized, quiet=True, matched=True)
+            others = [est] + [compose(a, moved) for a in choice[1]]
+        else:
+            tied = [h[0] for h in hyps if hyps and h[1] >= self.ambiguity * hyps[0][1]]
+            others = [q for q in (compose(t, moved) for t in tied) if pose_distance(q, est, self.yaw_scale) > 1.0]
+            if others:
+                self.get_logger().warning(f'verify: {len(others)} other place(s) fit as well ({ms:.0f} ms): '
+                                          'checking them while driving')
+            else:
+                self.get_logger().info(f'verify: confirmed by the whole-area search ({ms:.0f} ms)')
+        if others and self.alternatives is None:
+            self.alternatives = Alternatives(others, self.odom[0], margin=self.validate_margin,
+                                             distance=self.validate_distance)
 
     def on_check(self, choice, moved, ms):
         if choice is None or not self.localized:

@@ -33,6 +33,12 @@ mcl:
     relaxed_min_fit: 0.3
     validate_distance: 5.0     # m of driving after a guess: the other places that fit are ruled out ...
     validate_margin: 0.05      # ... unless one keeps fitting better by this (mean fit): switch to it
+    # hybrid: search near tracks/<name>/raceline.csv first (both directions), verify with the whole area after
+    hybrid: true               # false: always the whole-area search (also without a raceline.csv)
+    hybrid_min_fit: 0.8        # a raceline-only result fitting worse falls back to the whole-area search
+    hybrid_radius: 0.6         # m from the raceline
+    hybrid_yaw: 0.44           # rad (25 deg) around the raceline's direction, forward and backward
+    hybrid_seeds: 15           # best coarse poses refined
     # thrown off while driving (wheel slip, a stalled sensor stream)
     fit_drop: 0.75             # fit below this x its running level for fit_bad_updates updates: local search
     fit_bad_updates: 3

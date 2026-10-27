@@ -269,23 +269,53 @@ class ScanMatcher:
         i, j = np.unravel_index(int(np.argmax(sc - pull)), sc.shape)
         return (float(xy[i, 0]), float(xy[i, 1]), float(wrap(pose[2] + dyaw[j]))), float(sc[i, j])
 
+    def set_track(self, line, radius=0.6, yaw_window=math.radians(25.0)):
+        """Enable search_global(track_only=True): line = (x, y) points the car drives along, in order (the
+        raceline). Its candidates are the search positions within radius of the line, each tried only at
+        headings within yaw_window of the line's direction there, forward and backward (a car facing
+        backwards, after a crash, can look exactly like one driving forward elsewhere on a symmetric track:
+        with both directions that is a tie to settle, not a confident wrong pose). A car turned across the
+        track fits poorly here, and the caller falls back to the full search."""
+        line = np.asarray(line, dtype=np.float64)
+        heading = np.arctan2(np.roll(line[:, 1], -1) - line[:, 1], np.roll(line[:, 0], -1) - line[:, 0])
+        d = np.hypot(self.candidates[:, None, 0] - line[None, :, 0], self.candidates[:, None, 1] - line[None, :, 1])
+        near = d.min(axis=1) <= radius
+        nearest = heading[d.argmin(axis=1)]
+        window = np.arange(-yaw_window, yaw_window + 1e-9, self.yaw_step)
+        offsets = np.concatenate([window, window + math.pi])
+        bins = np.round(wrap(nearest) / self.yaw_step).astype(int)   # group by heading: one yaw set per group
+        self.track_groups = []
+        for b in np.unique(bins[near]):
+            sel = near & (bins == b)
+            self.track_groups.append((self.candidates[sel], b * self.yaw_step + offsets))
+        self.track_poses = int(near.sum()) * len(offsets)
+
     def search_global(self, ranges, angles, sensor_pose, seeds=40, separation=1.0,
-                      separation_yaw=math.radians(30.0)):
+                      separation_yaw=math.radians(30.0), track_only=False):
         """Distinct pose hypotheses [(pose, fit), ...], best first: every candidate position at every yaw_step
-        on the coarse field, then the best seeds refined on the fine field. Two hypotheses are distinct when
-        more than separation m or separation_yaw rad apart."""
-        if not len(ranges) or not len(self.candidates):
+        on the coarse field (track_only: only near the line set_track gave, heading along it), then the best
+        seeds refined on the fine field. Two hypotheses are distinct when more than separation m or
+        separation_yaw rad apart."""
+        if track_only:
+            groups = getattr(self, 'track_groups', [])
+        else:
+            groups = [(self.candidates, np.arange(-math.pi, math.pi, self.yaw_step))]
+        if not len(ranges) or not groups or not len(self.candidates):
             return []
-        yaws = np.arange(-math.pi, math.pi, self.yaw_step)
-        sc = self._scores(self.coarse, self.candidates, yaws, ranges, angles, sensor_pose)
-        flat = np.argsort(sc, axis=None)[::-1]
+        score, px, py, pyaw = [], [], [], []   # every coarse pose of every group, flattened
+        for xy, yaws in groups:
+            sc = self._scores(self.coarse, xy, yaws, ranges, angles, sensor_pose)
+            score.append(sc.ravel())
+            px.append(np.repeat(xy[:, 0], len(yaws)))
+            py.append(np.repeat(xy[:, 1], len(yaws)))
+            pyaw.append(np.tile(yaws, len(xy)))
+        score, px, py, pyaw = (np.concatenate(a) for a in (score, px, py, pyaw))
         picked = []
-        for f in flat:   # the best seeds, at most one per coarse neighbourhood
-            i, j = np.unravel_index(int(f), sc.shape)
-            seed = (self.candidates[i, 0], self.candidates[i, 1], yaws[j])
-            if all(math.hypot(seed[0] - q[0], seed[1] - q[1]) > self.coarse_step * 1.5
-                   or abs(float(wrap(seed[2] - q[2]))) > self.yaw_step * 1.5 for q in picked):
-                picked.append(seed)
+        for f in np.argsort(score)[::-1]:   # the best seeds, at most one per coarse neighbourhood
+            x, y, yaw = px[f], py[f], float(wrap(pyaw[f]))
+            if all(math.hypot(x - q[0], y - q[1]) > self.coarse_step * 1.5
+                   or abs(float(wrap(yaw - q[2]))) > self.yaw_step * 1.5 for q in picked):
+                picked.append((x, y, yaw))
                 if len(picked) >= seeds:
                     break
         refined = [self.search_local(q, ranges, angles, sensor_pose, radius=self.coarse_step,

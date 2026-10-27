@@ -323,3 +323,44 @@ def test_alternatives_keep_a_correct_pick(lmap, matcher):
         if alts.done:
             break
     assert alts.done
+
+
+HYBRID_MIN_FIT = 0.8   # mcl_node's defaults: a track-only result fitting worse falls back to the full search
+TRACK_SEEDS = 15
+
+
+@pytest.fixture(scope='module')
+def track_matcher(lmap):
+    m = ScanMatcher(lmap)
+    m.set_track([p[:2] for p in lap()])
+    return m
+
+
+def test_track_search_scores_far_fewer_poses(track_matcher):
+    full = len(track_matcher.candidates) * len(np.arange(-math.pi, math.pi, track_matcher.yaw_step))
+    assert track_matcher.track_poses < full / 5
+
+
+@pytest.mark.parametrize('i', [0, 92, 200, 300, 395, 480])
+def test_track_search_finds_a_car_on_the_raceline(lmap, track_matcher, i):
+    pose = lap()[i]
+    rng = np.random.default_rng(i)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = track_matcher.search_global(r, a, LASER, track_only=True, seeds=TRACK_SEEDS)
+    assert hyps[0][1] >= HYBRID_MIN_FIT
+    assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(3)
+               for h, _ in contenders(hyps))
+
+
+@pytest.mark.parametrize('pose', [(10.0, 1.5, math.radians(100)),       # turned across the bottom straight
+                                  (9.75, 1.45, math.pi),                # facing backwards beside the notch
+                                  (18.55, 6.0, -math.pi / 2)])           # facing backwards on the right side
+def test_track_search_does_not_confidently_misplace_a_turned_car(lmap, track_matcher, pose):
+    """After a crash the car can face any way. The track-only search must then either fit poorly (the node falls
+    back to the full search) or still contain the true pose among its ties, never a confident wrong pose."""
+    rng = np.random.default_rng(11)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = track_matcher.search_global(r, a, LASER, track_only=True, seeds=TRACK_SEEDS)
+    if hyps and hyps[0][1] >= HYBRID_MIN_FIT:
+        assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(5)
+                   for h, _ in contenders(hyps)), f'confident wrong pose {hyps[0]}'

@@ -106,8 +106,10 @@ scripts/race.sh <name> speed_scale:=0.5 localizer:=mcl     # or: ros2 launch con
 `perception`'s `mcl_node` is a numpy particle filter with a likelihood-field lidar model (no range_libc
 build) on `tracks/<name>/map.yaml`. It publishes the same `map -> odom` and `/localized_pose` as the
 Cartographer path, so pure pursuit is unchanged, plus `/mcl/particles` and `/map` for Foxglove. It finds the
-car by itself with a scan-matching search over the whole track (~0.2 s, standing still, any heading): at the
-start, after every sim reset or crash, and when lost; no sim ground truth, so it behaves as on the real car. If
+car by itself with a scan-matching search (standing still, any heading): near the raceline first (60-130 ms on
+porto_v2, the car may go at once), verified in the background by a search of the whole track at every heading,
+which also covers a car turned across the track after a crash; at the start, after every sim reset or crash,
+and when lost; no sim ground truth, so it behaves as on the real car. If
 two places on the track look the same to the lidar, it settles it from the last known pose (or the map origin);
 when even that cannot tell, it takes its best guess after a few tries and keeps the other places, switching if
 one of them fits better as the car drives (a `/initialpose` from Foxglove or RViz also settles it). While

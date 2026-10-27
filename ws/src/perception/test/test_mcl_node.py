@@ -1,7 +1,9 @@
-"""mcl_node on the synthetic track of test_mcl: callbacks fed directly (no executor), searches waited for.
+"""mcl_node on the synthetic track of test_mcl (its lap as the raceline): callbacks fed directly (no executor),
+searches waited for.
 
-Finding the car (unique, ambiguous with a guess checked by driving, after a sim reset), and staying localized
-through an odometry jump, an odometry frame jump and a stretch the map does not have (a low fit never stops it).
+Finding the car (raceline first then verified, falling back to the whole area, unique, ambiguous with a guess
+checked by driving, after a sim reset), and staying localized through an odometry jump, an odometry frame jump
+and a stretch the map does not have (a low fit never stops it).
 """
 import math
 
@@ -33,6 +35,9 @@ def tracks(tmp_path, lmap, monkeypatch):
     Image.fromarray(pix).save(d / 'map.pgm')
     (d / 'map.yaml').write_text(f'image: map.pgm\nmode: trinary\nresolution: {RES}\norigin: [0.0, 0.0, 0.0]\n'
                                 'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
+    rows = ['# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2']   # TUM format, as build_raceline writes it
+    rows += [f'{0.08 * k:.4f}; {p[0]:.4f}; {p[1]:.4f}; 0.0; 0.0; 1.0; 0.0' for k, p in enumerate(lap())]
+    (d / 'raceline.csv').write_text('\n'.join(rows) + '\n')
     monkeypatch.setenv('TRACKS_DIR', str(tmp_path))
 
 
@@ -57,9 +62,9 @@ class Car:
         self.searches = []                   # kinds of global searches the node started
         submit = self.node.submit_search
 
-        def spy(kind, *a):
+        def spy(kind, *a, **kw):
             self.searches.append(kind)
-            submit(kind, *a)
+            submit(kind, *a, **kw)
         self.node.submit_search = spy
 
     def close(self):
@@ -257,3 +262,49 @@ def test_reanchor_state_is_cleared_by_a_restart(car):
     c.node.rechecks = 3
     c.node.init_filter(P[92], 'test')
     assert c.node.recheck_offset is None and c.node.rechecks == 0
+
+
+def settle(c, n=6):
+    """Let a background (verify) search finish and be handled."""
+    for _ in range(n):
+        if c.node.job is not None:
+            c.node.job[0].result()
+        c.node.poll_search()
+
+
+def test_raceline_first_finds_the_car_and_the_whole_area_search_confirms(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    settle(c)
+    assert c.searches[:2] == ['find', 'verify']
+    assert c.node.localized and c.node.alternatives is None and pose_error(P[92], c.pose())[0] < 0.1
+
+
+def test_a_car_turned_across_the_track_falls_back_to_the_whole_area(car):
+    c = car()
+    pose = (10.0, 1.5, math.radians(100))
+    c.stand(pose)
+    settle(c)
+    assert 'verify' not in c.searches     # answered by the whole-area search itself
+    assert c.node.localized and pose_error(pose, c.pose())[0] < 0.1 and pose_error(pose, c.pose())[1] < 0.05
+
+
+def test_a_car_facing_backwards_is_never_confidently_misplaced(car):
+    """On the right side facing down it sees what a car driving down the left side sees: the node must either
+    place it right or keep the right place as an alternative to settle by driving."""
+    c = car()
+    pose = (18.55, 6.0, -math.pi / 2)
+    c.stand(pose)
+    settle(c)
+    assert c.node.localized
+    if pose_error(pose, c.pose())[0] > 0.15:
+        alts = c.node.alternatives
+        assert alts is not None and any(pose_error(pose, q)[0] < 0.15 for q in alts.poses)
+
+
+def test_without_hybrid_the_whole_area_search_finds_the_car(car):
+    c = car(hybrid='false')
+    P = lap()
+    c.stand(P[92])
+    assert 'verify' not in c.searches and c.node.localized and pose_error(P[92], c.pose())[0] < 0.1
