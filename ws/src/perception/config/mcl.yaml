@@ -1,0 +1,24 @@
+# Parameters of mcl_node (mcl.launch.py). Every key is optional; these are the defaults.
+mcl:
+  ros__parameters:
+    # particles: set by the launch argument particles:= (default 1000; ~2000 is fine for numpy at 40 Hz scans)
+    beams: 60                  # lidar beams used per update, evenly spaced
+    sigma_hit: 0.15            # m, std of a wall hit in the likelihood field (map resolution + lidar noise)
+    z_hit: 0.8                 # weight of "the endpoint is on a wall"
+    z_rand: 0.2                # floor per beam: unknown space, obstacles, outliers do not zero a particle
+    likelihood_scale: 0.4      # < 1 tempers the (correlated) beams; lower = a more diverse cloud
+    max_dist: 2.0              # m, distance-field cap
+    noise_x: [0.10, 0.02]      # motion std per m travelled, per rad turned: along the car
+    noise_y: [0.05, 0.05]      #                                              sideways
+    noise_yaw: [0.05, 0.10]    #                                              heading [rad]
+    update_min_d: 0.05         # m of odometry between filter updates once localized
+    update_min_a: 0.05         # rad
+    init_std_xy: 0.15          # m, cloud around the start pose (map origin after a reset, or /initialpose)
+    init_std_yaw: 0.10         # rad
+    converged_std_xy: 0.10     # m  \  localized (the car may drive) after converged_updates updates
+    converged_std_yaw: 0.08    # rad / below both
+    converged_updates: 3
+    lost_std_xy: 0.60          # m, the pose is withdrawn (the car stops) if the cloud spreads beyond this
+    debounce: 0.5              # s after a sim reset event before restarting the cloud
+    still_speed: 0.1           # m/s, "the car has stopped" after a reset
+    publish_particles: true    # /mcl/particles for Foxglove
