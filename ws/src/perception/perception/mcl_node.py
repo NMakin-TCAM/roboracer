@@ -23,9 +23,11 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
              update_min_d / update_min_a of odometry motion.
   thrown off: each update scores how well the scan fits the map at the estimate. When the fit stays below
              fit_drop x its running level for fit_bad_updates updates (wheel slip, a stalled sensor stream),
-             a local search re-anchors the cloud if it finds a clearly better pose; every recheck_updates
-             updates a small local search catches what the fit does not show (along a straight). The car keeps
-             driving through both.
+             a local search (within local_radius, and local_yaw: slip moves the car but barely turns it)
+             re-anchors the cloud if it finds a clearly better pose and the next search finds the same offset;
+             every recheck_updates updates a small local search catches what the fit does not show (along a
+             straight). The car keeps driving through both. A burst of re-anchors (slip_reanchors in 2 s, where
+             the map fits badly) pauses them for slip_hold s and starts a background global search.
   doubt:     the fit below doubt_fit x its level for doubt_updates updates in a row (beyond the local search's
              reach, or something the map does not have): a global search in the background, re-anchoring only
              if it finds the car clearly elsewhere. A low fit alone never stops the car.
@@ -61,7 +63,6 @@ MAX_PARTICLES_SHOWN = 200
 MIN_BEAMS = 10
 MAP_ORIGIN = (0.0, 0.0, 0.0)   # where race.sh puts the car: the pose mapping started from
 LOG_PERIOD = 2.0               # s between re-anchor log lines
-SLIP_COUNT = 5                 # re-anchors in a LOG_PERIOD: the scan keeps contradicting the odometry
 FIND_LOG_PERIOD = 5.0          # s between repeats of the same "cannot find the car" warning
 
 
@@ -106,8 +107,11 @@ class MclNode(Node):
         self.doubt_fit = p('doubt_fit', 0.4).value                  # x the fit's level for doubt_updates
         self.doubt_updates = p('doubt_updates', 10).value           # updates in a row: a background search
         self.local_radius = p('local_radius', 0.8).value            # m
-        self.local_yaw = p('local_yaw', 0.26).value                 # rad
+        self.local_yaw = p('local_yaw', 0.07).value                 # rad: slip moves the car, barely turns it
         self.snap_gain = p('snap_gain', 0.1).value                  # fit a re-anchored pose must gain
+        self.snap_agree_yaw = p('snap_agree_yaw', 0.035).value      # rad between two searches' offsets
+        self.slip_reanchors = p('slip_reanchors', 3).value          # re-anchors in LOG_PERIOD s: a burst
+        self.slip_hold = p('slip_hold', 2.0).value                  # s without local re-anchors after a burst
         self.recheck_updates = p('recheck_updates', 5).value        # updates between small local searches
         self.recheck_radius = p('recheck_radius', 0.5).value        # m
         self.recheck_gain = p('recheck_gain', 0.03).value           # fit gain that counts as better
@@ -155,8 +159,11 @@ class MclNode(Node):
         self.doubt = 0
         self.rechecks = 0
         self.recheck_offset = None    # offset (in the car's frame) the last recheck found, waiting to agree
+        self.snap_offset = None       # the same for the low-fit local search
         self.anchors = []             # monotonic times of recent re-anchors
         self.anchor_log_t = 0.0
+        self.hold_until = 0.0         # monotonic time until which local searches do not re-anchor (a burst)
+        self.burst = False            # a burst of re-anchors: a background global search is due
         self.updates = 0
         self.warn_t = 0.0
 
@@ -207,8 +214,13 @@ class MclNode(Node):
         self.doubt = 0
         self.rechecks = 0
         self.recheck_offset = None
+        self.snap_offset = None
         self.alternatives = None
         self.generation += 1
+        if not keep_localized:   # a new start: a burst before it says nothing about this pose
+            self.hold_until = 0.0
+            self.burst = False
+            self.anchors = []
         if not quiet:
             self.get_logger().info(f'{reason}: particles at x={pose[0]:.2f} y={pose[1]:.2f} yaw={pose[2]:.2f}')
         self.initialized = True
@@ -454,30 +466,43 @@ class MclNode(Node):
         if self.fit_level is None:
             self.fit_level = fit
         self.doubt = self.doubt + 1 if fit < self.doubt_fit * self.fit_level else 0
-        if self.doubt >= self.doubt_updates and self.job is None:
+        if (self.burst or self.doubt >= self.doubt_updates) and self.job is None:
             self.doubt = 0
+            self.burst = False
             self.submit_search('check', ranges, angles, sensor, [est], False, self.min_fit)
+        holding = time.monotonic() < self.hold_until
         if fit >= self.fit_drop * self.fit_level:
             self.fit_bad = 0
             self.fit_level += 0.02 * (fit - self.fit_level)
-            self.recheck(est, fit, ranges, angles, sensor, odom_pose)
+            if not holding:
+                self.recheck(est, fit, ranges, angles, sensor, odom_pose)
             return
         self.fit_bad += 1
-        if self.fit_bad < self.fit_bad_updates:
+        if self.fit_bad < self.fit_bad_updates or holding:
             return
         self.fit_bad = 0
         t0 = time.monotonic()
         coarse, _ = self.matcher.search_local(est, ranges, angles, sensor, radius=self.local_radius,
-                                              yaw_range=self.local_yaw, step=0.1, yaw_step=math.radians(3.0))
+                                              yaw_range=self.local_yaw, step=0.1,
+                                              yaw_step=min(math.radians(3.0), self.local_yaw / 2.0))
         best, best_fit = self.matcher.search_local(coarse, ranges, angles, sensor, radius=0.1,
-                                                   yaw_range=math.radians(3.0), yaw_step=math.radians(1.0))
+                                                   yaw_range=math.radians(2.0), yaw_step=math.radians(1.0))
         ms = (time.monotonic() - t0) * 1000.0
-        shift = math.hypot(best[0] - est[0], best[1] - est[1])
-        if best_fit >= max(fit + self.snap_gain, self.fit_drop * self.fit_level) and best_fit >= self.min_fit:
-            self.reanchor(best, odom_pose, f'{shift:.2f} m, {math.degrees(wrap(best[2] - est[2])):+.1f} deg: '
-                                           f'fit {fit:.2f} -> {best_fit:.2f} ({ms:.0f} ms)')
-        else:   # nothing fits clearly better nearby: something the map does not have, keep tracking
+        if best_fit < max(fit + self.snap_gain, self.fit_drop * self.fit_level) or best_fit < self.min_fit:
+            self.snap_offset = None   # nothing fits clearly better nearby: something the map does not have
             self.fit_level += 0.02 * (fit - self.fit_level)
+            return
+        # one search can be fooled where the map fits badly: re-anchor only when the next one (fit_bad_updates
+        # later) finds the same offset in the car's frame, as a slip or a stalled stream leaves it
+        offset = relative(est, best)
+        prev, self.snap_offset = self.snap_offset, offset
+        if prev is None or (math.hypot(offset[0] - prev[0], offset[1] - prev[1]) > self.recheck_agree
+                            or abs(wrap(offset[2] - prev[2])) > self.snap_agree_yaw):
+            return
+        self.snap_offset = None
+        self.reanchor(best, odom_pose, f'{math.hypot(offset[0], offset[1]):.2f} m, '
+                                       f'{math.degrees(wrap(offset[2])):+.1f} deg: fit {fit:.2f} -> {best_fit:.2f} '
+                                       f'({ms:.0f} ms)')
 
     def recheck(self, est, fit, ranges, angles, sensor, odom_pose):
         """Every recheck_updates updates, a small local search: catches the error a low fit does not show, along
@@ -500,19 +525,28 @@ class MclNode(Node):
                                        f'{offset[1]:+.2f} across), fit {fit:.2f} -> {best_fit:.2f}')
 
     def reanchor(self, pose, odom_pose, what):
-        """Move the cloud to a scan-matched pose without stopping the car; log at most every LOG_PERIOD s."""
+        """Move the cloud to a scan-matched pose without stopping the car; log at most every LOG_PERIOD s.
+        slip_reanchors in LOG_PERIOD s is a burst: where the map fits badly, each local search can pull the pose
+        a little further off. Local re-anchors pause for slip_hold s and a global search in the background
+        (never holding the car) decides whether the car is clearly elsewhere."""
         self.init_filter(pose, 're-anchor', keep_localized=True, quiet=True)
         now = time.monotonic()
         self.anchors = [t for t in self.anchors if now - t < LOG_PERIOD] + [now]
+        n = len(self.anchors)
+        if n >= self.slip_reanchors:
+            self.anchors = []
+            self.hold_until = now + self.slip_hold
+            self.burst = True
+            self.anchor_log_t = now
+            self.get_logger().warning(f're-anchored {n} times in {LOG_PERIOD:.0f} s, last {what}: the scan keeps '
+                                      'contradicting the odometry (wheels slipping, the car blocked, or the map '
+                                      f'fits badly here): no local re-anchors for {self.slip_hold:.0f} s, checking '
+                                      'with a background search')
+            return
         if now - self.anchor_log_t < LOG_PERIOD:
             return
         self.anchor_log_t = now
-        n = len(self.anchors)
-        if n >= SLIP_COUNT:
-            self.get_logger().warning(f're-anchored {n} times in {LOG_PERIOD:.0f} s, last {what}: the scan keeps '
-                                      'contradicting the odometry (wheels slipping, or the car is blocked)')
-        else:
-            self.get_logger().warning(f're-anchored {what}')
+        self.get_logger().warning(f're-anchored {what}')
 
     def check_localized(self, pos_std, yaw_std):
         if self.localized:

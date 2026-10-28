@@ -43,8 +43,11 @@ mcl:
     fit_drop: 0.75             # fit below this x its running level for fit_bad_updates updates: local search
     fit_bad_updates: 3
     local_radius: 0.8          # m  \ local search window around the estimate
-    local_yaw: 0.26            # rad /
+    local_yaw: 0.07            # rad /  (4 deg: slip moves the car, barely turns it)
     snap_gain: 0.1             # the local result must fit this much better to re-anchor (else: an obstacle)
+    snap_agree_yaw: 0.035      # rad: ... and the next search must find the same offset (recheck_agree m, this)
+    slip_reanchors: 3          # re-anchors within 2 s: a burst (the map fits badly here, or the wheels slip) ...
+    slip_hold: 2.0             # s ... local re-anchors pause, a background global search checks the pose
     recheck_updates: 5         # every this many updates, a small local search (catches along-straight error)
     recheck_radius: 0.5        # m
     recheck_gain: 0.03         # fit gain that counts as better; re-anchors only when two rechecks agree

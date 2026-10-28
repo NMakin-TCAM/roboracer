@@ -264,6 +264,57 @@ def test_reanchor_state_is_cleared_by_a_restart(car):
     assert c.node.recheck_offset is None and c.node.rechecks == 0
 
 
+def fake_local_search(c, offsets):
+    """Low-fit local searches (radius != 0.1; the 0.1 m refinement keeps its start) answer with the next offset
+    from offsets, fitting perfectly: what a badly fitting part of the map can do."""
+    k = [0]
+
+    def search_local(pose, *a, radius=0.8, **kw):
+        if radius == 0.1:
+            return pose, 1.0
+        k[0] += 1
+        return compose(pose, offsets[(k[0] - 1) % len(offsets)]), 1.0
+    c.node.matcher.search_local = search_local
+    anchors = []
+    reanchor = c.node.reanchor
+    c.node.reanchor = lambda *a: (anchors.append(a[0]), reanchor(*a))
+    return anchors
+
+
+def test_a_low_fit_search_re_anchors_only_when_the_next_one_agrees(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    block = np.arange(45, 225)   # the fit drops: every fit_bad_updates updates a local search
+    anchors = fake_local_search(c, [(0.5, 0.0, 0.0), (-0.5, 0.0, 0.0)])
+    drive(c, P[100:112], block=block)
+    assert not anchors, 'one search moved the pose'
+    anchors = fake_local_search(c, [(0.5, 0.0, 0.0)])
+    drive(c, P[112:118], block=block)
+    assert len(anchors) == 1
+
+
+def test_a_burst_of_re_anchors_pauses_them_and_checks_in_the_background(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    for _ in range(3):
+        c.node.reanchor(c.node.pf.estimate(), None, 'test')
+    assert c.node.burst and c.node.hold_until > 0.0
+    n = len(c.searches)
+    anchors = fake_local_search(c, [(0.5, 0.0, 0.0)])
+    published = []
+    for p in P[100:115]:
+        before = len(c.poses)
+        c.step(p, block=np.arange(45, 225))
+        published.append(len(c.poses) > before)
+    assert 'check' in c.searches[n:] and not c.node.burst
+    assert not anchors, 're-anchored during the pause'
+    assert all(published), 'the car waited'
+
+
 def settle(c, n=6):
     """Let a background (verify) search finish and be handled."""
     for _ in range(n):
