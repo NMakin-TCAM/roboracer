@@ -19,19 +19,26 @@ avoid: steer on /local_path (planning's obstacle_spliner_node: the raceline's po
 around an obstacle, one per raceline point) instead of the raceline; speeds stay the raceline's. No
 path yet, a path older than max_path_age s, one of another length, or /local_path/valid false (no
 collision-free path) gets a stop command.
+
+Which line it drives: on start it logs the raceline's provenance (build_raceline's '# raceline:' header
+line: method, solver, fallbacks) and WARNs unless it is a clean TUM mintime line, also when the
+provenance is unknown (older or hand-made files). /raceline/provenance (latched String) repeats it.
 """
+import json
 import os
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from perception.tracks import track_dir
+from planning.raceline import read_provenance
 
 # raceline.csv columns: s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
 X, Y, VX = 1, 2, 5
@@ -78,6 +85,7 @@ class PurePursuit(Node):
         self.path_xy, self.path_stamp, self.path_valid = None, 0.0, False
         self.get_logger().info(f'Loaded {path}: {len(self.waypoints)} points; lookahead '
                                f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m')
+        self.report_provenance(path)
 
         self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
         self.drive_pub = self.create_publisher(AckermannDriveStamped, '/drive', 10)
@@ -85,6 +93,35 @@ class PurePursuit(Node):
             self.create_subscription(Path, '/local_path', self.path_callback, 10)
             self.create_subscription(Bool, '/local_path/valid', self.valid_callback, 10)
             self.get_logger().info('Avoiding obstacles: following /local_path')
+
+    def report_provenance(self, path):
+        """Log which raceline this is (WARN unless a clean mintime line) and latch it on /raceline/provenance."""
+        try:
+            prov = read_provenance(path)
+        except ValueError as e:          # a '# raceline:' line that is not JSON
+            prov, bad = None, str(e)
+        else:
+            bad = None
+        with open(path) as f:
+            comments = [ln.strip() for ln in f if ln.startswith('#')][:3]
+        if prov is not None and prov.get('clean') and prov.get('method') == 'mintime':
+            text = (f"Raceline: TUM mintime, converged with the default settings ({prov.get('solver')}), "
+                    f"lap {prov.get('lap_s')} s, built {prov.get('built')}")
+            self.get_logger().info(text)
+        elif prov is not None:
+            text = (f"RACELINE IS NOT A CLEAN MINTIME LINE: method {prov.get('method')}; "
+                    f"{'; '.join(prov.get('notes', []))}; changed {json.dumps(prov.get('changed', {}))}; "
+                    f"lap {prov.get('lap_s')} s, built {prov.get('built')} ({path})")
+            self.get_logger().warning(text)
+        else:
+            text = (f'RACELINE OF UNKNOWN PROVENANCE: {path} has no build_raceline provenance line'
+                    + (f' (unreadable: {bad})' if bad else '')
+                    + ' (built before it was recorded, or written by hand), so it may not be a converged mintime '
+                    f'line. Header: {" | ".join(comments)}')
+            self.get_logger().warning(text)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.provenance_pub = self.create_publisher(String, '/raceline/provenance', latched)
+        self.provenance_pub.publish(String(data=text))
 
     def path_callback(self, msg: Path):
         if msg.header.frame_id != 'map' or len(msg.poses) != len(self.xy):

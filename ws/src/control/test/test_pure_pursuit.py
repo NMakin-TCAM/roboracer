@@ -3,6 +3,7 @@
 Needs a sourced ROS 2 environment with the control package built:
     python3 -m pytest ws/src/control/test
 """
+import json
 import math
 import os
 import random
@@ -19,7 +20,8 @@ rclpy = pytest.importorskip('rclpy')
 from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 from nav_msgs.msg import Path  # noqa: E402
-from std_msgs.msg import Bool  # noqa: E402
+from rclpy.qos import DurabilityPolicy, QoSProfile  # noqa: E402
+from std_msgs.msg import Bool, String  # noqa: E402
 
 SPEED_SCALE = 0.5
 DOMAIN = random.randint(1, 101)  # not 0: the live stack (bridge, sim car) runs there
@@ -28,13 +30,14 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config
 HEADER = '# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2'
 
 
-def write_raceline(tracks_dir, name, xy, psi, kappa, vx):
+def write_raceline(tracks_dir, name, xy, psi, kappa, vx, provenance=None):
     d = os.path.join(tracks_dir, name)
     os.makedirs(d, exist_ok=True)
     s = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy, axis=0).T))])
     n = len(xy)
     rows = np.column_stack([s, xy, psi, np.full(n, kappa), np.full(n, vx), np.zeros(n)])
-    np.savetxt(os.path.join(d, 'raceline.csv'), rows, delimiter=';', fmt='%.7f', header=HEADER[2:])
+    header = HEADER[2:] + ('' if provenance is None else '\nraceline: ' + json.dumps(provenance))
+    np.savetxt(os.path.join(d, 'raceline.csv'), rows, delimiter=';', fmt='%.7f', header=header)
 
 
 def circle(radius, n):
@@ -66,6 +69,11 @@ def tracks_dir():
         write_raceline(d, 'tiny', xy, psi, 5.0, 1.0)
         xy, psi = hairpin(10.0, 1.0, 0.1)
         write_raceline(d, 'hairpin', xy, psi, 0.0, 3.0)
+        xy, psi = circle(4.0, 200)
+        clean = dict(method='mintime', clean=True, notes=[], changed={}, solver='IPOPT: Optimal Solution Found')
+        write_raceline(d, 'clean', xy, psi, 0.25, 4.0, clean)
+        fallback = dict(method='centerline', clean=False, changed={}, notes=['mintime failed: IPOPT did not converge'])
+        write_raceline(d, 'fallback', xy, psi, 0.25, 4.0, fallback)
         yield d
 
 
@@ -274,3 +282,19 @@ def test_avoid_stops_without_a_good_path(run, local_path, bad):
     assert driver.drive(5.0, 0.0, 0.0, n=3).speed > 0.0
     local_path.send(0.0, **bad)
     assert driver.drive(5.0, 0.0, 0.0, n=3).speed == 0.0
+
+
+@pytest.mark.parametrize('track, expect', [
+    ('circle', 'RACELINE OF UNKNOWN PROVENANCE'),           # no '# raceline:' line, e.g. older or hand-made
+    ('clean', 'Raceline: TUM mintime, converged with the default settings'),
+    ('fallback', 'RACELINE IS NOT A CLEAN MINTIME LINE: method centerline; mintime failed')])
+def test_provenance_reported(run, ros, track, expect):
+    run(track)
+    got = []
+    latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    sub = ros.create_subscription(String, '/raceline/provenance', lambda m: got.append(m.data), latched)
+    end = time.time() + 5.0
+    while not got and time.time() < end:
+        rclpy.spin_once(ros, timeout_sec=0.1)
+    ros.destroy_subscription(sub)
+    assert got and got[-1].startswith(expect), got

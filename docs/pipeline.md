@@ -28,6 +28,11 @@ ros2 launch control follow_the_gap.launch.py [speed:=1.0]   # no-map fallback, i
 press Enter (with `--wall-follow` or `--gap-follow`: starts `control wall_follow.launch.py` or `disparity_gap.launch.py` and waits for its laps), runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
 It needs a terminal (it refuses to start without one) and exits early if `cartographer_node` dies on startup.
 If `save_map` fails, mapping keeps running and it asks to retry (Enter) or quit (`q`, the map is lost; delete `tracks/<name>` before reusing the name).
+`build_raceline` never leaves a mapped track without a raceline: if TUM mintime fails it falls back to
+mintime without `safe_traj` (speeds then held to its limits), then the centerline (with a speed profile within
+those limits, laterally at most `mue * g`). Anything but a clean mintime line ends in a WARNING block and exit
+status 2 (1: no raceline at all), which `map_track.sh` repeats. `race.sh` prints which line the car drives;
+`pure_pursuit_node` logs it and warns unless it is a clean mintime line (also latched on `/raceline/provenance`).
 `race.sh` resets the sim car (localization starts at the map origin = where mapping started) and
 launches `control race.launch.py` (perception `localization.launch.py` + control `pure_pursuit.launch.py`).
 With `avoid:=true` it also starts planning's `obstacle_spliner_node`, and pure pursuit steers on its
@@ -82,7 +87,7 @@ mounting rotation, or Cartographer stops waiting for an IMU it cannot transform.
 | `trajectory.csv` | `save_map` | `# t,x_m,y_m,yaw_rad`: the mapping lap's optimized poses (`/trajectory_query`), gives driving direction |
 | `map_to_world.yaml` | `save_map` | ground-truth pose of the `map` origin in the sim world frame (debugging) |
 | `centerline.csv` | `build_raceline` | TUM input: `# x_m,y_m,w_tr_right_m,w_tr_left_m`, closed loop, driving direction |
-| `raceline.csv` | `build_raceline` | TUM output: `# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`, `map` frame |
+| `raceline.csv` | `build_raceline` | TUM output: `# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`, `map` frame. Second header line `# raceline: {json}`: method (`mintime`, `mintime-retry`, `centerline`), `clean`, settings `changed`, `notes` (failures, clearance), solver, lap, min wall clearance, build time |
 | `preview.png` | `build_raceline` | map, centerline, track bounds, raceline coloured by speed |
 
 ## Car parameters (AutoDRIVE RoboRacer)

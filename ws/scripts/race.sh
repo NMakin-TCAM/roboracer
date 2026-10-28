@@ -17,6 +17,19 @@ for f in map.pbstream raceline.csv; do
     [ -e "$tracks/$name/$f" ] || { echo "$tracks/$name/$f missing; run map-track $name  (scripts/map_track.sh)" >&2; exit 1; }
 done
 
+# which line the car drives (build_raceline's provenance header line), before the launch output buries it
+prov=$(grep -m1 '^# raceline: ' "$tracks/$name/raceline.csv" || true)
+if [ -z "$prov" ]; then
+    echo "WARNING: $tracks/$name/raceline.csv has UNKNOWN provenance (no '# raceline:' line: built before it" \
+         "was recorded, or written by hand); it may not be a converged mintime line. Header:" >&2
+    grep -m2 '^#' "$tracks/$name/raceline.csv" >&2 || true
+elif [[ "$prov" == *'"method": "mintime", "clean": true'* ]]; then
+    echo "Raceline: clean TUM mintime line. $prov"
+else
+    echo "WARNING: $tracks/$name/raceline.csv is NOT a clean TUM mintime line:" >&2
+    echo "$prov" >&2
+fi
+
 reset_sim_car
 
 exec ros2 launch control race.launch.py track:="$name" "$@"
