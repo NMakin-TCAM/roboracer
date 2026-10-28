@@ -216,7 +216,10 @@ class MclNode(Node):
         self.recheck_offset = None
         self.snap_offset = None
         self.alternatives = None
-        self.generation += 1
+        # any other pose change makes a running search stale. A re-anchor only nudges the pose, and the verify
+        # behind a start (which may find the start was the wrong place) is carried by the odometry: it survives.
+        if not (reason == 're-anchor' and self.job is not None and self.job[1] == 'verify'):
+            self.generation += 1
         if not keep_localized:   # a new start: a burst before it says nothing about this pose
             self.hold_until = 0.0
             self.burst = False
@@ -306,7 +309,9 @@ class MclNode(Node):
                                       'checking it against the map')
             self.last_odom_pose = odom_pose
             self.map_T_odom = compose(self.pf.estimate(), inverse(odom_pose))
-            if self.localized and self.job is None:
+            self.generation += 1   # a running search's result is carried by the odometry: the jump spoils it
+            self.job = None
+            if self.localized:
                 self.submit_search('check', ranges, angles, sensor, [self.pf.estimate()], False, self.min_fit)
             return
         moved = trans >= self.update_min_d or abs(delta[2]) >= self.update_min_a
@@ -333,27 +338,48 @@ class MclNode(Node):
         'verify': the whole-area search behind a raceline-first answer. odom_then: the odometry pose at the
         scan (default: now)."""
         hybrid = self.hybrid and kind == 'find'
-        self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor, hybrid),
+        self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor, hybrid,
+                                     kind != 'check'),
                     kind, odom_then or self.odom[0], self.generation, time.monotonic(),
                     (ranges, angles, sensor, list(priors)))
 
-    def search_job(self, ranges, angles, sensor, priors, force, floor, hybrid):
+    def search_job(self, ranges, angles, sensor, priors, force, floor, hybrid, score_priors):
         """Worker thread: search_global (raceline first if hybrid), then choose_pose. Returns (stage, hypotheses,
-        choice). Uses no node state but the (read-only) matcher."""
+        choice). Uses no node state but the (read-only) matcher.
+
+        score_priors: where the car is expected (the map origin race.sh puts it at, the last known pose) is
+        scored directly with a local search and joins the places found: the raceline-first search only looks
+        near the raceline, and a start further from it lost to a look-alike elsewhere (iros2026). Fitting about
+        as well, the expected pose wins the tie (choose_pose)."""
         def refine(q):
             return self.matcher.search_local(q, ranges, angles, sensor, radius=1.0, yaw_range=math.radians(10.0))
 
+        expected = []
+
+        def scored():   # once, and only when a search needs it
+            if score_priors and not expected:
+                expected.extend(self.local_search(q, ranges, angles, sensor, 1.0, math.radians(10.0)) for q in priors)
+            return expected
+
+        def best_fit(hyps):
+            return max([h[1] for h in hyps[:1]] + [e[1] for e in scored()], default=0.0)
+
+        def distinct(a, b):   # as search_global keeps its places apart
+            return math.hypot(a[0] - b[0], a[1] - b[1]) > 1.0 or abs(wrap(a[2] - b[2])) > math.radians(30.0)
+
         def choose(hyps, force):
+            hyps = sorted(hyps + [e for e in scored() if all(distinct(e[0], h[0]) for h in hyps)],
+                          key=lambda h: -h[1])
             return choose_pose(hyps, priors, self.ambiguity, self.prior_radius, self.yaw_scale, force, refine)
 
         if hybrid:
             hyps = self.matcher.search_global(ranges, angles, sensor, seeds=self.hybrid_seeds, track_only=True)
-            if hyps and hyps[0][1] >= max(floor, self.hybrid_min_fit):
+            if best_fit(hyps) >= max(floor, self.hybrid_min_fit):
                 choice = choose(hyps, False)
                 if choice is not None:
                     return 'raceline', hyps, choice
         hyps = self.matcher.search_global(ranges, angles, sensor)
-        if not hyps or hyps[0][1] < floor:
+        if best_fit(hyps) < floor:
             return 'full', hyps, None
         return 'full', hyps, choose(hyps, force)
 
@@ -482,11 +508,7 @@ class MclNode(Node):
             return
         self.fit_bad = 0
         t0 = time.monotonic()
-        coarse, _ = self.matcher.search_local(est, ranges, angles, sensor, radius=self.local_radius,
-                                              yaw_range=self.local_yaw, step=0.1,
-                                              yaw_step=min(math.radians(3.0), self.local_yaw / 2.0))
-        best, best_fit = self.matcher.search_local(coarse, ranges, angles, sensor, radius=0.1,
-                                                   yaw_range=math.radians(2.0), yaw_step=math.radians(1.0))
+        best, best_fit = self.local_search(est, ranges, angles, sensor, self.local_radius, self.local_yaw)
         ms = (time.monotonic() - t0) * 1000.0
         if best_fit < max(fit + self.snap_gain, self.fit_drop * self.fit_level) or best_fit < self.min_fit:
             self.snap_offset = None   # nothing fits clearly better nearby: something the map does not have
@@ -523,6 +545,13 @@ class MclNode(Node):
         self.recheck_offset = None
         self.reanchor(best, odom_pose, f'{math.hypot(offset[0], offset[1]):.2f} m ({offset[0]:+.2f} along, '
                                        f'{offset[1]:+.2f} across), fit {fit:.2f} -> {best_fit:.2f}')
+
+    def local_search(self, pose, ranges, angles, sensor, radius, yaw_range):
+        """Best (pose, fit) near pose: coarse (0.1 m) within radius / yaw_range, then fine around that; a few ms."""
+        coarse, _ = self.matcher.search_local(pose, ranges, angles, sensor, radius=radius, yaw_range=yaw_range,
+                                              step=0.1, yaw_step=min(math.radians(3.0), yaw_range / 2.0))
+        return self.matcher.search_local(coarse, ranges, angles, sensor, radius=0.1, yaw_range=math.radians(2.0),
+                                         yaw_step=math.radians(1.0))
 
     def reanchor(self, pose, odom_pose, what):
         """Move the cloud to a scan-matched pose without stopping the car; log at most every LOG_PERIOD s.

@@ -6,6 +6,7 @@ checked by driving, after a sim reset), and staying localized through an odometr
 and a stretch the map does not have (a low fit never stops it).
 """
 import math
+import threading
 
 import numpy as np
 import pytest
@@ -352,6 +353,58 @@ def test_a_car_facing_backwards_is_never_confidently_misplaced(car):
     if pose_error(pose, c.pose())[0] > 0.15:
         alts = c.node.alternatives
         assert alts is not None and any(pose_error(pose, q)[0] < 0.15 for q in alts.poses)
+
+
+def test_the_expected_start_beats_a_look_alike_the_search_found_elsewhere(car):
+    """The raceline-first search only looks near the raceline: a start further from it is not among its
+    places, and a look-alike far away fitting about as well was picked (iros2026). The expected pose (the map
+    origin race.sh puts the car at) is scored directly and wins the tie."""
+    c = car()
+    P = lap()
+    start = P[92]
+    c.node.priors = [start]
+    search_global = c.node.matcher.search_global
+    injected = []
+
+    def look_alike_only(ranges, angles, sensor, **kw):
+        far = [h for h in search_global(ranges, angles, sensor, **kw) if pose_error(start, h[0])[0] > 3.0]
+        injected.append(far[0][0])
+        return [(far[0][0], 1.0)]   # only a look-alike, fitting at least as well as the true place
+    c.node.matcher.search_global = look_alike_only
+    c.stand(start)
+    assert injected, 'no look-alike'
+    assert c.node.localized and pose_error(start, c.pose())[0] < 0.1
+
+
+def test_a_re_anchor_does_not_discard_the_verify_search(car):
+    """A re-anchor while driving, before the verify behind the start has finished, used to make the verify stale,
+    so a wrong start was never corrected by it."""
+    c = car()
+    P = lap()
+    release = threading.Event()
+    search_global = c.node.matcher.search_global
+
+    def slow_whole_area(*a, track_only=False, **kw):
+        if not track_only:          # the whole-area search (the verify) waits until the car is driving
+            assert release.wait(30), 'never released'
+        return search_global(*a, track_only=track_only, **kw)
+    c.node.matcher.search_global = slow_whole_area
+    for _ in range(12):
+        c.stamp += 1
+        c.node.odom_cb(c.odom(P[92]))
+        c.node.scan_cb(c.scan(P[92]))
+        if c.node.job is not None and c.node.job[1] != 'verify':
+            c.node.job[0].result()   # the raceline-first find
+        if c.node.localized:
+            break
+    assert c.node.localized and c.node.job is not None and c.node.job[1] == 'verify'
+    verified = []
+    on_verify = c.node.on_verify
+    c.node.on_verify = lambda *a: (verified.append(a), on_verify(*a))
+    c.node.reanchor(c.node.pf.estimate(), None, 'test')
+    release.set()
+    settle(c)
+    assert verified, 'the verify search was discarded'
 
 
 def test_without_hybrid_the_whole_area_search_finds_the_car(car):
