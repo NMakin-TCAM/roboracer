@@ -1,7 +1,7 @@
 """Race a mapped track: localization + pure pursuit on its raceline.
 
     ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
-        [avoid:=false] [localizer:=cartographer|mcl] [adaptive_lookahead:=false] [adaptive_lookahead_cut:=0.1]
+        [avoid:=false] [localizer:=cartographer|mcl] [adaptive_lookahead:=true] [adaptive_lookahead_cut:=0.1]
         [adaptive_lookahead_min_time:=0.25]
 
 Needs tracks/<name>/map.pbstream (map.yaml for localizer:=mcl) and raceline.csv (ws/scripts/map_track.sh
@@ -11,7 +11,7 @@ particle cloud has converged), so the car waits for that. localizer:=mcl is the 
 (perception mcl.launch.py); the default is Cartographer pure localization.
 avoid:=true also starts planning's obstacle_spliner_node on the track's raceline and map, and pure
 pursuit follows its /local_path around obstacles the map did not have (stopping when there is none).
-adaptive_lookahead:=true caps pure pursuit's lookahead by the curvature of the raceline ahead (see
+adaptive_lookahead:=true (the default) caps pure pursuit's lookahead by the curvature of the raceline ahead (see
 pure_pursuit_node), for tight corners at full speed.
 """
 import os
@@ -55,7 +55,7 @@ def generate_launch_description():
                               description='avoid obstacles the map did not have (obstacle_spliner_node)'),
         DeclareLaunchArgument('localizer', default_value='cartographer',
                               description='cartographer: pure localization on map.pbstream; mcl: particle filter on map.yaml'),
-        DeclareLaunchArgument('adaptive_lookahead', default_value='false',
+        DeclareLaunchArgument('adaptive_lookahead', default_value='true',
                               description='cap the lookahead by the curvature of the raceline'),
         DeclareLaunchArgument('adaptive_lookahead_cut', default_value='0.1',
                               description='with adaptive_lookahead: corner cut [m], lookahead <= sqrt(2 cut / kappa)'),

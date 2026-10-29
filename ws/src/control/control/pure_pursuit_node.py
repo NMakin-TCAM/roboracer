@@ -7,7 +7,7 @@ least one lookahead ahead of the car, steer on the arc through it, drive at the 
 
   lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
 
-adaptive_lookahead (default off): the lookahead is also capped by the curvature of the raceline near
+adaptive_lookahead (default on): the lookahead is also capped by the curvature of the raceline near
 the car, so it does not cut corners (pure pursuit settles about lookahead^2 * kappa / 2 inside a curve;
 control/lookahead.py):
 
@@ -76,7 +76,7 @@ class PurePursuit(Node):
         self.lookahead_distance = p('lookahead_distance', 3.0).value   # m, max
         self.lookahead_min = p('lookahead_min', 0.6).value             # m, ~2x the wheelbase
         self.lookahead_time = p('lookahead_time', 0.4).value           # s
-        adaptive = p('adaptive_lookahead', False).value                # cap by the curvature ahead
+        adaptive = p('adaptive_lookahead', True).value                # cap by the curvature ahead
         la_cut = p('adaptive_lookahead_cut', 0.1).value                # m, lookahead <= sqrt(2 cut / kappa)
         la_slope = p('adaptive_lookahead_slope', 0.5).value            # + slope * arc distance to the curve
         self.la_min_time = p('adaptive_lookahead_min_time', 0.25).value  # s, but >= min_time * speed

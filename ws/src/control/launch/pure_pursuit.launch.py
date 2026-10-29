@@ -1,13 +1,13 @@
 """Pure pursuit on a generated raceline:
 
     ros2 launch control pure_pursuit.launch.py track:=<name> [pose_topic:=/localized_pose] [speed_scale:=0.5]
-        [max_speed:=0.0] [avoid:=false] [adaptive_lookahead:=false] [adaptive_lookahead_cut:=0.1]
+        [max_speed:=0.0] [avoid:=false] [adaptive_lookahead:=true] [adaptive_lookahead_cut:=0.1]
         [adaptive_lookahead_min_time:=0.25]
 
 Follows $TRACKS_DIR/<name>/raceline.csv (default ~/ws/tracks). Needs localization publishing pose_topic
 (/localized_pose: perception's localization_gate or mcl_node, so the car waits until it is localized).
 avoid:=true follows /local_path instead (planning's obstacle_spliner_node; race.launch.py starts it).
-adaptive_lookahead:=true caps the lookahead by the curvature of the raceline near the car (so pure pursuit
+adaptive_lookahead:=true (the default) caps the lookahead by the curvature of the raceline near the car (so pure pursuit
 cuts curves by at most about adaptive_lookahead_cut m; not below adaptive_lookahead_min_time x speed).
 """
 from launch import LaunchDescription
@@ -29,7 +29,7 @@ def generate_launch_description():
                               description='cap on the drive speed [m/s], 0 = no cap'),
         DeclareLaunchArgument('avoid', default_value='false',
                               description='follow /local_path (obstacle avoidance) instead of the raceline'),
-        DeclareLaunchArgument('adaptive_lookahead', default_value='false',
+        DeclareLaunchArgument('adaptive_lookahead', default_value='true',
                               description='cap the lookahead by the curvature of the raceline'),
         DeclareLaunchArgument('adaptive_lookahead_cut', default_value='0.1',
                               description='with adaptive_lookahead: corner cut [m], lookahead <= sqrt(2 cut / kappa)'),

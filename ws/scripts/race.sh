@@ -3,7 +3,7 @@
 #
 #   ws/scripts/race.sh <name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose] [avoid:=false]
 #                          [localizer:=mcl]    particle filter on map.yaml instead of Cartographer localization
-#                          [adaptive_lookahead:=true]   lookahead capped by the raceline's curvature (for speed_scale 1.0)
+#                          [adaptive_lookahead:=true]   lookahead capped by the raceline's curvature (default; :=false = speed term only)
 #
 # Needs the bridge running and tracks/<name>/ from ws/scripts/map_track.sh <name>.
 # Resets the sim car first: localization starts from the pose mapping started from. The car waits

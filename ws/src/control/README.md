@@ -6,8 +6,8 @@ finds the closest raceline waypoint, picks the first waypoint one lookahead ahea
 through it and drives at the raceline speed scaled by `speed_scale`. The speed is taken at the target
 waypoint, not the closest one: the car brakes early into corners, but on corner exits it can exceed the
 profile at its own position near `speed_scale` 1.0. With `adaptive_lookahead:=true` the lookahead is
-also capped by the curvature of the raceline near the car, so at speed it does not cut corners (off by
-default; see Adaptive lookahead below). See `docs/pipeline.md` for where
+also capped by the curvature of the raceline near the car, so at speed it does not cut corners (on by
+default, `adaptive_lookahead:=false` turns it off; see Adaptive lookahead below). See `docs/pipeline.md` for where
 it sits in the stack.
 
 `follow_the_gap_node` is a reactive alternative that needs no map: it steers toward the farthest point
@@ -25,7 +25,7 @@ clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle
 ros2 launch control pure_pursuit.launch.py track:=<name>
 ros2 launch control pure_pursuit.launch.py track:=<name> speed_scale:=0.3
 ros2 launch control race.launch.py track:=<name> avoid:=true   # + obstacle avoidance
-ros2 launch control race.launch.py track:=<name> speed_scale:=1.0 adaptive_lookahead:=true
+ros2 launch control race.launch.py track:=<name> speed_scale:=1.0   # adaptive lookahead is on by default
 ```
 
 Localization must be running: the default pose topic is `/localized_pose` (perception's
@@ -89,7 +89,7 @@ pose on a nearby leg (iros2026's legs are 1.07 m apart) passes it. There is no `
 | `lookahead_time` | `0.4` | s; lookahead = `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`] |
 | `lookahead_min` | `0.6` | m, about twice the wheelbase |
 | `lookahead_distance` | `3.0` | m, maximum lookahead |
-| `adaptive_lookahead` | `false` | cap the lookahead by the curvature of the raceline near the car (below); off = the speed term only |
+| `adaptive_lookahead` | `true` | cap the lookahead by the curvature of the raceline near the car (below); off = the speed term only |
 | `adaptive_lookahead_cut` | `0.1` | m; corner cut allowed: on a curve of radius R the lookahead is at most sqrt(2 * cut * R) |
 | `adaptive_lookahead_min_time` | `0.25` | s; the capped lookahead is never below this * drive speed |
 | `adaptive_lookahead_slope` | `0.5` | m per m: the cap rises by this much per metre of distance from the curve (before and after it). Node parameter only (not a launch argument) |

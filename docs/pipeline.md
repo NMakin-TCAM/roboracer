@@ -55,7 +55,7 @@ before anything counts as an obstacle, so neither the pose running ahead of the 
 `max_align_shift` (0.3 m) / `max_align_turn` (6 deg), leaves out returns short of the map's own ray (an
 obstacle hiding a wall), and its correction is carried from tick to tick across the localizer's changes of
 TF `map -> odom` (it jumps only when that fits clearly better). With no fresh collision-free path the car stops.
-With `adaptive_lookahead:=true` pure pursuit's lookahead is also capped by the raceline's curvature (so it
+With `adaptive_lookahead:=true` (the default) pure pursuit's lookahead is also capped by the raceline's curvature (so it
 cuts curves by at most about `adaptive_lookahead_cut` m), which is what makes `speed_scale:=1.0` drive
 without hitting the inside walls (control/README.md).
 If mapping fails on race day, `follow_the_gap.launch.py` drives on `/scan` alone (no map); run it instead of
