@@ -23,8 +23,9 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time 
 > - The stack has been developed and tested in the AutoDRIVE simulator (macOS practice build, release
 >   `2026-iros`). Its topics follow [f1tenth_system](https://github.com/f1tenth/f1tenth_system) so the
 >   same perception, planning and control run on the car, but it **has not yet been run on the real car**.
-> - Racing has been tested up to `speed_scale` 0.5 (half the planned speed profile). The braking gain and
->   the tyre model in `racecar.ini` are not yet tuned for full speed.
+> - Racing has been tested up to `speed_scale` 0.5 (half the planned speed profile), and in the sim at 1.0 on
+>   Porto and Berlin with `adaptive_lookahead:=true` (without it pure pursuit cuts into the inside walls).
+>   The braking gain and the tyre model in `racecar.ini` are not yet tuned for full speed.
 
 ## Features
 
