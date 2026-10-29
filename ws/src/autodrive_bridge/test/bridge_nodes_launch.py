@@ -1,5 +1,5 @@
-"""autodrive_launch.py without map_view and foxglove_bridge, for test_launch.py: map_view would connect
-to a running sim's map view, foxglove_bridge would bind :8765. Pass port:= a free port."""
+"""autodrive_launch.py without foxglove_bridge, for test_launch.py: foxglove_bridge would bind :8765.
+Pass port:= a free port."""
 import importlib.util
 import os
 
@@ -14,5 +14,5 @@ def generate_launch_description():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     keep = [e for e in module.generate_launch_description().entities
-            if not (isinstance(e, Node) and e.node_executable in ('map_view', 'foxglove_bridge'))]
+            if not (isinstance(e, Node) and e.node_executable == 'foxglove_bridge')]
     return LaunchDescription(keep)

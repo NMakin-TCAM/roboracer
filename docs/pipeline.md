@@ -28,9 +28,9 @@ Restart the bridge with Ctrl-C in shell 1 (SIGINT to the whole process group; or
 then wait until `ros2 node list` is empty of its nodes. A SIGINT to the launch process alone
 (`pkill -INT -f "ros2 launch autodrive_bridge"`) reaches no node: they run on ~5 s until launch sends
 SIGTERM. A bridge relaunched in that window stops once `fast_bridge` fails to bind :4567
-(`autodrive_launch.py` shuts down with it). A second `wheel_odom` / `adapter` / `map_view` holds all its
+(`autodrive_launch.py` shuts down with it). A second `wheel_odom` / `adapter` holds all its
 output while the first runs, and for 2 s at every start (`/odom` + TF odom -> base_link; `/scan`,
-`/sensors/imu/raw`, ground truth and the commands; the app's map view), so Cartographer never gets
+`/sensors/imu/raw`, ground truth and the commands), so Cartographer never gets
 duplicate `/odom` or IMU stamps. After a SIGKILL or crash the dead node stays in the graph until its DDS
 lease expires (~20 s): a relaunch holds that long, logs it and recovers. Two copies started together
 outside one launch hold each other until one is stopped.

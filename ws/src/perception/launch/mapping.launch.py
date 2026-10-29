@@ -20,11 +20,9 @@ def generate_launch_description():
                                    '-configuration_basename', 'mapping.lua'],
                         remappings=[('imu', '/sensors/imu/raw')])
 
-    # every submap update (submap_publish_period_sec in mapping.lua): the sim's Mapping tab
-    # (autodrive_bridge map_view) shows the map growing as the car drives
     grid = Node(package='cartographer_ros', executable='cartographer_occupancy_grid_node',
                 name='cartographer_occupancy_grid_node', output='screen',
-                arguments=['-resolution', '0.05', '-publish_period_sec', '0.3'])
+                arguments=['-resolution', '0.05', '-publish_period_sec', '1.0'])
 
     map_origin = Node(package='perception', executable='map_origin', name='map_origin', output='screen')
 

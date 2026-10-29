@@ -80,13 +80,13 @@ With the stock simulator, restarting the bridge while it is connected makes it r
 so **Disconnect** first.
 
 To restart the bridge, stop it with Ctrl-C in its terminal (or `kill -INT -- -<pgid>` for the launch's
-whole process group) and wait until `ros2 node list` no longer shows `fast_bridge`, `adapter`, `wheel_odom`
-or `map_view` before launching it again. `pkill -INT -f "ros2 launch autodrive_bridge"` signals only the
+whole process group) and wait until `ros2 node list` no longer shows `fast_bridge`, `adapter` or
+`wheel_odom` before launching it again. `pkill -INT -f "ros2 launch autodrive_bridge"` signals only the
 launch process: ros2 launch forwards nothing on that SIGINT and its nodes keep running ~5 s, until it
 sends them SIGTERM. A new bridge started meanwhile ends as soon as its `fast_bridge` fails to bind :4567
-(the launch shuts down with it). Until then, and whenever a second copy runs, the newer `wheel_odom`,
-`adapter` or `map_view` holds all its output (2 s at every start, then while another copy is seen):
-`/odom` + TF odom -> base_link, `/scan`, `/sensors/imu/raw`, ground truth, the commands, the map view. So
+(the launch shuts down with it). Until then, and whenever a second copy runs, the newer `wheel_odom`
+or `adapter` holds all its output (2 s at every start, then while another copy is seen):
+`/odom` + TF odom -> base_link, `/scan`, `/sensors/imu/raw`, ground truth, the commands. So
 Cartographer never gets duplicate `/odom` or IMU stamps from two copies (it aborts on them). The nodes
 also exit when their launch process dies.
 

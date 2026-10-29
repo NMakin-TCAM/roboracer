@@ -27,7 +27,6 @@ setup(
             'adapter = autodrive_bridge.adapter:main',
             'wheel_odom = autodrive_bridge.wheel_odom:main',
             'teleop_keyboard = autodrive_bridge.teleop_keyboard:main',
-            'map_view = autodrive_bridge.map_view:main',
         ],
     },
 )

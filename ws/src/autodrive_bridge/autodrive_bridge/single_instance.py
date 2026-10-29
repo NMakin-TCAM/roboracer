@@ -2,8 +2,8 @@
 
 ros2 launch forwards nothing to its nodes on a SIGINT sent to the launch process alone (Humble's
 execute_local: send_sigint=not due_to_sigint); they get SIGTERM after 5 s and SIGKILL after 10 s.
-A bridge restarted within that window, or after the launch itself died, ran a second adapter,
-wheel_odom and map_view beside the old ones (the new fast_bridge could not bind :4567), and the two
+A bridge restarted within that window, or after the launch itself died, ran a second adapter
+and wheel_odom beside the old ones (the new fast_bridge could not bind :4567), and the two
 wheel_odoms' duplicate /odom stamps aborted Cartographer.
 
   exit_with_parent()   the node gets SIGTERM when its parent (ros2 launch, ros2 run) dies

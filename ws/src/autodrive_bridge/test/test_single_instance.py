@@ -8,7 +8,6 @@ from builtin_interfaces.msg import Time
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import Imu, JointState
 
-from autodrive_bridge.map_view import MapView
 from autodrive_bridge.wheel_odom import WheelOdom
 
 R = 0.0585   # wheel_radius default
@@ -43,12 +42,6 @@ def frames(node, t0, n):
         imu = Imu()
         imu.header.stamp = stamp
         node.imu_cb(imu)
-
-
-@pytest.fixture(autouse=True)
-def no_map_view_connection(monkeypatch):
-    # map_view would otherwise connect to the app's map view on the host (a running sim)
-    monkeypatch.setattr(MapView, 'connect', lambda self: None)
 
 
 @pytest.fixture
@@ -109,25 +102,8 @@ def test_running_wheel_odom_keeps_publishing(wheel_odom):
         other.destroy_node()
 
 
-def test_second_map_view_holds():
-    first = MapView()
-    second = MapView()
-    try:
-        first.guard.delay = second.guard.delay = 0.0
-        wait_for(lambda: len(second.guard.others()) == 2, second)
-        assert second.guard.others() == ['/map_view', '/map_view']
-        second.guard.check()
-        assert not second.guard.ok
-    finally:
-        first.destroy_node()
-    wait_for(lambda: second.guard.others() == [], second)
-    second.guard.check()
-    assert second.guard.ok
-    second.destroy_node()
-
-
 def test_guard_waits_for_discovery():
-    n = MapView()   # alone, but not ok before the discovery delay
+    n = WheelOdom()   # alone, but not ok before the discovery delay
     try:
         n.guard.check()
         assert not n.guard.ok
