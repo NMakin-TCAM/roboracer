@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Map an unseen track and plan its minimum-time raceline (docs/pipeline.md):
-#   Cartographer mapping -> save_map -> centerline -> TUM mintime
+#   Cartographer mapping -> save_map -> centerline -> TUM mintime (if that fails: a fallback line, loudly)
+# Exit status as build_raceline's: 0 clean mintime raceline, 2 a fallback raceline (WARNING printed), 1 none.
 #
 #   ws/scripts/map_track.sh <name> [--wall-follow | --gap-follow] [--laps N] [follower launch args, e.g. speed:=1.2]
 #
@@ -111,5 +112,15 @@ done
 stop_group "$mapping"
 trap - EXIT
 
-ros2 run planning build_raceline "$name"
+# build_raceline: 0 clean mintime line, 2 a raceline but NOT a clean mintime line (fallback), 1 none
+status=0
+ros2 run planning build_raceline "$name" || status=$?
+if [ "$status" -eq 2 ]; then
+    echo "WARNING: $tracks/$name/raceline.csv is NOT a clean TUM mintime line (fallback, see the WARNING above" \
+         "and its '# raceline:' header line). Check preview.png before racing." >&2
+elif [ "$status" -ne 0 ]; then
+    echo "build_raceline failed: no raceline for $name (map saved; rerun: ros2 run planning build_raceline $name)" >&2
+    exit "$status"
+fi
 echo "Done: $tracks/$name (check preview.png). Race with: race $name  (scripts/race.sh)"
+exit "$status"

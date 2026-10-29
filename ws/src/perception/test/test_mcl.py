@@ -5,15 +5,17 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from perception.mcl import (LikelihoodMap, ParticleFilter, compose, inverse, relative, select_beams, wrap)
+from perception.mcl import (Alternatives, LikelihoodMap, ParticleFilter, ScanMatcher, choose_pose, compose, inverse,
+                            relative, select_beams, wrap)
 
 RES = 0.05
 LASER = (0.27, 0.0, 0.0)          # laser in base_link (rear axle)
 ANGLE_MIN, ANGLE_INC, N_SCAN, RANGE_MAX = -math.radians(135), math.radians(1.0), 271, 10.0
 
 
-def make_track():
-    """20 x 12 m loop corridor (2.5 m wide) with an asymmetric wall notch and a pillar. Image order."""
+def make_track(features=True):
+    """20 x 12 m loop corridor (2.5 m wide) with an asymmetric wall notch and two wall stubs. Image order.
+    features=False: the bare loop, symmetric under a half turn about its centre."""
     h, w = int(12 / RES), int(20 / RES)
     occ = np.zeros((h, w), dtype=bool)
 
@@ -22,9 +24,10 @@ def make_track():
 
     box(0, 0, 20, 0.2), box(0, 11.8, 20, 12), box(0, 0, 0.2, 12), box(19.8, 0, 20, 12)   # outer walls
     box(2.7, 2.7, 17.3, 9.3)                                                             # island
-    box(9.0, 0.2, 10.5, 1.0)                                                             # notch
-    box(15.0, 10.2, 15.4, 11.0)                                                          # wall stub
-    box(3.0, 9.3, 3.4, 10.0)                                                             # stub on the island
+    if features:
+        box(9.0, 0.2, 10.5, 1.0)                                                         # notch
+        box(15.0, 10.2, 15.4, 11.0)                                                      # wall stub
+        box(3.0, 9.3, 3.4, 10.0)                                                         # stub on the island
     free = ~occ
     free[:int(0.2 / RES)] = free[-int(0.2 / RES):] = False
     return LikelihoodMap(occ, free, RES, (0.0, 0.0))
@@ -180,3 +183,245 @@ def test_tracks_a_lap_with_3_percent_odometry_scale_error(lmap):
     errors = [pose_error(t, e) for t, e in drive(pf, lmap, poses, rng, odom_bias=1.03)]
     assert max(e[0] for e in errors) < 0.35 and max(e[1] for e in errors) < 0.15
     assert np.mean([e[0] for e in errors]) < 0.12
+
+
+@pytest.fixture(scope='module')
+def matcher(lmap):
+    return ScanMatcher(lmap)
+
+
+AMBIGUOUS = 0.97   # a second hypothesis fitting this well relative to the best one: the scan cannot tell
+
+
+def contenders(hyps):
+    return [h for h in hyps if h[1] >= AMBIGUOUS * hyps[0][1]]
+
+
+@pytest.mark.parametrize('i', [0, 60, 140, 230, 330])
+def test_global_search_never_misses_the_true_pose(lmap, matcher, i):
+    """Standing still on a uniform straight with one corner in range, several places on the loop give the same
+    scan (the caller breaks that tie with the last known pose); the true pose must be among them."""
+    rng = np.random.default_rng(i)
+    pose = lap()[i]
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = matcher.search_global(r, a, LASER)
+    assert hyps[0][1] > 0.8
+    assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(3)
+               for h, _ in contenders(hyps))
+
+
+@pytest.mark.parametrize('pose', [(9.75, 1.45, 0.0), (10.0, 1.5, math.radians(100)), (16.53, 10.55, math.pi)])
+def test_global_search_is_unambiguous_with_a_feature_in_view(lmap, matcher, pose):
+    """Beside the notch (also turned across the track, as after a crash), and at the stub on the top straight."""
+    rng = np.random.default_rng(2)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = matcher.search_global(r, a, LASER)
+    assert len(contenders(hyps)) == 1
+    assert pose_error(pose, hyps[0][0])[0] < 0.1 and pose_error(pose, hyps[0][0])[1] < math.radians(3)
+
+
+def test_global_search_reports_a_symmetric_track_as_ambiguous():
+    bare = make_track(features=False)
+    rng = np.random.default_rng(4)
+    pose = lap()[200]   # in a corner: on a straight, every position along it looks the same
+    r, a = select_beams(scan_from(bare, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = ScanMatcher(bare).search_global(r, a, LASER)
+    assert len(contenders(hyps)) >= 2
+    twin = (20.0 - pose[0], 12.0 - pose[1], float(wrap(pose[2] + math.pi)))   # the half-turn image
+    assert any(pose_error(p, h)[0] < 0.15 for h, _ in hyps[:2] for p in (pose, twin))
+
+
+def test_fit_drops_when_the_pose_is_off(lmap, matcher):
+    rng = np.random.default_rng(5)
+    pose = lap()[100]
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    good = matcher.fit(pose, r, a, LASER)
+    off = matcher.fit(compose(pose, (0.0, 0.4, 0.0)), r, a, LASER)
+    assert good > 0.8 and off < 0.6 * good
+
+
+def test_local_search_reanchors_a_filter_thrown_off_by_the_odometry(lmap, matcher):
+    """A 40 cm along-track jump the odometry did not see (wheel slip, a stalled sensor stream): the cloud
+    sits on the old pose, the local search finds the true one."""
+    rng = np.random.default_rng(6)
+    poses = lap()
+    true = poses[300]                       # on a straight: the hard direction for the filter
+    stale = compose(true, (-0.4, 0.05, math.radians(4)))
+    r, a = select_beams(scan_from(lmap, true, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    assert matcher.fit(stale, r, a, LASER) < 0.6 * matcher.fit(true, r, a, LASER)
+    best, fit = matcher.search_local(stale, r, a, LASER)
+    assert pose_error(true, best)[0] < 0.08 and pose_error(true, best)[1] < math.radians(2)
+    assert fit > 0.8
+
+
+MAP_ORIGIN = (0.0, 0.0, 0.0)
+
+
+def global_hyps(lmap, matcher, pose, seed):
+    """search_global's hypotheses for a scan at pose, and the refine callable choose_pose takes."""
+    rng = np.random.default_rng(seed)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    return matcher.search_global(r, a, LASER), lambda q: matcher.search_local(q, r, a, LASER, radius=1.0,
+                                                                              yaw_range=math.radians(10))
+
+
+@pytest.mark.parametrize('i', [0, 100, 200, 300, 340, 360, 380, 400, 420])
+def test_choose_pose_resolves_ties_with_a_good_prior(lmap, matcher, i):
+    """The review's stuck cases (340: the same spot facing the other way; 360-400: along the top straight):
+    with the car's last pose as the prior, a pick is made and it is the right one."""
+    pose = lap()[i]
+    hyps, refine = global_hyps(lmap, matcher, pose, i)
+    choice = choose_pose(hyps, [pose, MAP_ORIGIN], refine=refine)
+    assert choice is not None
+    assert pose_error(pose, choice[0])[0] < 0.15 and pose_error(pose, choice[0])[1] < math.radians(3)
+
+
+def test_choose_pose_waits_on_a_useless_prior_then_guesses_with_alternatives(lmap, matcher):
+    pose = lap()[380]                                  # top straight: many places fit
+    hyps, refine = global_hyps(lmap, matcher, pose, 7)
+    far = (10.0, 6.0, 0.0)                             # inside the island: near nothing
+    assert choose_pose(hyps, [far], refine=refine) is None
+    pick, alternatives, _ = choose_pose(hyps, [far], force=True)
+    assert alternatives
+    assert any(pose_error(pose, p)[0] < 0.15 for p in [pick] + alternatives)
+
+
+def test_choose_pose_takes_a_unique_best_regardless_of_the_prior(lmap, matcher):
+    pose = (9.75, 1.45, 0.0)                           # beside the notch
+    pick, alternatives, _ = choose_pose(global_hyps(lmap, matcher, pose, 2)[0], [(18.0, 10.0, 3.0)])
+    assert pose_error(pose, pick)[0] < 0.1 and alternatives == []
+
+
+def test_alternatives_switch_to_the_true_pose_once_the_car_moves(lmap, matcher):
+    """A wrong guess 1.2 m along the bottom straight, with the notch coming up: carried along with the true
+    alternative, the scans rule it out within a few metres of driving."""
+    rng = np.random.default_rng(8)
+    poses = lap()
+    start = 45
+    true = poses[start]
+    wrong = compose(true, (1.2, 0.0, 0.0))             # 1.2 m further along the same straight
+    alts = Alternatives([true], odom_pose=true)        # odometry frame = map frame here
+    switched = None
+    for k in range(start + 3, start + 60, 3):
+        moved = relative(poses[start], poses[k])
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        switched = alts.update(matcher, compose(wrong, moved), poses[k], r, a, LASER)
+        if switched or alts.done:
+            break
+    assert switched is not None
+    assert pose_error(poses[k], switched[0])[0] < 0.1
+
+
+def test_alternatives_keep_a_correct_pick(lmap, matcher):
+    rng = np.random.default_rng(9)
+    poses = lap()
+    start = 45
+    alts = Alternatives([compose(poses[start], (1.2, 0.0, 0.0))], odom_pose=poses[start])
+    for k in range(start + 3, start + 100, 3):
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        assert alts.update(matcher, poses[k], poses[k], r, a, LASER) is None
+        if alts.done:
+            break
+    assert alts.done
+
+
+HYBRID_MIN_FIT = 0.8   # mcl_node's defaults: a track-only result fitting worse falls back to the full search
+TRACK_SEEDS = 15
+
+
+@pytest.fixture(scope='module')
+def track_matcher(lmap):
+    m = ScanMatcher(lmap)
+    m.set_track([p[:2] for p in lap()])
+    return m
+
+
+def test_track_search_scores_far_fewer_poses(track_matcher):
+    full = len(track_matcher.candidates) * len(np.arange(-math.pi, math.pi, track_matcher.yaw_step))
+    assert track_matcher.track_poses < full / 5
+
+
+@pytest.mark.parametrize('i', [0, 92, 200, 300, 395, 480])
+def test_track_search_finds_a_car_on_the_raceline(lmap, track_matcher, i):
+    pose = lap()[i]
+    rng = np.random.default_rng(i)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = track_matcher.search_global(r, a, LASER, track_only=True, seeds=TRACK_SEEDS)
+    assert hyps[0][1] >= HYBRID_MIN_FIT
+    assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(3)
+               for h, _ in contenders(hyps))
+
+
+@pytest.mark.parametrize('pose', [(10.0, 1.5, math.radians(100)),       # turned across the bottom straight
+                                  (9.75, 1.45, math.pi),                # facing backwards beside the notch
+                                  (18.55, 6.0, -math.pi / 2)])           # facing backwards on the right side
+def test_track_search_does_not_confidently_misplace_a_turned_car(lmap, track_matcher, pose):
+    """After a crash the car can face any way. The track-only search must then either fit poorly (the node falls
+    back to the full search) or still contain the true pose among its ties, never a confident wrong pose."""
+    rng = np.random.default_rng(11)
+    r, a = select_beams(scan_from(lmap, pose, rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    hyps = track_matcher.search_global(r, a, LASER, track_only=True, seeds=TRACK_SEEDS)
+    if hyps and hyps[0][1] >= HYBRID_MIN_FIT:
+        assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(5)
+                   for h, _ in contenders(hyps)), f'confident wrong pose {hyps[0]}'
+
+
+def half_turn(pose):
+    """The pose a half turn about the track's centre: on the bare loop it sees exactly what pose sees."""
+    return 20.0 - pose[0], 12.0 - pose[1], float(wrap(pose[2] + math.pi))
+
+
+def test_alternatives_keep_a_look_alike_the_scans_cannot_tell_apart():
+    """Bare (symmetric) loop: the pick and its half-turn look-alike fit the same all the way. That is no evidence
+    either way: the look-alike must still be checked after 20 m (it used to be dropped as 'ruled out' after 5)."""
+    bare = make_track(features=False)
+    m = ScanMatcher(bare)
+    rng = np.random.default_rng(3)
+    poses = lap()
+    start = 30
+    alts = Alternatives([half_turn(poses[start])], odom_pose=poses[start])
+    for k in range(start + 3, start + 250, 3):        # ~20 m
+        r, a = select_beams(scan_from(bare, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        assert alts.update(m, poses[k], poses[k], r, a, LASER) is None
+    assert not alts.done and len(alts.poses) == 1 and alts.ruled_out == 0
+
+
+def test_alternatives_switch_from_a_half_turn_look_alike_at_the_first_feature(lmap, matcher):
+    """The pick is the half-turn look-alike, the true pose an alternative: driving past the notch decides it."""
+    rng = np.random.default_rng(4)
+    poses = lap()
+    start = 40                                         # bottom straight, the notch (x 9-10.5) ahead
+    alts = Alternatives([poses[start]], odom_pose=poses[start])
+    wrong = half_turn(poses[start])
+    switched = None
+    for k in range(start + 3, start + 150, 3):
+        moved = relative(poses[start], poses[k])
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        switched = alts.update(matcher, compose(wrong, moved), poses[k], r, a, LASER)
+        if switched:
+            break
+    assert switched is not None and pose_error(poses[k], switched[0])[0] < 0.15
+
+
+def test_particles_off_the_map_or_on_unseen_ground_are_penalized(lmap):
+    """Nothing in a scan contradicts a cloud outside the map (its beams end in no-man's land): the position itself
+    must count. Half the cloud on the track, half 3 m outside the map: the outside half loses its weight."""
+    pf = ParticleFilter(n=200, seed=1)
+    pf.init_gaussian((1.45, 6.0, math.pi / 2), 0.01, 0.01)
+    pf.p[100:, 0] -= 4.0                               # x = -2.55: outside the 20 x 12 m map
+    rng = np.random.default_rng(1)
+    r, a = select_beams(scan_from(lmap, (1.45, 6.0, math.pi / 2), rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    pf.update_sensor(r, a, LASER, lmap)
+    assert pf.w[100:].sum() < 0.01
+    assert list(lmap.cell(np.array([1.45, -2.0, 0.1, 10.0]), np.array([6.0, 6.0, 6.0, 6.0]))) == [0, 2, 2, 2]
+
+
+def test_track_search_candidates_match_the_brute_force_nearest_line_point(lmap):
+    """set_track uses a k-d tree (the candidates x line matrix took 470 MB on iros2026_v2): same groups."""
+    line = np.array([p[:2] for p in lap()])
+    m = ScanMatcher(lmap)
+    m.set_track(line, radius=0.6)
+    d = np.hypot(m.candidates[:, None, 0] - line[None, :, 0], m.candidates[:, None, 1] - line[None, :, 1])
+    near = d.min(axis=1) <= 0.6
+    assert m.track_poses == int(near.sum()) * len(m.track_groups[0][1])
+    assert sum(len(g[0]) for g in m.track_groups) == int(near.sum())

@@ -24,15 +24,40 @@ scripts/race.sh <name> avoid:=true                  #   ... passing obstacles th
 ros2 launch control follow_the_gap.launch.py [speed:=1.0]   # no-map fallback, instead of race.sh   ftg
 ```
 
+Restart the bridge with Ctrl-C in shell 1 (SIGINT to the whole process group; or `kill -INT -- -<pgid>`),
+then wait until `ros2 node list` is empty of its nodes. A SIGINT to the launch process alone
+(`pkill -INT -f "ros2 launch autodrive_bridge"`) reaches no node: they run on ~5 s until launch sends
+SIGTERM. A bridge relaunched in that window stops once `fast_bridge` fails to bind :4567
+(`autodrive_launch.py` shuts down with it). A second `wheel_odom` / `adapter` holds all its
+output while the first runs, and for 2 s at every start (`/odom` + TF odom -> base_link; `/scan`,
+`/sensors/imu/raw`, ground truth and the commands), so Cartographer never gets
+duplicate `/odom` or IMU stamps. After a SIGKILL or crash the dead node stays in the graph until its DDS
+lease expires (~20 s): a relaunch holds that long, logs it and recovers. Two copies started together
+outside one launch hold each other until one is stopped.
+
 `map_track.sh` resets the sim car, starts Cartographer mapping, waits for you to finish driving and
 press Enter (with `--wall-follow` or `--gap-follow`: starts `control wall_follow.launch.py` or `disparity_gap.launch.py` and waits for its laps), runs `save_map`, stops mapping, then runs `ros2 run planning build_raceline <name>`.
 It needs a terminal (it refuses to start without one) and exits early if `cartographer_node` dies on startup.
 If `save_map` fails, mapping keeps running and it asks to retry (Enter) or quit (`q`, the map is lost; delete `tracks/<name>` before reusing the name).
+`build_raceline` never leaves a mapped track without a raceline: if TUM mintime fails it falls back to
+mintime without `safe_traj` (speeds then held to its limits), then the centerline (with a speed profile within
+those limits, laterally at most `mue * g`). Anything but a clean mintime line ends in a WARNING block and exit
+status 2 (1: no raceline at all), which `map_track.sh` repeats. `race.sh` prints which line the car drives;
+`pure_pursuit_node` logs it and warns unless it is a clean mintime line (also latched on `/raceline/provenance`).
 `race.sh` resets the sim car (localization starts at the map origin = where mapping started) and
 launches `control race.launch.py` (perception `localization.launch.py` + control `pure_pursuit.launch.py`).
 With `avoid:=true` it also starts planning's `obstacle_spliner_node`, and pure pursuit steers on its
 `/local_path` (the raceline shifted sideways around an obstacle on `/scan` that the map did not have)
-instead of the raceline, at the raceline's speeds. With no fresh collision-free path the car stops.
+instead of the raceline, at the raceline's speeds. Each scan is placed with the pose at its own stamp
+(interpolated; a scan newer than the poses waits for them, at most 0.2 s) and aligned to the map's walls
+before anything counts as an obstacle, so neither the pose running ahead of the scan in a hairpin nor
+~0.15 m / 2 deg of localization error turns a wall into a roadblock. The alignment moves the scan at most
+`max_align_shift` (0.3 m) / `max_align_turn` (6 deg), leaves out returns short of the map's own ray (an
+obstacle hiding a wall), and its correction is carried from tick to tick across the localizer's changes of
+TF `map -> odom` (it jumps only when that fits clearly better). With no fresh collision-free path the car stops.
+With `adaptive_lookahead:=true` (the default) pure pursuit's lookahead is also capped by the raceline's curvature (so it
+cuts curves by at most about `adaptive_lookahead_cut` m), which is what makes `speed_scale:=1.0` drive
+without hitting the inside walls (control/README.md).
 If mapping fails on race day, `follow_the_gap.launch.py` drives on `/scan` alone (no map); run it instead of
 `race.sh`, never alongside it, since both publish `/drive`.
 
@@ -62,10 +87,10 @@ Check with `ros2 node list` and kill leftovers before the next launch.
 | `/drive` | `ackermann_msgs/AckermannDriveStamped` | teleop_keyboard, wall_follow or disparity_gap (mapping), pure_pursuit, follow_the_gap |
 | TF `map -> odom` | | Cartographer (mapping and localization), or `mcl_node` with `localizer:=mcl` |
 | `/tracked_pose` | `geometry_msgs/PoseStamped`, frame `map` | Cartographer (`publish_tracked_pose`) |
-| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate (or `mcl_node`): `/tracked_pose` (or the filter pose) relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (race.launch.py's `pose_topic`) |
+| `/localized_pose` | `geometry_msgs/PoseStamped`, frame `map` | localization_gate (or `mcl_node`): `/tracked_pose` (or the filter pose) relayed once localized; withheld after a sim reset (`sim_reset`) until relocalized (`mcl_node`: also while it searches for the car when lost) (pure pursuit's default `pose_topic`; with none for `max_pose_age` s it stops the car) |
 | `/autodrive/roboracer_1/sim_reset` | `std_msgs/String`, the reason | fast_bridge (sim only): one event per sim reset. Reset commands always; respawns and other teleports (collision count change, position jump) only with restricted topics. fast_bridge also replies zeros for `reset_frames` frames |
 | `/local_path` | `nav_msgs/Path`, frame `map`, one pose per raceline point | obstacle_spliner_node: the raceline, shifted around the nearest obstacle in the way; pure_pursuit follows it with `avoid:=true` |
-| `/local_path/valid` | `std_msgs/Bool` | obstacle_spliner_node: false when its pose or scan is stale or no side is collision-free (pure_pursuit then stops) |
+| `/local_path/valid` | `std_msgs/Bool` | obstacle_spliner_node: false when its pose or scan is stale (or no pose covers a scan's stamp for `max_scan_age`) or no side is collision-free (pure_pursuit then stops) |
 | `/ground_truth/pose`, TF `world -> ground_truth` | `geometry_msgs/PoseStamped`, frame `world` (sim) | adapter, debugging only |
 
 Static TF `base_link -> laser, imu, front_camera` comes from the adapter. `base_link` is the rear axle.
@@ -82,7 +107,7 @@ mounting rotation, or Cartographer stops waiting for an IMU it cannot transform.
 | `trajectory.csv` | `save_map` | `# t,x_m,y_m,yaw_rad`: the mapping lap's optimized poses (`/trajectory_query`), gives driving direction |
 | `map_to_world.yaml` | `save_map` | ground-truth pose of the `map` origin in the sim world frame (debugging) |
 | `centerline.csv` | `build_raceline` | TUM input: `# x_m,y_m,w_tr_right_m,w_tr_left_m`, closed loop, driving direction |
-| `raceline.csv` | `build_raceline` | TUM output: `# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`, `map` frame |
+| `raceline.csv` | `build_raceline` | TUM output: `# s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`, `map` frame. Second header line `# raceline: {json}`: method (`mintime`, `mintime-retry`, `centerline`), `clean`, settings `changed`, `notes` (failures, clearance), solver, lap, min wall clearance, build time |
 | `preview.png` | `build_raceline` | map, centerline, track bounds, raceline coloured by speed |
 
 ## Car parameters (AutoDRIVE RoboRacer)
