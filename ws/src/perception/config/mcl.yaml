@@ -31,8 +31,10 @@ mcl:
     search_period_max: 2.0     # s ... backing off to this
     force_after: 4             # failed attempts before a best guess (with relaxed_min_fit) instead of waiting
     relaxed_min_fit: 0.3
-    validate_distance: 5.0     # m of driving after a guess: the other places that fit are ruled out ...
-    validate_margin: 0.05      # ... unless one keeps fitting better by this (mean fit): switch to it
+    validate_evidence: 1.5     # after a guess, the other places that fit are scored as the car drives: one the
+                               #   pick out-fits by this much in total (fit x updates) is ruled out, one that
+                               #   out-fits the pick by as much is switched to ...
+    validate_distance: 200.0   # m ... ones that keep fitting the same (featureless) are kept this far (~a lap)
     # hybrid: search near tracks/<name>/raceline.csv first (both directions), verify with the whole area after
     hybrid: true               # false: always the whole-area search (also without a raceline.csv)
     hybrid_min_fit: 0.8        # a raceline-only result fitting worse falls back to the whole-area search
@@ -52,6 +54,9 @@ mcl:
     relocate_min_fit: 0.9      # a background global search moves the car only to a place fitting this well
     relocate_ratio: 0.93       #   (or this x the good-fit level if lower) ...
     relocate_agree: 0.5        # m ... found again (within this) by the next search
+    relocate_margin: 0.05      # ... and fitting this much better than the scan fits at the filter's pose (also the
+                               #   verify behind a start: it moves a driving car only past both gates)
+    interpolate_odom: true     # the odometry at each scan's stamp (interpolated), not the newest: lidar latency
     # The absolute values are from the sim (iros2026_v2: true pose 0.93-1.0 on good stretches, <= 0.74 on its
     # badly mapped one, a look-alike there 0.84). A real lidar may fit less everywhere: the ratios then lower the
     # gates with the good-fit level. To check on a real bag: the re-anchor log lines print 'fit a -> b'; good

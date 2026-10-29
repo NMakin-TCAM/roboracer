@@ -32,6 +32,8 @@ from rclpy.time import Time
 from nav_msgs.msg import OccupancyGrid
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from autodrive_bridge.single_instance import DuplicateGuard, exit_with_parent, same_name_nodes
+
 
 def frame(kind, payload=b''):
     return kind + struct.pack('<I', len(payload)) + payload
@@ -85,6 +87,8 @@ class MapView(Node):
         self.map_dirty = False
         self.map_sub = None
         self.map_durability = None
+        # a second map_view (an overlapping bridge restart) would fight this one for the app's connection
+        self.guard = DuplicateGuard(self, 'the sim map view connection', lambda: same_name_nodes(self))
         self.create_timer(1.0 / rate, self.tick)
         self.create_timer(2.0, self.subscribe_map)   # the publishers can come and go
         self.subscribe_map()
@@ -138,6 +142,8 @@ class MapView(Node):
             return False
 
     def tick(self):
+        if not self.guard.ok:
+            return
         if self.sock is None:
             self.connect()
             if self.sock is None:
@@ -166,6 +172,7 @@ class MapView(Node):
 
 
 def main(args=None):
+    exit_with_parent()
     rclpy.init(args=args)
     node = MapView()
     try:

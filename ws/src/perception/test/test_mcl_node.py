@@ -432,14 +432,14 @@ def test_a_background_search_moves_the_car_only_when_the_next_one_finds_the_same
     drive(c, P[93:100])
     here = c.node.pf.estimate()
     moved = (0.0, 0.0, 0.0)
-    c.node.on_check((P[300], [], 'fit 0.97'), moved, 1.0)
+    c.node.on_check((P[300], [], 'fit 0.97'), moved, 1.0, 0.97, 0.3, c.node.pf.estimate())
     assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'relocated on one search'
     assert c.node.burst, 'no second search asked for'
     c.node.burst = False
-    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0)
+    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0, 0.97, 0.3, c.node.pf.estimate())
     assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'relocated on two searches that disagree'
     assert c.node.burst, 'the second finding was dropped instead of checked'
-    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0)
+    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0, 0.97, 0.3, c.node.pf.estimate())
     assert c.node.localized and pose_error(P[200], c.node.pf.estimate())[0] < 0.1
 
 
@@ -469,7 +469,8 @@ def test_findings_that_keep_disagreeing_stop_asking_for_searches(car):
     asked = []
     for k in range(6):
         c.node.burst = False
-        c.node.on_check((P[200] if k % 2 else P[300], [], 'fit 0.97'), (0.0, 0.0, 0.0), 1.0)
+        c.node.on_check((P[200] if k % 2 else P[300], [], 'fit 0.97'), (0.0, 0.0, 0.0), 1.0, 0.97, 0.3,
+                        c.node.pf.estimate())
         asked.append(c.node.burst)
     assert asked[:3] == [True] * 3 and not any(asked[3:])
     assert pose_error(P[99], c.node.pf.estimate())[0] < 0.1
@@ -609,7 +610,7 @@ def test_a_re_anchor_does_not_discard_the_verify_search(car):
     assert c.node.localized and c.node.job is not None and c.node.job[1] == 'verify'
     verified = []
     on_verify = c.node.on_verify
-    c.node.on_verify = lambda *a: (verified.append(a), on_verify(*a))
+    c.node.on_verify = lambda *a, **kw: (verified.append(a), on_verify(*a, **kw))
     c.node.reanchor(c.node.pf.estimate(), None, 'test')
     release.set()
     settle(c)
@@ -621,3 +622,177 @@ def test_without_hybrid_the_whole_area_search_finds_the_car(car):
     P = lap()
     c.stand(P[92])
     assert 'verify' not in c.searches and c.node.localized and pose_error(P[92], c.pose())[0] < 0.1
+
+
+def half_turn(pose):
+    return 20.0 - pose[0], 12.0 - pose[1], math.atan2(math.sin(pose[2] + math.pi), math.cos(pose[2] + math.pi))
+
+
+def test_a_guessed_look_alike_is_corrected_even_when_the_true_place_was_not_among_the_alternatives(car):
+    """A guess picked the half-turn look-alike and the true place was not among the alternatives (a guess made
+    with most of the view blocked): the alternatives cannot fix that, and nothing else did (18.6 m off for
+    over two laps). After a guess, whole-area searches every unsure_period m must find the true place."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    c.node.init_filter(half_turn(P[99]), 'test guess', keep_localized=True, matched=True)
+    c.node.make_unsure()
+    errs = []
+    for p in P[100:600]:
+        c.step(p)
+        errs.append(pose_error(p, c.pose())[0])
+    assert errs[0] > 5.0
+    assert max(errs[-100:]) < 0.15, f'still {errs[-1]:.1f} m off'
+    assert c.node.localized
+
+
+def test_doubt_fires_although_the_fit_level_followed_the_fit_down(car):
+    """While the pose was wrong every failed local search pulled fit_level 2 % toward the bad fit (0.97 -> 0.04 in
+    500 updates): doubt, relative to it, never fired. It is relative to the good-fit level now."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:110])
+    c.node.fit_level = 0.04                                  # where 500 bad updates left it
+    c.node.matcher.fit = lambda *a, **kw: 0.03               # the scan does not fit here at all
+    c.node.local_search = lambda pose, *a: (pose, 0.0)       # and nothing nearby does better
+    n = len(c.searches)
+    drive(c, P[110:125])
+    assert 'check' in c.searches[n:]
+
+
+def test_a_pose_off_the_map_is_withdrawn_and_the_car_found_again(car):
+    """The cloud drifted off the map where no scan contradicts it (y = -15 m on a 12 m map, still localized for
+    45 m): in a wall or outside the map for doubt_updates updates it is lost, and the car is found again."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    c.node.init_filter((-3.0, -5.0, 0.0), 'test drift', keep_localized=True, matched=True)
+    lost = False
+    for p in P[100:160]:
+        c.step(p)
+        lost = lost or not c.node.localized
+    assert lost and 'find' in c.searches[1:]
+    assert c.node.localized and pose_error(P[159], c.pose())[0] < 0.15
+
+
+def test_the_verify_moves_a_driving_car_only_to_a_place_that_fits_clearly_better(car):
+    """The verify behind a start used to move a driving car on one whole-area search with a 0.5 floor, without
+    looking at how the scan fits where the car is (the search can miss the true pose). Now it needs
+    relocate_floor() and relocate_margin over the filter's fit; otherwise the place becomes an alternative."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    here, far, moved = c.node.pf.estimate(), P[300], (0.0, 0.0, 0.0)
+    c.node.alternatives = None
+    c.node.on_verify([(far, 0.6)], (far, [], 'fit 0.60'), moved, 1.0, 0.6, 0.9, here)
+    assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'moved to a place fitting 0.6'
+    assert c.node.alternatives is not None and any(pose_error(far, q)[0] < 0.2 for q in c.node.alternatives.poses)
+    c.node.on_verify([(far, 0.97)], (far, [], 'fit 0.97'), moved, 1.0, 0.97, 0.95, here)
+    assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'moved to a place fitting no better'
+    c.node.on_verify([(far, 0.97)], (far, [], 'fit 0.97'), moved, 1.0, 0.97, 0.4, here)
+    assert pose_error(far, c.node.pf.estimate())[0] < 0.1
+
+
+@pytest.mark.parametrize('interpolate', [True, False])
+def test_each_scan_uses_the_odometry_at_its_stamp(car, interpolate):
+    """Lidar latency: each scan arrives with the /odom of two messages later (50 ms, 0.16 m here; 0.4 m at 8 m/s
+    with 50 ms on a real car). Taking the newest /odom for it puts the car where it was 50 ms ago."""
+    c = car(interpolate_odom=str(interpolate).lower())
+    P = lap()
+    c.stand(P[92])
+    errs = []
+    for k in range(93, 200):
+        c.stamp += c.dt
+        c.node.odom_cb(c.odom(P[k + 2], speed=3.2))            # /odom runs 2 messages ahead of the scans
+        m = c.scan(P[k])
+        t = c.stamp - 2 * c.dt
+        m.header.stamp.sec, m.header.stamp.nanosec = int(t), int(round((t - int(t)) * 1e9)) % 1_000_000_000
+        c.node.scan_cb(m)
+        if c.node.job is not None:
+            c.node.job[0].result()
+        if k > 120:
+            errs.append(pose_error(P[k + 2], c.pose())[0])   # the published pose, at the newest /odom
+    if interpolate:
+        assert np.mean(errs) < 0.05
+    else:
+        assert np.mean(errs) > 0.1
+
+
+def test_a_re_anchor_to_the_filters_own_pose_changes_nothing_under_lidar_latency(car):
+    """Scans 50 ms behind /odom: a re-anchor to the scan-time pose must be tagged with the scan's odometry. Tagged
+    with the newest it put the filter speed x latency behind (0.045 -> 0.111 m here, ~0.4 m at 8 m/s)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    before, after = [], []
+    for k in range(93, 200):
+        c.stamp += c.dt
+        c.node.odom_cb(c.odom(P[k + 2], speed=3.2))
+        m = c.scan(P[k])
+        t = c.stamp - 2 * c.dt
+        m.header.stamp.sec, m.header.stamp.nanosec = int(t), int(round((t - int(t)) * 1e9)) % 1_000_000_000
+        c.node.scan_cb(m)
+        if c.node.job is not None:
+            c.node.job[0].result()
+        if k == 150:
+            c.node.reanchor(c.node.pf.estimate(), c.node.scan_odom, 'test')
+        (before if k <= 150 else after).append(pose_error(P[k + 2], c.pose())[0])
+    assert np.mean(after[:10]) < np.mean(before[-20:]) + 0.02
+
+
+def test_the_searches_after_a_guess_have_one_budget_per_find(car):
+    """A look-alike that every search finds again re-armed the searches (make_unsure on each finding): a 1.6 s
+    whole-area search every unsure_period m forever. The budget is per find."""
+    c = car(unsure_searches=3)
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    submitted = []
+    c.node.submit_search = lambda kind, *a, **kw: submitted.append(kind)
+    c.node.make_unsure()
+    for _ in range(10):
+        c.node.recheck_guess(None, None, None, c.node.unsure_period)
+        c.node.make_unsure()            # each finding again
+    assert submitted == ['reverify'] * 3
+
+
+def test_a_pose_that_fits_is_never_withdrawn_for_sitting_in_an_occupied_blob(car):
+    """A person or box captured in a real-car map can sit where the car drives: a pose that fits the scan there is
+    a good pose. Only one in a wall or off the map that does not fit is withdrawn (no false stops)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    cell = c.node.lmap.cell
+    c.node.lmap.cell = lambda x, y: np.full(np.shape(x), 2) if np.ndim(x) == 0 else cell(x, y)
+    for p in P[100:140]:
+        c.step(p)
+        assert c.node.localized, 'withdrew a pose that fits'
+    c.node.lmap.cell = cell
+
+
+def test_a_re_anchor_keeps_the_places_still_to_check(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    c.node.alternatives = Alternatives([P[300]], c.node.odom[0])
+    c.node.reanchor(c.node.pf.estimate(), c.node.odom[0], 'test')
+    assert c.node.alternatives is not None and len(c.node.alternatives.poses) == 1
+
+
+def test_a_reverify_while_driving_never_moves_the_car_on_one_search(car):
+    """The searches after a guess run while the car drives: a place one of them finds, however well it fits,
+    becomes an alternative for the evidence to decide (on_check needs two agreeing searches for the same)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    here, far = c.node.pf.estimate(), P[300]
+    c.node.on_verify([(far, 0.99)], (far, [], 'fit 0.99'), (0.0, 0.0, 0.0), 1.0, 0.99, 0.3, here, may_move=False)
+    assert pose_error(here, c.node.pf.estimate())[0] < 0.05
+    assert c.node.alternatives is not None and any(pose_error(far, q)[0] < 0.2 for q in c.node.alternatives.poses)

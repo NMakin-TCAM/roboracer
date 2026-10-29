@@ -78,6 +78,22 @@ Start the simulator, **Connect** to `127.0.0.1:4567` and set **Driving Mode** to
 With the stock simulator, restarting the bridge while it is connected makes it reconnect in a loop,
 so **Disconnect** first.
 
+To restart the bridge, stop it with Ctrl-C in its terminal (or `kill -INT -- -<pgid>` for the launch's
+whole process group) and wait until `ros2 node list` no longer shows `fast_bridge`, `adapter`, `wheel_odom`
+or `map_view` before launching it again. `pkill -INT -f "ros2 launch autodrive_bridge"` signals only the
+launch process: ros2 launch forwards nothing on that SIGINT and its nodes keep running ~5 s, until it
+sends them SIGTERM. A new bridge started meanwhile ends as soon as its `fast_bridge` fails to bind :4567
+(the launch shuts down with it). Until then, and whenever a second copy runs, the newer `wheel_odom`,
+`adapter` or `map_view` holds all its output (2 s at every start, then while another copy is seen):
+`/odom` + TF odom -> base_link, `/scan`, `/sensors/imu/raw`, ground truth, the commands, the map view. So
+Cartographer never gets duplicate `/odom` or IMU stamps from two copies (it aborts on them). The nodes
+also exit when their launch process dies.
+
+A node that was SIGKILLed or crashed stays visible to the others until its DDS lease runs out (~20 s by
+default), so a bridge started right after that holds its output that long; it logs the wait and starts on
+its own. Two copies started together outside one launch (two `ros2 run`, or two launches on different
+`port:=`) each see the other and both hold until one is stopped.
+
 ### Race an unseen track
 
 In new container shells (`docker compose exec ros bash`), with the bridge running:

@@ -1,9 +1,10 @@
 """Pure pursuit on a generated raceline:
 
-    ros2 launch control pure_pursuit.launch.py track:=<name> [pose_topic:=/tracked_pose] [speed_scale:=0.5]
+    ros2 launch control pure_pursuit.launch.py track:=<name> [pose_topic:=/localized_pose] [speed_scale:=0.5]
         [max_speed:=0.0] [avoid:=false]
 
-Follows $TRACKS_DIR/<name>/raceline.csv (default ~/ws/tracks). Needs localization publishing pose_topic.
+Follows $TRACKS_DIR/<name>/raceline.csv (default ~/ws/tracks). Needs localization publishing pose_topic
+(/localized_pose: perception's localization_gate or mcl_node, so the car waits until it is localized).
 avoid:=true follows /local_path instead (planning's obstacle_spliner_node; race.launch.py starts it).
 """
 from launch import LaunchDescription
@@ -17,8 +18,8 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('track', description='track name under ws/tracks/'),
-        DeclareLaunchArgument('pose_topic', default_value='/tracked_pose',
-                              description='geometry_msgs/PoseStamped in the map frame'),
+        DeclareLaunchArgument('pose_topic', default_value='/localized_pose',
+                              description='geometry_msgs/PoseStamped in the map frame, once localized'),
         DeclareLaunchArgument('speed_scale', default_value='0.5',
                               description='drive speed = raceline vx * speed_scale'),
         DeclareLaunchArgument('max_speed', default_value='0.0',

@@ -23,6 +23,7 @@ import numpy as np
 import yaml
 from PIL import Image
 from scipy import ndimage
+from scipy.spatial import cKDTree
 
 
 def wrap(a):
@@ -92,6 +93,14 @@ class LikelihoodMap:
         d = self.dist[np.clip(row, 0, self.h - 1), np.clip(col, 0, self.w - 1)]
         return np.where(inside, d, self.max_dist)
 
+    def cell(self, x, y):
+        """Per map point: 0 free, 1 unknown, 2 occupied or outside the map."""
+        col = np.floor((np.asarray(x) - self.ox) / self.res).astype(np.int64)
+        row = self.h - 1 - np.floor((np.asarray(y) - self.oy) / self.res).astype(np.int64)
+        inside = (col >= 0) & (col < self.w) & (row >= 0) & (row < self.h)
+        r, c = np.clip(row, 0, self.h - 1), np.clip(col, 0, self.w - 1)
+        return np.where(~inside | self.occupied[r, c], 2, np.where(self.free[r, c], 0, 1))
+
 
 def select_beams(ranges, angle_min, angle_increment, n_beams, range_min, range_max):
     """About n_beams evenly spaced beams of a scan, without invalid ones and max-range (no-hit) returns."""
@@ -106,7 +115,7 @@ def select_beams(ranges, angle_min, angle_increment, n_beams, range_min, range_m
 class ParticleFilter:
     def __init__(self, n=1000, seed=None, sigma_hit=0.15, z_hit=0.8, z_rand=0.2, likelihood_scale=0.4,
                  noise_x=(0.10, 0.02), noise_y=(0.05, 0.05), noise_yaw=(0.05, 0.10), resample_ratio=0.5,
-                 wall_penalty=1e-3):
+                 wall_penalty=1e-3, unknown_penalty=1.0):
         """noise_*: standard deviation of the motion per metre travelled and per radian turned."""
         self.n = int(n)
         self.rng = np.random.default_rng(None if seed is None or seed < 0 else seed)
@@ -114,7 +123,9 @@ class ParticleFilter:
         self.likelihood_scale = likelihood_scale   # <1 tempers the beams' correlation: keeps the cloud diverse
         self.noise_x, self.noise_y, self.noise_yaw = noise_x, noise_y, noise_yaw
         self.resample_ratio = resample_ratio
-        self.wall_penalty = wall_penalty
+        self.wall_penalty = wall_penalty         # x weight of a particle inside a wall or outside the map
+        self.unknown_penalty = unknown_penalty   # x weight of one on a cell the map never saw: off by default,
+        #                                          unknown stripes on the track cost iros2026_v2 tracking accuracy
         self.p = np.zeros((self.n, 3))
         self.w = np.full(self.n, 1.0 / self.n)
 
@@ -158,7 +169,12 @@ class ParticleFilter:
         pz = self.z_hit * np.exp(-0.5 * (d / self.sigma_hit) ** 2) + self.z_rand
         loglik = self.likelihood_scale * np.log(pz).sum(axis=1)
         w = self.w * np.exp(loglik - loglik.max())
-        w[lmap.distance(x, y) <= 0.0] *= self.wall_penalty   # the car itself cannot be inside a wall
+        # the car itself cannot be inside a wall or off the map (a cloud there sees nothing to contradict it:
+        # beams ending outside the map cost no more than unknown space), and is rarely on unseen ground
+        cell = lmap.cell(x, y)
+        w[cell == 2] *= self.wall_penalty
+        if self.unknown_penalty != 1.0:
+            w[cell == 1] *= self.unknown_penalty
         total = w.sum()
         self.w = w / total if total > 0.0 and np.isfinite(total) else np.full(self.n, 1.0 / self.n)
 
@@ -278,9 +294,11 @@ class ScanMatcher:
         track fits poorly here, and the caller falls back to the full search."""
         line = np.asarray(line, dtype=np.float64)
         heading = np.arctan2(np.roll(line[:, 1], -1) - line[:, 1], np.roll(line[:, 0], -1) - line[:, 0])
-        d = np.hypot(self.candidates[:, None, 0] - line[None, :, 0], self.candidates[:, None, 1] - line[None, :, 1])
-        near = d.min(axis=1) <= radius
-        nearest = heading[d.argmin(axis=1)]
+        # nearest line point per candidate: a k-d tree, not the candidates x line matrix (iros2026_v2: 10898 x
+        # 1937 doubles per array, the node's memory went from 69 to 540 MB at startup)
+        dist, idx = cKDTree(line).query(self.candidates)
+        near = dist <= radius
+        nearest = heading[idx]
         window = np.arange(-yaw_window, yaw_window + 1e-9, self.yaw_step)
         offsets = np.concatenate([window, window + math.pi])
         bins = np.round(wrap(nearest) / self.yaw_step).astype(int)   # group by heading: one yaw set per group
@@ -374,39 +392,73 @@ def choose_pose(hyps, priors, ambiguity=0.97, prior_radius=3.0, yaw_scale=1.0, f
     return pick, alternatives, how
 
 
-class Alternatives:
-    """Poses the car might also be at after an ambiguous pick: carried along by the odometry and scored on
-    every update against the filter's pose, until one fits clearly better on average (switch to it) or the car
-    has driven far enough that the track no longer looks the same (they are ruled out)."""
+DECAY = 0.99   # per update, of the alternatives' evidence: noise cannot random-walk it to a decision over a lap
 
-    def __init__(self, poses, odom_pose, margin=0.05, min_updates=5, distance=5.0):
-        self.poses = list(poses)
+
+class Alternatives:
+    """Poses the car might also be at after an ambiguous pick, carried along by the odometry and kept on the scan
+    by a tiny local search (0.1 m), like the filter keeps the pick. Each update scores the best fit near each
+    of them and near the pick, and sums the differences: evidence. An alternative is ruled out only when the
+    evidence says it fits clearly worse (the pick out-fits it by `evidence` fit x updates in total: passing a
+    feature the look-alike does not have); the car switches to one that out-fits the pick by as much. Where the
+    two look the same (a featureless stretch) nothing is decided: an unresolved alternative is kept until the
+    car has driven `distance` m (about a lap), not dropped as confirmed after a few metres."""
+
+    def __init__(self, poses, odom_pose, evidence=1.5, min_updates=5, distance=200.0):
+        self.poses = list(poses)[:self.MAX]   # each as it would be at odom pose self.odom0
         self.odom0 = odom_pose
         self.last_odom = odom_pose
-        self.margin, self.min_updates, self.distance = margin, min_updates, distance
-        self.sums = np.zeros(len(self.poses))
-        self.sum_pick = 0.0
+        self.evidence, self.min_updates, self.distance = evidence, min_updates, distance
+        self.score = np.zeros(len(self.poses))   # sum over updates of fit(pick) - fit(alternative)
         self.n = 0
         self.travelled = 0.0
+        self.ruled_out = 0
+
+    MAX = 12   # places checked at once (each costs a tiny local search per update)
+
+    def add(self, poses, odom_pose, min_separation=1.0):
+        """More places to check (poses now, at odom_pose): those not already among them, up to MAX."""
+        moved = relative(self.odom0, odom_pose)
+        now = [compose(p, moved) for p in self.poses]
+        for q in poses:
+            if len(self.poses) < self.MAX and all(math.hypot(q[0] - n[0], q[1] - n[1]) > min_separation
+                                                  or abs(float(wrap(q[2] - n[2]))) > 0.5 for n in now):
+                self.poses.append(compose(q, inverse(moved)))
+                self.score = np.append(self.score, 0.0)
+                now.append(q)
 
     @property
     def done(self):
+        """Nothing left to check: every alternative ruled out, or `distance` m driven without telling them apart
+        (self.poses then holds the unresolved ones)."""
         return not self.poses or self.travelled >= self.distance
 
+    @staticmethod
+    def _best(matcher, pose, ranges, angles, sensor_pose):
+        return matcher.search_local(pose, ranges, angles, sensor_pose, radius=0.1, yaw_range=math.radians(1.0),
+                                    step=0.05, yaw_step=math.radians(1.0))
+
     def update(self, matcher, pick, odom_pose, ranges, angles, sensor_pose):
-        """pick: the filter's pose now. Returns (alternative pose now, its mean fit, the pick's) to switch to,
-        or None."""
+        """pick: the filter's pose now. Returns (alternative pose now, its evidence, 0.0) to switch to, or None."""
         step = relative(self.last_odom, odom_pose)
         self.travelled += math.hypot(step[0], step[1])
         self.last_odom = odom_pose
+        if not self.poses:
+            return None
         moved = relative(self.odom0, odom_pose)
-        now = [compose(p, moved) for p in self.poses]
-        self.sum_pick += matcher.fit(pick, ranges, angles, sensor_pose, coarse=True)
-        self.sums += [matcher.fit(p, ranges, angles, sensor_pose, coarse=True) for p in now]
+        _, fit_pick = self._best(matcher, pick, ranges, angles, sensor_pose)
+        for j, p in enumerate(self.poses):
+            best, fit = self._best(matcher, compose(p, moved), ranges, angles, sensor_pose)
+            self.poses[j] = compose(best, inverse(moved))   # kept on the scan, as the filter keeps the pick
+            self.score[j] = DECAY * self.score[j] + fit_pick - fit
         self.n += 1
         if self.n < self.min_updates:
             return None
-        j = int(np.argmax(self.sums))
-        if self.sums[j] / self.n > self.sum_pick / self.n + self.margin:
-            return now[j], self.sums[j] / self.n, self.sum_pick / self.n
+        j = int(np.argmin(self.score))
+        if -self.score[j] >= self.evidence:
+            return compose(self.poses[j], moved), float(-self.score[j]), 0.0
+        keep = self.score < self.evidence
+        self.ruled_out += int((~keep).sum())
+        self.poses = [p for p, k in zip(self.poses, keep) if k]
+        self.score = self.score[keep]
         return None

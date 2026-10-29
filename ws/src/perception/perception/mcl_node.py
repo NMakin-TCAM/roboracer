@@ -16,8 +16,10 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
              scan about as well, choose_pose refines from the last known pose (or the map origin, where race.sh
              puts the car). If that cannot decide, the search retries (backing off to search_period_max); after
              force_after tries it takes its best guess (and a relaxed_min_fit floor) and keeps the other places
-             as alternatives, scored against the scans as the car drives until one fits clearly better (switch)
-             or validate_distance m rule them out.
+             as alternatives, scored against the scans as the car drives: one that fits clearly better
+             (validate_evidence, summed over the updates) is switched to, one that fits clearly worse is ruled
+             out, and ones that keep fitting the same (a featureless stretch) are kept for validate_distance m
+             (about a lap), not taken as ruled out.
   converge:  the cloud starts around the pose found; until it is tight (converged_*), scans are used even
              though the car stands still, then the car may drive. Afterwards a scan is used after
              update_min_d / update_min_a of odometry motion.
@@ -32,8 +34,9 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
              has a stretch where no pose within 1 m fits better than ~0.6), a "better" pose is just another
              wrong one, and the filter coasts on the odometry instead. A burst of re-anchors (slip_reanchors
              in 2 s, where the map fits badly) pauses them for slip_hold s and starts a background global search.
-  doubt:     the fit below doubt_fit x its level for doubt_updates updates in a row (beyond the local search's
-             reach, or something the map does not have): a global search in the background, re-anchoring only
+  doubt:     the fit below doubt_fit x the good-fit level (or the estimate off the drivable area) for
+             doubt_updates updates in a row (beyond the local search's reach, or something the map does not
+             have): a global search in the background, re-anchoring only
              if it finds the car clearly elsewhere, and only when the place fits very well (relocate_min_fit, or
              relocate_ratio x the good-fit level) and the next search agrees (the same place, carried by the
              odometry): where the map is wrong the true place fits worse than a look-alike elsewhere. A low fit
@@ -41,7 +44,10 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
   odom jump: a step between two odometry messages bigger than max_jump that the car's speed does not explain
              (an odometry restart): the pose is kept in the new frame and a background search checks it. A big
              step the speed explains (the streams stalled while the car drove on) is driven.
-  lost:      only the cloud spreading beyond lost_std_xy withdraws the pose (the car stops) and starts a search.
+  unsure:    after a guess, until a whole-area search finds the pick and no other place fitting as well, one
+             runs every unsure_period m in the background (the true place may not be among the alternatives).
+  lost:      only the cloud spreading beyond lost_std_xy, or the estimate in a wall / outside the map for
+             doubt_updates updates, withdraws the pose (the car stops) and starts a search.
   sim reset: fast_bridge's /autodrive/roboracer_1/sim_reset event: the pose is withheld at once; after
              debounce s with the car still, a global search.
   manual:    a PoseWithCovarianceStamped on /initialpose (RViz, Foxglove) restarts the cloud there.
@@ -49,6 +55,7 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
 import math
 import os
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -75,6 +82,9 @@ MAP_ORIGIN = (0.0, 0.0, 0.0)   # where race.sh puts the car: the pose mapping st
 LOG_PERIOD = 2.0               # s between re-anchor log lines
 FIND_LOG_PERIOD = 5.0          # s between repeats of the same "cannot find the car" warning
 RELOCATE_TRIES = 4             # check searches in a row looking for two that agree, then wait for a trigger
+LATENCY_LOG_PERIOD = 60.0      # s between scan latency log lines
+MAX_SCAN_LATENCY = 0.2         # s: a scan stamped longer before the newest /odom is matched to the newest
+RELOCATE_EXPIRY = 10.0         # s after which a relocation candidate no longer counts as the one before
 
 
 def yaw_quaternion(yaw):
@@ -109,8 +119,10 @@ class MclNode(Node):
         self.force_after = p('force_after', 4).value                # failed attempts before a best guess
         self.relaxed_min_fit = p('relaxed_min_fit', 0.3).value      # min_fit once guessing
         self.yaw_scale = p('yaw_scale', 1.0).value                  # m per rad when comparing poses to priors
-        self.validate_distance = p('validate_distance', 5.0).value  # m of driving to rule out alternatives
-        self.validate_margin = p('validate_margin', 0.05).value     # mean fit an alternative must win by
+        self.validate_distance = p('validate_distance', 200.0).value  # m an unresolved alternative is kept
+        self.validate_evidence = p('validate_evidence', 1.5).value  # summed fit difference that decides one
+        self.unsure_period = p('unsure_period', 10.0).value         # m between whole-area searches after a guess
+        self.unsure_searches = p('unsure_searches', 20).value       # ... at most this many, until one confirms
         hybrid = p('hybrid', True).value                            # raceline-first search, verified after
         self.hybrid_min_fit = p('hybrid_min_fit', 0.8).value        # a raceline-only result fitting worse: full
         self.hybrid_seeds = p('hybrid_seeds', 15).value
@@ -126,6 +138,7 @@ class MclNode(Node):
         self.relocate_min_fit = p('relocate_min_fit', 0.9).value    # a background search moves the car only to
         self.relocate_ratio = p('relocate_ratio', 0.93).value       # a place fitting this well (or ratio x level),
         self.relocate_agree = p('relocate_agree', 0.5).value        # found twice (m)
+        self.relocate_margin = p('relocate_margin', 0.05).value     # and fitting this much better than the pose
         self.snap_agree_yaw = p('snap_agree_yaw', 0.035).value      # rad between two searches' offsets
         self.slip_reanchors = p('slip_reanchors', 3).value          # re-anchors in LOG_PERIOD s: a burst
         self.slip_hold = p('slip_hold', 2.0).value                  # s without local re-anchors after a burst
@@ -156,6 +169,11 @@ class MclNode(Node):
         self.odom = None              # (pose, stamp msg, speed)
         self.last_odom_pose = None    # odom pose of the last filter update
         self.prev_odom = None         # the previous /odom message: (pose, stamp [s], speed), for frame jumps
+        self.odom_hist = deque(maxlen=200)   # (stamp [s], pose) of recent /odom: the odometry at a scan's stamp
+        self.interpolate_odom = p('interpolate_odom', True).value
+        self.scan_odom = None         # the odometry at the scan being processed
+        self.latency = []             # s, newest /odom stamp minus scan stamp, since the last latency log
+        self.latency_log_t = time.monotonic()
         self.jumped = None            # size [m] of an odometry frame jump the next scan has to check
         self.map_T_odom = None
         self.sensor_pose = {}         # scan frame -> pose in base_link
@@ -172,6 +190,10 @@ class MclNode(Node):
         self.job = None               # (future, kind, odom pose at the scan, generation, start time)
         self.generation = 0           # bumped whenever a running search's result would be stale
         self.alternatives = None      # Alternatives after a guessed pick
+        self.unsure = False           # a guessed pick not yet confirmed by a whole-area search
+        self.unsure_left = 0          # whole-area searches left for it (per find)
+        self.unsure_travel = 0.0      # m driven since the last of them
+        self.offmap = 0               # updates in a row with the estimate in a wall or outside the map
         self.find_log = ('', 0.0)     # last "cannot find" warning and when
         self.fit_level = None         # running level of the fit while tracking
         self.good_level = None        # the fit on stretches where the map fits: scales the re-anchor floors
@@ -180,7 +202,7 @@ class MclNode(Node):
         self.rechecks = 0
         self.recheck_offset = None    # offset (in the car's frame) the last recheck found, waiting to agree
         self.snap_offset = None       # the same for the low-fit local search
-        self.relocation = None        # (pose, odom pose, searches) a check search would move the car to
+        self.relocation = None        # (pose, odom pose, searches, time) a check search would move the car to
         self.anchors = []             # monotonic times of recent re-anchors
         self.anchor_log_t = 0.0
         self.hold_until = 0.0         # monotonic time until which local searches do not re-anchor (a burst)
@@ -220,10 +242,14 @@ class MclNode(Node):
         msg.data = self.lmap.occupancy_grid().tolist()
         pub.publish(msg)
 
-    def init_filter(self, pose, reason, keep_localized=False, quiet=False, matched=False):
+    def init_filter(self, pose, reason, keep_localized=False, quiet=False, matched=False, odom=None):
         """Cloud around pose. matched: a scan-matched pose, known to a few cm, so a tighter cloud (a loose one
         never tightens along a featureless straight while the car stands, and the car would wait forever).
-        keep_localized: a re-anchor while driving (always matched), the car does not stop for it."""
+        keep_localized: a re-anchor while driving (always matched), the car does not stop for it. odom: the
+        odometry pose that pose belongs to (default the newest): a pose matched to a scan belongs to the
+        odometry at the scan's stamp, up to the lidar latency older (tagged with the newest, every re-anchor put
+        the filter speed x latency behind the car)."""
+        odom = odom if odom is not None else self.odom[0]
         k = 0.3 if keep_localized or matched else 1.0
         self.pf.init_gaussian(pose, k * self.init_std_xy, k * self.init_std_yaw)
         if not keep_localized:
@@ -237,21 +263,25 @@ class MclNode(Node):
         self.recheck_offset = None
         self.snap_offset = None
         self.relocation = None
-        self.alternatives = None
+        self.offmap = 0
+        if reason != 're-anchor':   # a re-anchor only nudges the pose: the places still to check stay
+            self.alternatives = None
         # any other pose change makes a running search stale. A re-anchor only nudges the pose, and the verify
         # behind a start (which may find the start was the wrong place) is carried by the odometry: it survives.
-        if not (reason == 're-anchor' and self.job is not None and self.job[1] == 'verify'):
+        if not (reason == 're-anchor' and self.job is not None and self.job[1] in ('verify', 'reverify')):
             self.generation += 1
         if not keep_localized:   # a new start: a burst before it says nothing about this pose
+            self.unsure = False
+            self.unsure_left = self.unsure_searches
             self.hold_until = 0.0
             self.burst = False
             self.anchors = []
         if not quiet:
             self.get_logger().info(f'{reason}: particles at x={pose[0]:.2f} y={pose[1]:.2f} yaw={pose[2]:.2f}')
         self.initialized = True
-        self.last_odom_pose = self.odom[0]
+        self.last_odom_pose = odom
         self.jumped = None
-        self.map_T_odom = compose(pose, inverse(self.odom[0]))
+        self.map_T_odom = compose(pose, inverse(odom))
 
     def start_search(self, reason):
         """Withdraw the pose and find the car again, preferring places near where it was."""
@@ -274,6 +304,9 @@ class MclNode(Node):
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self.odom = (pose, msg.header.stamp, speed)
         prev, self.prev_odom = self.prev_odom, (pose, stamp, speed)
+        if self.odom_hist and stamp < self.odom_hist[-1][0]:
+            self.odom_hist.clear()   # time went back (a restarted bag or sim): start over
+        self.odom_hist.append((stamp, pose))
         if self.map_T_odom is None:
             return
         if prev is not None:
@@ -310,6 +343,8 @@ class MclNode(Node):
         # jump that is the jump itself (a verify moved the car 2.7 m). It is dropped; the next scan checks.
         self.generation += 1
         self.relocation = None   # a candidate from before is carried through the old frame: it never agrees
+        self.odom_hist.clear()   # the old frame's poses
+        self.odom_hist.append((stamp, pose))
         self.jumped = step
 
     def broadcast(self, stamp):
@@ -345,6 +380,8 @@ class MclNode(Node):
                                       max(msg.range_min, 0.05), msg.range_max)
         if len(ranges) < MIN_BEAMS:
             return
+        self.scan_odom = self.odom_at(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
+        self.log_latency(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
         self.poll_search()
         if self.search is not None:
             now = time.monotonic()
@@ -354,7 +391,6 @@ class MclNode(Node):
                 self.submit_search('find', ranges, angles, sensor, self.priors, force,
                                    self.relaxed_min_fit if force else self.min_fit)
             return
-        odom_pose = self.odom[0]
         if self.jumped is not None:   # the odometry frame jumped (restart, respawn): pose kept, now check it
             self.get_logger().warning(f'odometry jumped {self.jumped:.2f} m (reset or respawn?): keeping the pose, '
                                       'checking it against the map')
@@ -364,6 +400,7 @@ class MclNode(Node):
             if self.localized:
                 self.submit_search('check', ranges, angles, sensor, [self.pf.estimate()], False,
                                    self.relocate_floor())
+        odom_pose = self.scan_odom = self.odom_at(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
         delta = relative(self.last_odom_pose, odom_pose)
         trans = math.hypot(delta[0], delta[1])
         moved = trans >= self.update_min_d or abs(delta[2]) >= self.update_min_a
@@ -380,9 +417,42 @@ class MclNode(Node):
             self.check_fit(ranges, angles, sensor, odom_pose)
         if self.localized and self.alternatives is not None and self.search is None:
             self.validate(ranges, angles, sensor, odom_pose)
+        if self.localized and self.search is None:
+            self.recheck_guess(ranges, angles, sensor, trans)
         self.updates += 1
         if self.publish_particles and self.updates % 5 == 0:
             self.publish_cloud(msg.header.stamp)
+
+    def log_latency(self, stamp):
+        """Every LATENCY_LOG_PERIOD s: how much older the scans are than the newest /odom (what odom_at makes up
+        for; 0 in the sim), to check on a real car's bag."""
+        if self.odom_hist and stamp > 0.0:
+            self.latency.append(self.odom_hist[-1][0] - stamp)
+        now = time.monotonic()
+        if now - self.latency_log_t >= LATENCY_LOG_PERIOD and self.latency:
+            lat = np.array(self.latency) * 1000.0
+            self.get_logger().info(f'scan stamps vs the newest /odom: {np.mean(lat):.0f} ms mean, '
+                                   f'{np.max(lat):.0f} ms max over {len(lat)} scans')
+            self.latency, self.latency_log_t = [], now
+
+    def odom_at(self, stamp):
+        """The odometry pose at a scan's stamp, interpolated between the two /odom messages around it: the
+        newest /odom is up to the lidar's latency later than the scan (30-50 ms on a real car: 0.25-0.4 m at
+        8 m/s), and the filter would put the scan there. Newer than every /odom: the newest (in the sim the scan
+        shares its stamp with the /odom just before it). The newest too without history, with interpolate_odom
+        false, and for a stamp more than MAX_SCAN_LATENCY older than the newest /odom or before the history (an
+        unset stamp, a lidar on another clock): better a little lag than a pose from the wrong time."""
+        hist = self.odom_hist
+        if (not self.interpolate_odom or len(hist) < 2 or stamp >= hist[-1][0] or stamp < hist[0][0]
+                or hist[-1][0] - stamp > MAX_SCAN_LATENCY):
+            return self.odom[0]
+        for k in range(len(hist) - 1, 0, -1):
+            (t0, a), (t1, b) = hist[k - 1], hist[k]
+            if t0 <= stamp <= t1:
+                f = (stamp - t0) / (t1 - t0) if t1 > t0 else 1.0
+                yaw = float(wrap(a[2] + f * wrap(b[2] - a[2])))
+                return a[0] + f * (b[0] - a[0]), a[1] + f * (b[1] - a[1]), yaw
+        return self.odom[0]
 
     # ---------------- global search, in the worker thread ----------------
     def submit_search(self, kind, ranges, angles, sensor, priors, force, floor, odom_then=None):
@@ -392,12 +462,12 @@ class MclNode(Node):
         hybrid = self.hybrid and kind == 'find'
         self.job = (self.pool.submit(self.search_job, ranges, angles, sensor, list(priors), force, floor, hybrid,
                                      kind != 'check'),
-                    kind, odom_then or self.odom[0], self.generation, time.monotonic(),
+                    kind, odom_then or self.scan_odom or self.odom[0], self.generation, time.monotonic(),
                     (ranges, angles, sensor, list(priors)))
 
     def search_job(self, ranges, angles, sensor, priors, force, floor, hybrid, score_priors):
         """Worker thread: search_global (raceline first if hybrid), then choose_pose. Returns (stage, hypotheses,
-        choice). Uses no node state but the (read-only) matcher.
+        choice, its fit). Uses no node state but the (read-only) matcher.
 
         score_priors: where the car is expected (the map origin race.sh puts it at, the last known pose) is
         scored directly with a local search and joins the places found: the raceline-first search only looks
@@ -424,16 +494,19 @@ class MclNode(Node):
                           key=lambda h: -h[1])
             return choose_pose(hyps, priors, self.ambiguity, self.prior_radius, self.yaw_scale, force, refine)
 
+        def fitted(choice):   # the choice's own fit (a refined or tied pick is not hyps[0])
+            return choice, (self.matcher.fit(choice[0], ranges, angles, sensor) if choice is not None else 0.0)
+
         if hybrid:
             hyps = self.matcher.search_global(ranges, angles, sensor, seeds=self.hybrid_seeds, track_only=True)
             if best_fit(hyps) >= max(floor, self.hybrid_min_fit):
                 choice = choose(hyps, False)
                 if choice is not None:
-                    return 'raceline', hyps, choice
+                    return ('raceline', hyps, *fitted(choice))
         hyps = self.matcher.search_global(ranges, angles, sensor)
         if best_fit(hyps) < floor:
-            return 'full', hyps, None
-        return 'full', hyps, choose(hyps, force)
+            return 'full', hyps, None, 0.0
+        return ('full', hyps, *fitted(choose(hyps, force)))
 
     def poll_search(self):
         if self.job is None or not self.job[0].done():
@@ -443,16 +516,21 @@ class MclNode(Node):
         if generation != self.generation:
             return   # a reset, /initialpose or new search since it started
         try:
-            stage, hyps, choice = future.result()
+            stage, hyps, choice, fit = future.result()
         except Exception as e:   # never let a search failure kill the node: it is retried
             self.get_logger().error(f'global search failed: {e!r}')
             return
         ms = (time.monotonic() - t0) * 1000.0
         moved = relative(odom_then, self.odom[0])   # the car may have moved during the search
+        if kind in ('check', 'verify', 'reverify'):
+            # where the filter has the car at the scan (what the same scan says about it) and now: the filter's
+            # pose is at its last update's odometry, neither the scan's nor the newest
+            est_fit = self.matcher.fit(compose(self.map_T_odom, odom_then), *scan[:3])
+            est_now = compose(self.map_T_odom, self.odom[0])
         if kind == 'check':
-            self.on_check(choice, moved, ms)
-        elif kind == 'verify':
-            self.on_verify(hyps, choice, moved, ms)
+            self.on_check(choice, moved, ms, fit, est_fit, est_now)
+        elif kind in ('verify', 'reverify'):
+            self.on_verify(hyps, choice, moved, ms, fit, est_fit, est_now, may_move=kind == 'verify')
         else:
             self.on_find(hyps, choice, moved, ms, stage)
             if stage == 'raceline' and self.search is None:   # found: verify with the whole-area search
@@ -475,13 +553,21 @@ class MclNode(Node):
                          + (', near the raceline; verifying' if stage == 'raceline' else '') + ')', matched=True)
         if alternatives:
             self.alternatives = Alternatives([compose(a, moved) for a in alternatives], self.odom[0],
-                                             margin=self.validate_margin, distance=self.validate_distance)
+                                             evidence=self.validate_evidence, distance=self.validate_distance)
+            self.make_unsure()
 
-    def on_verify(self, hyps, choice, moved, ms):
+    def on_verify(self, hyps, choice, moved, ms, fit, est_fit, est, may_move=True):
         """The whole-area search behind a raceline-first answer: confirm it, move the car if it is clearly
-        elsewhere, or keep the places that fit as well as alternatives for driving to settle."""
-        est = self.pf.estimate()
-        if choice is not None and pose_distance(compose(choice[0], moved), est, self.yaw_scale) > self.local_radius:
+        elsewhere, or keep the places that fit as well as alternatives for driving to settle. Clearly elsewhere:
+        the place fits well (relocate_floor) and better than the scan fits where the filter has the car
+        (relocate_margin): the whole-area search keeps 40 seeds and can miss the true pose (3 in 40 scans with
+        15 % of the beams shortened on iros2026_v2), and its 0.5 floor alone moved a driving car on one search.
+        A place that does not pass is kept as an alternative instead, and so is every place a reverify (the
+        searches after a guess, while driving) finds: there the alternatives' evidence decides, never one search.
+        est: the filter's pose now."""
+        far = (choice is not None
+               and pose_distance(compose(choice[0], moved), est, self.yaw_scale) > self.local_radius)
+        if may_move and far and fit >= max(self.relocate_floor(), est_fit + self.relocate_margin):
             pose = compose(choice[0], moved)
             self.get_logger().warning(f'verify: the whole-area search puts the car '
                                       f'{math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m away ({choice[2]}, '
@@ -490,17 +576,30 @@ class MclNode(Node):
             others = [est] + [compose(a, moved) for a in choice[1]]
         else:
             tied = [h[0] for h in hyps if hyps and h[1] >= self.ambiguity * hyps[0][1]]
-            others = [q for q in (compose(t, moved) for t in tied) if pose_distance(q, est, self.yaw_scale) > 1.0]
+            if far:
+                tied.append(choice[0])
+            others = [q for q in (compose(t, moved) for t in tied)
+                      if pose_distance(q, est, self.yaw_scale) > self.local_radius]
             if others:
                 self.get_logger().warning(f'verify: {len(others)} other place(s) fit as well ({ms:.0f} ms): '
                                           'checking them while driving')
+            elif choice is not None:
+                if self.unsure:   # the whole map has no other place fitting as well now: settled
+                    self.get_logger().info(f'verify: the guess is confirmed by the whole-area search ({ms:.0f} ms)'
+                                           + ('; alternatives dropped' if self.alternatives is not None else ''))
+                    self.alternatives = None
+                else:
+                    self.get_logger().info(f'verify: confirmed by the whole-area search ({ms:.0f} ms)')
+                self.unsure = False
+        if others:
+            if self.alternatives is None:
+                self.alternatives = Alternatives(others, self.odom[0], evidence=self.validate_evidence,
+                                                 distance=self.validate_distance)
             else:
-                self.get_logger().info(f'verify: confirmed by the whole-area search ({ms:.0f} ms)')
-        if others and self.alternatives is None:
-            self.alternatives = Alternatives(others, self.odom[0], margin=self.validate_margin,
-                                             distance=self.validate_distance)
+                self.alternatives.add(others, self.odom[0])
+            self.make_unsure()
 
-    def on_check(self, choice, moved, ms):
+    def on_check(self, choice, moved, ms, fit, est_fit, est):
         """A background global search while localized (a burst, a long low fit, a frame jump), submitted with the
         relocate_floor() floor, so a choice fits at least ~that well: move the car only if it is clearly elsewhere
         and the next search finds the same place (carried by the odometry). Where the map is wrong the true place
@@ -510,18 +609,19 @@ class MclNode(Node):
             self.relocation = None
             return
         pose = compose(choice[0], moved)
-        est = self.pf.estimate()
-        if pose_distance(pose, est, self.yaw_scale) < self.local_radius:
-            self.relocation = None   # the car is where the filter has it: something the map does not have
-            return
-        prev, self.relocation = self.relocation, (pose, self.odom[0], 1)
+        if pose_distance(pose, est, self.yaw_scale) < self.local_radius or fit < est_fit + self.relocate_margin:
+            self.relocation = None   # the car is where the filter has it (something the map does not have), or
+            return                   # the place found fits no better than the filter's
+        prev = self.relocation
+        if prev is not None and time.monotonic() - prev[3] > RELOCATE_EXPIRY:
+            prev = None   # too old to confirm anything
         if prev is None or pose_distance(compose(prev[0], relative(prev[1], self.odom[0])), pose,
                                          self.yaw_scale) > self.relocate_agree:
             # a first finding, or one that disagrees with the last: check_fit asks again, at most
             # RELOCATE_TRIES searches in a row (where the map is wrong the findings can keep disagreeing, and
             # each whole-area search costs ~1-2 s of the worker); the candidate waits for the next trigger then
             tries = 1 if prev is None else prev[2] + 1
-            self.relocation = (pose, self.odom[0], tries)
+            self.relocation = (pose, self.odom[0], tries, time.monotonic())
             if tries < RELOCATE_TRIES:
                 self.burst = True
             return
@@ -529,6 +629,32 @@ class MclNode(Node):
         self.get_logger().warning(f'relocated {math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m by a global '
                                   f'search, confirmed by the one before ({ms:.0f} ms, {choice[2]})')
         self.init_filter(pose, 'relocate', keep_localized=True, quiet=True)
+
+    def make_unsure(self):
+        """After a guess (or a switch, or a verify that found other places): until a whole-area search finds the
+        pick and no other place fitting as well, one runs every unsure_period m in the background (at most
+        unsure_searches). The alternatives only settle the places already found: a look-alike picked while the
+        true place was not among them (a guess with most of the view blocked) was otherwise never corrected.
+        The budget (unsure_left) is per find, not per call: a persistent look-alike makes every search find
+        it again, and re-arming on each would keep a whole-area search running every unsure_period m forever."""
+        if not self.unsure:
+            self.unsure_travel = 0.0
+        self.unsure = True
+
+    def recheck_guess(self, ranges, angles, sensor, trans):
+        if not self.unsure or self.job is not None:
+            return
+        if self.unsure_left <= 0:
+            self.unsure = False
+            self.get_logger().warning(f'{self.unsure_searches} whole-area searches could not confirm the guess: '
+                                      'keeping it (and the places still to check)')
+            return
+        self.unsure_travel += trans
+        if self.unsure_travel < self.unsure_period:
+            return
+        self.unsure_travel = 0.0
+        self.unsure_left -= 1
+        self.submit_search('reverify', ranges, angles, sensor, [self.pf.estimate()], False, self.min_fit)
 
     def warn_find(self, text):
         now = time.monotonic()
@@ -542,18 +668,24 @@ class MclNode(Node):
         est = self.pf.estimate()
         switch = alt.update(self.matcher, est, odom_pose, ranges, angles, sensor)
         if switch is not None:
-            pose, fit_alt, fit_pick = switch
+            pose, evidence, _ = switch
             moved = relative(alt.odom0, odom_pose)
             others = [q for q in (compose(a, moved) for a in alt.poses)
                       if pose_distance(q, pose, self.yaw_scale) > 1.0] + [est]
             self.get_logger().warning(f'the guess was wrong: switching {math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m '
-                                      f'to another place that fits (mean fit {fit_alt:.2f} vs {fit_pick:.2f})')
-            self.init_filter(pose, 'switch', keep_localized=True, quiet=True)
-            self.alternatives = Alternatives(others, odom_pose, margin=self.validate_margin,
+                                      f'to another place that fits clearly better (by {evidence:.1f} fit x updates '
+                                      f'over {alt.travelled:.1f} m)')
+            self.init_filter(pose, 'switch', keep_localized=True, quiet=True, odom=odom_pose)
+            self.alternatives = Alternatives(others, odom_pose, evidence=self.validate_evidence,
                                              distance=self.validate_distance)
+            self.make_unsure()
         elif alt.done:
-            self.get_logger().info(f'guess confirmed: {alt.travelled:.1f} m of driving ruled out '
-                                   f'{len(alt.poses)} other place(s)')
+            if alt.poses:   # nothing on the way told them apart: keep the pick, say so
+                self.get_logger().warning(f'guess kept: {alt.travelled:.0f} m of driving could not tell it from '
+                                          f'{len(alt.poses)} other place(s) (ruled out {alt.ruled_out})')
+            else:
+                self.get_logger().info(f'guess confirmed: the scans ruled out {alt.ruled_out} other place(s) in '
+                                       f'{alt.travelled:.1f} m of driving')
             self.alternatives = None
 
     def check_fit(self, ranges, angles, sensor, odom_pose):
@@ -563,7 +695,22 @@ class MclNode(Node):
         if self.fit_level is None:
             self.fit_level = fit
         self.track_good_level(fit)
-        self.doubt = self.doubt + 1 if fit < self.doubt_fit * self.fit_level else 0
+        # doubt against the good-fit level: fit_level follows the fit down after every failed local search
+        # (0.97 -> 0.04 in 500 updates while the pose was wrong), so against it doubt never fired. An estimate
+        # off the drivable area (outside the map, in a wall, on unseen ground) is doubtful whatever it fits.
+        cell = int(self.lmap.cell(est[0], est[1]))
+        low = fit < self.doubt_fit * self.good_level
+        self.doubt = self.doubt + 1 if cell == 2 or low else 0
+        # in a wall or outside the map, and not fitting, for as long: not a pose (the cloud drifted where no scan
+        # contradicts it, 15 m off a 12 m map, still "localized"; it fits ~0); withdraw it like a spread cloud.
+        # A pose that fits stays, even in an occupied blob (a person or box captured in the map): no false stop.
+        self.offmap = self.offmap + 1 if cell == 2 and low else 0
+        if self.offmap >= self.doubt_updates:
+            self.offmap = 0
+            self.get_logger().error(f'lost: the pose ({est[0]:.1f}, {est[1]:.1f}) is in a wall or off the map, '
+                                    'not driving')
+            self.start_search('lost')
+            return
         if (self.burst or self.doubt >= self.doubt_updates) and self.job is None:
             self.doubt = 0
             self.burst = False
@@ -660,7 +807,7 @@ class MclNode(Node):
         slip_reanchors in LOG_PERIOD s is a burst: where the map fits badly, each local search can pull the pose
         a little further off. Local re-anchors pause for slip_hold s and a global search in the background
         (never holding the car) decides whether the car is clearly elsewhere."""
-        self.init_filter(pose, 're-anchor', keep_localized=True, quiet=True)
+        self.init_filter(pose, 're-anchor', keep_localized=True, quiet=True, odom=odom_pose)
         now = time.monotonic()
         self.anchors = [t for t in self.anchors if now - t < LOG_PERIOD] + [now]
         n = len(self.anchors)

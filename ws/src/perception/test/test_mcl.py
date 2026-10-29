@@ -364,3 +364,64 @@ def test_track_search_does_not_confidently_misplace_a_turned_car(lmap, track_mat
     if hyps and hyps[0][1] >= HYBRID_MIN_FIT:
         assert any(pose_error(pose, h)[0] < 0.15 and pose_error(pose, h)[1] < math.radians(5)
                    for h, _ in contenders(hyps)), f'confident wrong pose {hyps[0]}'
+
+
+def half_turn(pose):
+    """The pose a half turn about the track's centre: on the bare loop it sees exactly what pose sees."""
+    return 20.0 - pose[0], 12.0 - pose[1], float(wrap(pose[2] + math.pi))
+
+
+def test_alternatives_keep_a_look_alike_the_scans_cannot_tell_apart():
+    """Bare (symmetric) loop: the pick and its half-turn look-alike fit the same all the way. That is no evidence
+    either way: the look-alike must still be checked after 20 m (it used to be dropped as 'ruled out' after 5)."""
+    bare = make_track(features=False)
+    m = ScanMatcher(bare)
+    rng = np.random.default_rng(3)
+    poses = lap()
+    start = 30
+    alts = Alternatives([half_turn(poses[start])], odom_pose=poses[start])
+    for k in range(start + 3, start + 250, 3):        # ~20 m
+        r, a = select_beams(scan_from(bare, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        assert alts.update(m, poses[k], poses[k], r, a, LASER) is None
+    assert not alts.done and len(alts.poses) == 1 and alts.ruled_out == 0
+
+
+def test_alternatives_switch_from_a_half_turn_look_alike_at_the_first_feature(lmap, matcher):
+    """The pick is the half-turn look-alike, the true pose an alternative: driving past the notch decides it."""
+    rng = np.random.default_rng(4)
+    poses = lap()
+    start = 40                                         # bottom straight, the notch (x 9-10.5) ahead
+    alts = Alternatives([poses[start]], odom_pose=poses[start])
+    wrong = half_turn(poses[start])
+    switched = None
+    for k in range(start + 3, start + 150, 3):
+        moved = relative(poses[start], poses[k])
+        r, a = select_beams(scan_from(lmap, poses[k], rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+        switched = alts.update(matcher, compose(wrong, moved), poses[k], r, a, LASER)
+        if switched:
+            break
+    assert switched is not None and pose_error(poses[k], switched[0])[0] < 0.15
+
+
+def test_particles_off_the_map_or_on_unseen_ground_are_penalized(lmap):
+    """Nothing in a scan contradicts a cloud outside the map (its beams end in no-man's land): the position itself
+    must count. Half the cloud on the track, half 3 m outside the map: the outside half loses its weight."""
+    pf = ParticleFilter(n=200, seed=1)
+    pf.init_gaussian((1.45, 6.0, math.pi / 2), 0.01, 0.01)
+    pf.p[100:, 0] -= 4.0                               # x = -2.55: outside the 20 x 12 m map
+    rng = np.random.default_rng(1)
+    r, a = select_beams(scan_from(lmap, (1.45, 6.0, math.pi / 2), rng), ANGLE_MIN, ANGLE_INC, 60, 0.15, RANGE_MAX)
+    pf.update_sensor(r, a, LASER, lmap)
+    assert pf.w[100:].sum() < 0.01
+    assert list(lmap.cell(np.array([1.45, -2.0, 0.1, 10.0]), np.array([6.0, 6.0, 6.0, 6.0]))) == [0, 2, 2, 2]
+
+
+def test_track_search_candidates_match_the_brute_force_nearest_line_point(lmap):
+    """set_track uses a k-d tree (the candidates x line matrix took 470 MB on iros2026_v2): same groups."""
+    line = np.array([p[:2] for p in lap()])
+    m = ScanMatcher(lmap)
+    m.set_track(line, radius=0.6)
+    d = np.hypot(m.candidates[:, None, 0] - line[None, :, 0], m.candidates[:, None, 1] - line[None, :, 1])
+    near = d.min(axis=1) <= 0.6
+    assert m.track_poses == int(near.sum()) * len(m.track_groups[0][1])
+    assert sum(len(g[0]) for g in m.track_groups) == int(near.sum())
