@@ -46,6 +46,18 @@ mcl:
     local_yaw: 0.07            # rad /  (4 deg: slip moves the car, barely turns it)
     snap_gain: 0.1             # the local result must fit this much better to re-anchor (else: an obstacle)
     snap_agree_yaw: 0.035      # rad: ... and the next search must find the same offset (recheck_agree m, this)
+    reanchor_min_fit: 0.8      # a re-anchor (local search or recheck) must also fit at least this well, or
+    reanchor_ratio: 0.85       #   this x the fit level on good stretches if lower: where the map itself is wrong
+                               #   no pose fits well, and the filter coasts on odometry instead
+    relocate_min_fit: 0.9      # a background global search moves the car only to a place fitting this well
+    relocate_ratio: 0.93       #   (or this x the good-fit level if lower) ...
+    relocate_agree: 0.5        # m ... found again (within this) by the next search
+    # The absolute values are from the sim (iros2026_v2: true pose 0.93-1.0 on good stretches, <= 0.74 on its
+    # badly mapped one, a look-alike there 0.84). A real lidar may fit less everywhere: the ratios then lower the
+    # gates with the good-fit level. To check on a real bag: the re-anchor log lines print 'fit a -> b'; good
+    # stretches should show b >= ~0.9. If re-anchors you expect never happen, lower the *_min_fit values.
+    max_jump: 1.0              # m: a bigger step between two odometry messages that the speed (x1.5, +0.3 m) does
+                               #   not explain is a frame jump (odometry restart): the pose is kept, then checked
     slip_reanchors: 3          # re-anchors within 2 s: a burst (the map fits badly here, or the wheels slip) ...
     slip_hold: 2.0             # s ... local re-anchors pause, a background global search checks the pose
     recheck_updates: 5         # every this many updates, a small local search (catches along-straight error)

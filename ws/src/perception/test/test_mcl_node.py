@@ -16,7 +16,7 @@ from PIL import Image
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from perception.mcl import compose, inverse
+from perception.mcl import Alternatives, compose, inverse, relative
 from perception.mcl_node import MclNode
 from test_mcl import ANGLE_INC, ANGLE_MIN, LASER, RANGE_MAX, RES, lap, make_track, pose_error, scan_from
 
@@ -59,7 +59,8 @@ class Car:
         self.lmap = lmap
         self.rng = np.random.default_rng(0)
         self.odom_frame = (0.0, 0.0, 0.0)   # odom pose = odom_frame * true pose
-        self.stamp = 0
+        self.stamp = 0.0                     # s; each step one 40 Hz odometry message and scan
+        self.dt = 0.025
         self.searches = []                   # kinds of global searches the node started
         submit = self.node.submit_search
 
@@ -76,7 +77,8 @@ class Car:
     def odom(self, true, speed=0.0):
         x, y, yaw = compose(self.odom_frame, true)
         m = Odometry()
-        m.header.stamp.sec = self.stamp
+        m.header.stamp.sec = int(self.stamp)
+        m.header.stamp.nanosec = int(round((self.stamp - int(self.stamp)) * 1e9)) % 1_000_000_000
         m.pose.pose.position.x, m.pose.pose.position.y = x, y
         m.pose.pose.orientation.z, m.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         m.twist.twist.linear.x = speed
@@ -95,7 +97,7 @@ class Car:
 
     def step(self, true, block=None, speed=0.0):
         """One odometry message and one scan at the true pose; waits for a search the scan started."""
-        self.stamp += 1
+        self.stamp += self.dt
         self.node.odom_cb(self.odom(true, speed))
         self.node.scan_cb(self.scan(true, block))
         if self.node.job is not None:
@@ -206,8 +208,14 @@ def test_a_teleport_the_odometry_did_not_see_is_found_by_a_background_search(car
     # from now on the true pose follows P[300:], the odometry continues from where P[119] left it
     odom_at = compose(c.odom_frame, P[119])
     c.odom_frame = compose(odom_at, inverse(P[299]))
-    drive(c, P[300:360])
+    moved_at = None
+    for k, p in enumerate(P[300:360]):
+        c.step(p)
+        if moved_at is None and pose_error(p, c.pose())[0] < 0.5:
+            moved_at = k
+            checks = c.searches.count('check')
     assert {'check', 'find'} & set(c.searches[1:]), 'no global search'
+    assert moved_at is not None and ('find' in c.searches[1:] or checks >= 2), 'moved on one check search'
     assert c.node.localized and pose_error(P[359], c.pose())[0] < 0.15   # on the featureless top straight
 
 
@@ -241,6 +249,88 @@ def test_odometry_frame_jump_keeps_the_pose(car):
     assert c.node.localized and pose_error(P[109], c.pose())[0] < 0.1
 
 
+def test_a_big_odometry_step_the_speed_explains_is_driven_not_dropped(car):
+    """The streams stall for 0.7 s at 3.8 m/s (a sim hiccup): the next odometry is 2.5 m on, more than max_jump.
+    That is the car driving, not the odometry frame jumping: the pose must follow it at once (dropping it left the
+    pose 2.6 m behind on iros2026_v2, and the car crashed)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:110], speed=3.8)     # 0.08 m per 40 Hz message
+    c.stamp += 0.67                    # nothing for 0.67 s, then the car is 31 x 0.08 = 2.5 m on
+    c.step(P[141], speed=3.8)
+    for p in P[142:150]:
+        c.step(p, speed=3.8)
+        assert c.node.localized and pose_error(p, c.pose())[0] < 0.2, 'the pose stayed behind'
+    assert pose_error(P[149], c.pose())[0] < 0.1
+
+
+def frame_jump_keeps_the_pose(c, true, speed):
+    """The odometry restarts (its frame jumps 3.6 m, 29 deg) between two 40 Hz messages: the published pose must
+    not move with it, the filter must not drive the cloud by it, and the car must keep going."""
+    c.odom_frame = compose((3.0, -2.0, 0.5), c.odom_frame)
+    for _ in range(5):
+        c.step(true, speed=speed)
+        assert c.node.localized and pose_error(true, c.pose())[0] < 0.1
+
+
+def test_an_odometry_frame_jump_while_driving_keeps_the_pose(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:110], speed=3.8)
+    frame_jump_keeps_the_pose(c, P[109], 3.8)   # the car "stands" at P[109]: the jump is all the step there is
+    drive(c, P[110:130], speed=3.8)
+    assert pose_error(P[129], c.pose())[0] < 0.1
+
+
+def test_an_odometry_frame_jump_after_standing_still_keeps_the_pose(car):
+    """Standing, the filter does not update (no motion), so the time since its last update grows: 20 s x the
+    last crawl speed must not make a 3.6 m jump look like driving (it did: the cloud was moved 3.3 m)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:110], speed=0.3)
+    for _ in range(800):                 # 20 s standing
+        c.step(P[109])
+    frame_jump_keeps_the_pose(c, P[109], 0.0)
+    drive(c, P[110:130], speed=1.0)
+    assert pose_error(P[129], c.pose())[0] < 0.1
+
+
+def test_an_odometry_frame_jump_drops_a_search_result_carried_across_it(car):
+    """The odometry restarts while the verify behind the start runs: its result is carried by
+    relative(odometry then, now), across the jump that is the jump itself (it moved the car 2.7 m)."""
+    c = car()
+    P = lap()
+    for _ in range(40):
+        c.step(P[92])
+        if c.node.job is not None and c.node.job[1] == 'verify':
+            break
+    assert c.node.job is not None and c.node.job[1] == 'verify'
+    c.node.job[0].result()   # finished, not yet polled
+    c.odom_frame = (3.0, -2.0, 0.5)
+    for _ in range(6):
+        c.step(P[92])
+        if c.poses:
+            assert pose_error(P[92], c.pose())[0] < 0.1
+    assert c.node.localized and pose_error(P[92], c.pose())[0] < 0.1
+
+
+def test_an_odometry_frame_jump_carries_the_alternatives_into_the_new_frame(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    c.node.alternatives = Alternatives([P[300]], c.node.odom[0])
+    c.odom_frame = compose((3.0, -2.0, 0.5), c.odom_frame)
+    c.step(P[99])                        # the jump (between two messages: the car stood still for it)
+    c.step(P[100])
+    alt = c.node.alternatives
+    moved = relative(alt.odom0, c.node.odom[0])
+    assert pose_error(compose(P[300], moved), compose(P[300], relative(P[99], P[100])))[0] < 0.02
+
+
 def test_sim_reset_finds_the_car_where_it_was_put(car):
     c = car()
     P = lap()
@@ -265,16 +355,16 @@ def test_reanchor_state_is_cleared_by_a_restart(car):
     assert c.node.recheck_offset is None and c.node.rechecks == 0
 
 
-def fake_local_search(c, offsets):
+def fake_local_search(c, offsets, fit=1.0):
     """Low-fit local searches (radius != 0.1; the 0.1 m refinement keeps its start) answer with the next offset
-    from offsets, fitting perfectly: what a badly fitting part of the map can do."""
+    from offsets, fitting this well (default perfectly): what a badly fitting part of the map can do."""
     k = [0]
 
     def search_local(pose, *a, radius=0.8, **kw):
         if radius == 0.1:
-            return pose, 1.0
+            return pose, fit
         k[0] += 1
-        return compose(pose, offsets[(k[0] - 1) % len(offsets)]), 1.0
+        return compose(pose, offsets[(k[0] - 1) % len(offsets)]), fit
     c.node.matcher.search_local = search_local
     anchors = []
     reanchor = c.node.reanchor
@@ -294,6 +384,125 @@ def test_a_low_fit_search_re_anchors_only_when_the_next_one_agrees(car):
     anchors = fake_local_search(c, [(0.5, 0.0, 0.0)])
     drive(c, P[112:118], block=block)
     assert len(anchors) == 1
+
+
+def test_a_local_search_never_re_anchors_to_a_pose_that_still_fits_badly(car):
+    """Where the map itself is wrong (iros2026_v2, world (47-50, 17-27)) no pose near the car fits better than
+    ~0.65; a local search there found a pose 0.9 m away fitting 0.66 (the filter's 0.47), the next one agreed (the
+    map's error is the same scan after scan), and the re-anchors walked the pose 2.5 m along the track into a
+    crash. A better fit that is still a bad one is not a re-anchor."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    block = np.arange(45, 225)   # the fit drops: every fit_bad_updates updates a local search
+    anchors = fake_local_search(c, [(0.5, 0.0, 0.0)], fit=0.66)
+    drive(c, P[100:130], block=block)
+    assert not anchors, 're-anchored to a pose fitting 0.66'
+    anchors = fake_local_search(c, [(0.5, 0.0, 0.0)], fit=0.9)   # a slip on a good map: re-anchors
+    drive(c, P[130:140], block=block)
+    assert anchors
+
+
+def test_a_recheck_never_re_anchors_to_a_pose_that_still_fits_badly(car):
+    """The recheck (fit normal, every recheck_updates updates) on a map that fits ~0.6 everywhere here: a pose
+    0.4 m along fitting 0.75 (> 0.6 + recheck_gain) is no better, it must not move the pose; 0.85 does."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    c.node.matcher.fit = lambda *a, **kw: 0.6
+    c.node.fit_level = 0.6
+    anchors = fake_local_search(c, [(0.4, 0.0, 0.0)], fit=0.75)
+    drive(c, P[100:140])
+    assert not anchors, 're-anchored to a pose fitting 0.75'
+    anchors = fake_local_search(c, [(0.4, 0.0, 0.0)], fit=0.85)
+    drive(c, P[140:160])
+    assert anchors
+
+
+def test_a_background_search_moves_the_car_only_when_the_next_one_finds_the_same_place(car):
+    """A check search (a burst, a long low fit) found the corridor across the wall, 2 m away, where the map is
+    wrong (iros2026_v2) and moved the car there. Check searches only take places fitting relocate_floor() (the
+    worker returns no choice below it), and a place found must be found again by the next search; a finding that
+    disagrees with the last becomes the one the next search has to confirm."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    here = c.node.pf.estimate()
+    moved = (0.0, 0.0, 0.0)
+    c.node.on_check((P[300], [], 'fit 0.97'), moved, 1.0)
+    assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'relocated on one search'
+    assert c.node.burst, 'no second search asked for'
+    c.node.burst = False
+    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0)
+    assert pose_error(here, c.node.pf.estimate())[0] < 0.05, 'relocated on two searches that disagree'
+    assert c.node.burst, 'the second finding was dropped instead of checked'
+    c.node.on_check((P[200], [], 'fit 0.97'), moved, 1.0)
+    assert c.node.localized and pose_error(P[200], c.node.pf.estimate())[0] < 0.1
+
+
+def test_check_searches_only_take_places_that_fit_well(car):
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    floors = []
+    submit = c.node.submit_search
+    c.node.submit_search = lambda kind, *a, **kw: (floors.append(a[5]) if kind == 'check' else None,
+                                                   submit(kind, *a, **kw))
+    c.node.burst = True
+    drive(c, P[100:103])
+    assert floors and min(floors) >= 0.85
+    c.node.good_level = 0.6          # a lidar/map that fits less everywhere: the gates scale down with it
+    assert c.node.relocate_floor() < 0.6 and c.node.reanchor_floor() < 0.55
+
+
+def test_findings_that_keep_disagreeing_stop_asking_for_searches(car):
+    """Where the map is wrong two places can keep winning in turn: after RELOCATE_TRIES searches in a row the
+    node stops asking for more (each costs ~1-2 s of the worker) and waits for the next trigger."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:100])
+    asked = []
+    for k in range(6):
+        c.node.burst = False
+        c.node.on_check((P[200] if k % 2 else P[300], [], 'fit 0.97'), (0.0, 0.0, 0.0), 1.0)
+        asked.append(c.node.burst)
+    assert asked[:3] == [True] * 3 and not any(asked[3:])
+    assert pose_error(P[99], c.node.pf.estimate())[0] < 0.1
+
+
+def test_the_good_fit_level_is_not_dragged_down_by_a_bad_stretch(car):
+    """100 updates (2.5 s) where the true pose fits only 0.74 (iros2026_v2's bad stretch fits <= 0.74) after a
+    good stretch: the gates must stay above the 0.66 re-anchor that went 0.9 m wrong there and the 0.84
+    look-alike across the wall (a level that followed the fit put them at 0.66 and 0.72)."""
+    c = car()
+    P = lap()
+    c.stand(P[92])
+    drive(c, P[93:110])
+    assert c.node.good_level > 0.9
+    c.node.matcher.fit = lambda *a, **kw: 0.74
+    drive(c, P[110:210])
+    assert c.node.reanchor_floor() > 0.66 and c.node.relocate_floor() > 0.84
+
+
+def test_the_good_fit_level_follows_a_lidar_that_fits_less_everywhere(car):
+    """A real lidar (or map) fitting ~0.7 everywhere: the gates must come down to it, not stay at the sim's
+    absolute values and disable re-anchors. Starting there: at once; after a good start: within ~70 m."""
+    c = car()
+    c.node.track_good_level(0.7)
+    for _ in range(50):
+        c.node.track_good_level(0.68 + 0.04 * c.rng.random())
+    assert c.node.reanchor_floor() < 0.65 and c.node.relocate_floor() < 0.7
+    c.node.good_level = None
+    c.node.track_good_level(0.97)
+    for _ in range(3000):
+        c.node.track_good_level(0.68 + 0.04 * c.rng.random())
+    assert c.node.reanchor_floor() < 0.66 and c.node.relocate_floor() < 0.75
+    assert min(c.node.reanchor_floor(), c.node.relocate_floor()) >= c.node.min_fit
 
 
 def test_a_burst_of_re_anchors_pauses_them_and_checks_in_the_background(car):

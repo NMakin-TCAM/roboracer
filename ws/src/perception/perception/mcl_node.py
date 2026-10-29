@@ -26,11 +26,21 @@ Extra: /mcl/particles (PoseArray), /map (OccupancyGrid, latched) for Foxglove.
              a local search (within local_radius, and local_yaw: slip moves the car but barely turns it)
              re-anchors the cloud if it finds a clearly better pose and the next search finds the same offset;
              every recheck_updates updates a small local search catches what the fit does not show (along a
-             straight). The car keeps driving through both. A burst of re-anchors (slip_reanchors in 2 s, where
-             the map fits badly) pauses them for slip_hold s and starts a background global search.
+             straight). The car keeps driving through both. Either re-anchors only to a pose that fits well
+             (reanchor_min_fit, or reanchor_ratio x the fit on good stretches if that is lower, so a lidar or
+             map that fits less everywhere scales the gate down): where the map itself is wrong (iros2026_v2
+             has a stretch where no pose within 1 m fits better than ~0.6), a "better" pose is just another
+             wrong one, and the filter coasts on the odometry instead. A burst of re-anchors (slip_reanchors
+             in 2 s, where the map fits badly) pauses them for slip_hold s and starts a background global search.
   doubt:     the fit below doubt_fit x its level for doubt_updates updates in a row (beyond the local search's
              reach, or something the map does not have): a global search in the background, re-anchoring only
-             if it finds the car clearly elsewhere. A low fit alone never stops the car.
+             if it finds the car clearly elsewhere, and only when the place fits very well (relocate_min_fit, or
+             relocate_ratio x the good-fit level) and the next search agrees (the same place, carried by the
+             odometry): where the map is wrong the true place fits worse than a look-alike elsewhere. A low fit
+             alone never stops the car.
+  odom jump: a step between two odometry messages bigger than max_jump that the car's speed does not explain
+             (an odometry restart): the pose is kept in the new frame and a background search checks it. A big
+             step the speed explains (the streams stalled while the car drove on) is driven.
   lost:      only the cloud spreading beyond lost_std_xy withdraws the pose (the car stops) and starts a search.
   sim reset: fast_bridge's /autodrive/roboracer_1/sim_reset event: the pose is withheld at once; after
              debounce s with the car still, a global search.
@@ -64,6 +74,7 @@ MIN_BEAMS = 10
 MAP_ORIGIN = (0.0, 0.0, 0.0)   # where race.sh puts the car: the pose mapping started from
 LOG_PERIOD = 2.0               # s between re-anchor log lines
 FIND_LOG_PERIOD = 5.0          # s between repeats of the same "cannot find the car" warning
+RELOCATE_TRIES = 4             # check searches in a row looking for two that agree, then wait for a trigger
 
 
 def yaw_quaternion(yaw):
@@ -78,7 +89,8 @@ class MclNode(Node):
         self.beams = p('beams', 60).value
         self.update_min_d = p('update_min_d', 0.05).value           # m of odometry between scan updates
         self.update_min_a = p('update_min_a', 0.05).value           # rad
-        self.max_jump = p('max_jump', 1.0).value                    # m: a bigger odometry step is a teleport
+        self.max_jump = p('max_jump', 1.0).value                    # m: a bigger step between two odometry
+        #                                         messages that the car's speed does not explain: a frame jump
         self.init_std_xy = p('init_std_xy', 0.15).value
         self.init_std_yaw = p('init_std_yaw', 0.10).value
         self.conv_xy = p('converged_std_xy', 0.10).value
@@ -109,6 +121,11 @@ class MclNode(Node):
         self.local_radius = p('local_radius', 0.8).value            # m
         self.local_yaw = p('local_yaw', 0.07).value                 # rad: slip moves the car, barely turns it
         self.snap_gain = p('snap_gain', 0.1).value                  # fit a re-anchored pose must gain
+        self.reanchor_min_fit = p('reanchor_min_fit', 0.8).value    # ... and at least this fit (or this x the
+        self.reanchor_ratio = p('reanchor_ratio', 0.85).value       # good-fit level, if lower): not a bad map
+        self.relocate_min_fit = p('relocate_min_fit', 0.9).value    # a background search moves the car only to
+        self.relocate_ratio = p('relocate_ratio', 0.93).value       # a place fitting this well (or ratio x level),
+        self.relocate_agree = p('relocate_agree', 0.5).value        # found twice (m)
         self.snap_agree_yaw = p('snap_agree_yaw', 0.035).value      # rad between two searches' offsets
         self.slip_reanchors = p('slip_reanchors', 3).value          # re-anchors in LOG_PERIOD s: a burst
         self.slip_hold = p('slip_hold', 2.0).value                  # s without local re-anchors after a burst
@@ -138,6 +155,8 @@ class MclNode(Node):
 
         self.odom = None              # (pose, stamp msg, speed)
         self.last_odom_pose = None    # odom pose of the last filter update
+        self.prev_odom = None         # the previous /odom message: (pose, stamp [s], speed), for frame jumps
+        self.jumped = None            # size [m] of an odometry frame jump the next scan has to check
         self.map_T_odom = None
         self.sensor_pose = {}         # scan frame -> pose in base_link
         self.initialized = False
@@ -155,11 +174,13 @@ class MclNode(Node):
         self.alternatives = None      # Alternatives after a guessed pick
         self.find_log = ('', 0.0)     # last "cannot find" warning and when
         self.fit_level = None         # running level of the fit while tracking
+        self.good_level = None        # the fit on stretches where the map fits: scales the re-anchor floors
         self.fit_bad = 0
         self.doubt = 0
         self.rechecks = 0
         self.recheck_offset = None    # offset (in the car's frame) the last recheck found, waiting to agree
         self.snap_offset = None       # the same for the low-fit local search
+        self.relocation = None        # (pose, odom pose, searches) a check search would move the car to
         self.anchors = []             # monotonic times of recent re-anchors
         self.anchor_log_t = 0.0
         self.hold_until = 0.0         # monotonic time until which local searches do not re-anchor (a burst)
@@ -215,6 +236,7 @@ class MclNode(Node):
         self.rechecks = 0
         self.recheck_offset = None
         self.snap_offset = None
+        self.relocation = None
         self.alternatives = None
         # any other pose change makes a running search stale. A re-anchor only nudges the pose, and the verify
         # behind a start (which may find the start was the wrong place) is carried by the odometry: it survives.
@@ -228,6 +250,7 @@ class MclNode(Node):
             self.get_logger().info(f'{reason}: particles at x={pose[0]:.2f} y={pose[1]:.2f} yaw={pose[2]:.2f}')
         self.initialized = True
         self.last_odom_pose = self.odom[0]
+        self.jumped = None
         self.map_T_odom = compose(pose, inverse(self.odom[0]))
 
     def start_search(self, reason):
@@ -247,9 +270,14 @@ class MclNode(Node):
     def odom_cb(self, msg):
         pose = pose2d(msg.pose.pose)
         v = msg.twist.twist.linear
-        self.odom = (pose, msg.header.stamp, math.hypot(v.x, v.y))
+        speed = math.hypot(v.x, v.y)
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.odom = (pose, msg.header.stamp, speed)
+        prev, self.prev_odom = self.prev_odom, (pose, stamp, speed)
         if self.map_T_odom is None:
             return
+        if prev is not None:
+            self.check_frame_jump(prev, pose, stamp, speed)
         self.broadcast(msg.header.stamp)
         if self.localized:
             x, y, yaw = compose(self.map_T_odom, pose)
@@ -258,6 +286,31 @@ class MclNode(Node):
             out.pose.position.x, out.pose.position.y = x, y
             out.pose.orientation.z, out.pose.orientation.w = yaw_quaternion(yaw)
             self.pose_pub.publish(out)
+
+    def check_frame_jump(self, prev, pose, stamp, speed):
+        """A step from the previous odometry message bigger than max_jump and than the car's speed explains over
+        the time between the two messages is the odometry frame jumping (an odometry restart, a respawn without a
+        reset event): the pose is kept, re-expressed in the new frame, and the next scan checks it. A big step the
+        speed does explain is driving (the streams stalled: 2.6 m at 3.8 m/s in 0.69 s on iros2026_v2), and the
+        filter moves the car by it as by any other step: dropping it left the pose 2.6 m behind, and the car
+        crashed before a search could fix that. Per message, so standing still for a while (no filter updates)
+        does not make a jump look like driving."""
+        step = math.hypot(pose[0] - prev[0][0], pose[1] - prev[0][1])
+        dt = max(0.0, stamp - prev[1])
+        if step <= self.max_jump or step <= dt * 1.5 * max(prev[2], speed) + 0.3:
+            return
+        jump = compose(pose, inverse(prev[0]))           # new frame = jump * old frame (the car stood still)
+        self.map_T_odom = compose(self.map_T_odom, inverse(jump))
+        if self.last_odom_pose is not None:
+            self.last_odom_pose = compose(jump, self.last_odom_pose)
+        if self.alternatives is not None:   # carried by the odometry: into the new frame
+            self.alternatives.odom0 = compose(jump, self.alternatives.odom0)
+            self.alternatives.last_odom = compose(jump, self.alternatives.last_odom)
+        # a search running or finished but not yet polled is carried by relative(odometry then, now): across the
+        # jump that is the jump itself (a verify moved the car 2.7 m). It is dropped; the next scan checks.
+        self.generation += 1
+        self.relocation = None   # a candidate from before is carried through the old frame: it never agrees
+        self.jumped = step
 
     def broadcast(self, stamp):
         x, y, yaw = self.map_T_odom
@@ -302,18 +355,17 @@ class MclNode(Node):
                                    self.relaxed_min_fit if force else self.min_fit)
             return
         odom_pose = self.odom[0]
-        delta = relative(self.last_odom_pose, odom_pose)
-        trans = math.hypot(delta[0], delta[1])
-        if trans > self.max_jump:   # the odometry frame jumped (restart, respawn): keep the pose, then check it
-            self.get_logger().warning(f'odometry jumped {trans:.2f} m (reset or respawn?): keeping the pose, '
+        if self.jumped is not None:   # the odometry frame jumped (restart, respawn): pose kept, now check it
+            self.get_logger().warning(f'odometry jumped {self.jumped:.2f} m (reset or respawn?): keeping the pose, '
                                       'checking it against the map')
-            self.last_odom_pose = odom_pose
-            self.map_T_odom = compose(self.pf.estimate(), inverse(odom_pose))
+            self.jumped = None
             self.generation += 1   # a running search's result is carried by the odometry: the jump spoils it
             self.job = None
             if self.localized:
-                self.submit_search('check', ranges, angles, sensor, [self.pf.estimate()], False, self.min_fit)
-            return
+                self.submit_search('check', ranges, angles, sensor, [self.pf.estimate()], False,
+                                   self.relocate_floor())
+        delta = relative(self.last_odom_pose, odom_pose)
+        trans = math.hypot(delta[0], delta[1])
         moved = trans >= self.update_min_d or abs(delta[2]) >= self.update_min_a
         if not moved and self.localized:
             return
@@ -449,14 +501,33 @@ class MclNode(Node):
                                              distance=self.validate_distance)
 
     def on_check(self, choice, moved, ms):
+        """A background global search while localized (a burst, a long low fit, a frame jump), submitted with the
+        relocate_floor() floor, so a choice fits at least ~that well: move the car only if it is clearly elsewhere
+        and the next search finds the same place (carried by the odometry). Where the map is wrong the true place
+        fits only ~0.5 and look-alikes win: on iros2026_v2 the corridor across the wall, 2.1 m away, fits up to
+        0.84 every lap, and two searches in a row found it; a place the car really is at fits 0.93-1.0 there."""
         if choice is None or not self.localized:
+            self.relocation = None
             return
         pose = compose(choice[0], moved)
         est = self.pf.estimate()
         if pose_distance(pose, est, self.yaw_scale) < self.local_radius:
-            return   # the car is where the filter has it: something the map does not have
+            self.relocation = None   # the car is where the filter has it: something the map does not have
+            return
+        prev, self.relocation = self.relocation, (pose, self.odom[0], 1)
+        if prev is None or pose_distance(compose(prev[0], relative(prev[1], self.odom[0])), pose,
+                                         self.yaw_scale) > self.relocate_agree:
+            # a first finding, or one that disagrees with the last: check_fit asks again, at most
+            # RELOCATE_TRIES searches in a row (where the map is wrong the findings can keep disagreeing, and
+            # each whole-area search costs ~1-2 s of the worker); the candidate waits for the next trigger then
+            tries = 1 if prev is None else prev[2] + 1
+            self.relocation = (pose, self.odom[0], tries)
+            if tries < RELOCATE_TRIES:
+                self.burst = True
+            return
+        self.relocation = None
         self.get_logger().warning(f'relocated {math.hypot(pose[0] - est[0], pose[1] - est[1]):.2f} m by a global '
-                                  f'search ({ms:.0f} ms, {choice[2]})')
+                                  f'search, confirmed by the one before ({ms:.0f} ms, {choice[2]})')
         self.init_filter(pose, 'relocate', keep_localized=True, quiet=True)
 
     def warn_find(self, text):
@@ -491,11 +562,12 @@ class MclNode(Node):
         fit = self.matcher.fit(est, ranges, angles, sensor)
         if self.fit_level is None:
             self.fit_level = fit
+        self.track_good_level(fit)
         self.doubt = self.doubt + 1 if fit < self.doubt_fit * self.fit_level else 0
         if (self.burst or self.doubt >= self.doubt_updates) and self.job is None:
             self.doubt = 0
             self.burst = False
-            self.submit_search('check', ranges, angles, sensor, [est], False, self.min_fit)
+            self.submit_search('check', ranges, angles, sensor, [est], False, self.relocate_floor())
         holding = time.monotonic() < self.hold_until
         if fit >= self.fit_drop * self.fit_level:
             self.fit_bad = 0
@@ -510,8 +582,10 @@ class MclNode(Node):
         t0 = time.monotonic()
         best, best_fit = self.local_search(est, ranges, angles, sensor, self.local_radius, self.local_yaw)
         ms = (time.monotonic() - t0) * 1000.0
-        if best_fit < max(fit + self.snap_gain, self.fit_drop * self.fit_level) or best_fit < self.min_fit:
-            self.snap_offset = None   # nothing fits clearly better nearby: something the map does not have
+        if best_fit < max(fit + self.snap_gain, self.fit_drop * self.fit_level, self.reanchor_floor()):
+            # nothing fits clearly better nearby: something the map does not have, or a stretch where the map
+            # itself is wrong (no pose fits well, so the best of them is no better than the filter's)
+            self.snap_offset = None
             self.fit_level += 0.02 * (fit - self.fit_level)
             return
         # one search can be fooled where the map fits badly: re-anchor only when the next one (fit_bad_updates
@@ -536,7 +610,8 @@ class MclNode(Node):
         best, best_fit = self.matcher.search_local(est, ranges, angles, sensor, radius=self.recheck_radius,
                                                    yaw_range=math.radians(4.0), yaw_step=math.radians(1.0))
         offset = relative(est, best)
-        if best_fit < fit + self.recheck_gain or math.hypot(offset[0], offset[1]) < self.recheck_min_shift:
+        if (best_fit < max(fit + self.recheck_gain, self.reanchor_floor())
+                or math.hypot(offset[0], offset[1]) < self.recheck_min_shift):
             self.recheck_offset = None
             return
         prev, self.recheck_offset = self.recheck_offset, offset
@@ -545,6 +620,33 @@ class MclNode(Node):
         self.recheck_offset = None
         self.reanchor(best, odom_pose, f'{math.hypot(offset[0], offset[1]):.2f} m ({offset[0]:+.2f} along, '
                                        f'{offset[1]:+.2f} across), fit {fit:.2f} -> {best_fit:.2f}')
+
+    def track_good_level(self, fit):
+        """The level of a good fit, for reanchor_floor / relocate_floor: a slow high percentile of the fit at the
+        estimate. It rises with any better fit, follows fits within 5 % of it, and sinks only very slowly below that
+        (0.05 % of the gap per update: a ~10 m stretch of bad map, 200 updates, takes ~0.04 off it, and the next
+        good stretch puts that back). Unlike fit_level it is not dragged down where nothing fits. A lidar or map
+        that fits less everywhere still brings it down: it starts at the first fit, and a uniformly lower fit
+        pulls it there within ~1400 updates (~70 m of driving)."""
+        if self.good_level is None:
+            self.good_level = fit
+        elif fit > self.good_level:
+            self.good_level += 0.05 * (fit - self.good_level)
+        elif fit >= 0.95 * self.good_level:
+            self.good_level += 0.02 * (fit - self.good_level)
+        else:
+            self.good_level += 0.0005 * (fit - self.good_level)
+
+    def reanchor_floor(self):
+        """Fit a re-anchor must reach: reanchor_min_fit, or less on a map/lidar where even good stretches fit less
+        (reanchor_ratio x the good-fit level), so the gate scales instead of silently disabling re-anchors."""
+        level = self.good_level if self.good_level is not None else 1.0
+        return max(self.min_fit, min(self.reanchor_min_fit, self.reanchor_ratio * level))
+
+    def relocate_floor(self):
+        """The same for a background global search moving the car (relocate_min_fit, relocate_ratio)."""
+        level = self.good_level if self.good_level is not None else 1.0
+        return max(self.min_fit, min(self.relocate_min_fit, self.relocate_ratio * level))
 
     def local_search(self, pose, ranges, angles, sensor, radius, yaw_range):
         """Best (pose, fit) near pose: coarse (0.1 m) within radius / yaw_range, then fine around that; a few ms."""
