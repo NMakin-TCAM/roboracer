@@ -233,7 +233,8 @@ def test_adaptive_lookahead(run, track):
     # With adaptive_lookahead_cut:=1.0 the cap (1.7 m + ...) is above 1.2 m: as off.
     pose = (5.0, 0.3, 0.0) if track == 'straight' else (9.5, 0.0, 0.0)
     drives = []
-    for args in ([], ['adaptive_lookahead:=true'], ['adaptive_lookahead:=true', 'adaptive_lookahead_cut:=1.0']):
+    for args in (['adaptive_lookahead:=false'], ['adaptive_lookahead:=true'],
+                 ['adaptive_lookahead:=true', 'adaptive_lookahead_cut:=1.0']):
         driver, proc = run(track, *args)
         drives.append(driver.drive(*pose))
         out = stop(proc)   # one node at a time: all publish /drive
