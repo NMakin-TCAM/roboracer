@@ -38,6 +38,9 @@ launches `control race.launch.py` (perception `localization.launch.py` + control
 With `avoid:=true` it also starts planning's `obstacle_spliner_node`, and pure pursuit steers on its
 `/local_path` (the raceline shifted sideways around an obstacle on `/scan` that the map did not have)
 instead of the raceline, at the raceline's speeds. With no fresh collision-free path the car stops.
+With `adaptive_lookahead:=true` pure pursuit's lookahead is also capped by the raceline's curvature (so it
+cuts curves by at most about `adaptive_lookahead_cut` m), which is what makes `speed_scale:=1.0` drive
+without hitting the inside walls (control/README.md).
 If mapping fails on race day, `follow_the_gap.launch.py` drives on `/scan` alone (no map); run it instead of
 `race.sh`, never alongside it, since both publish `/drive`.
 

@@ -7,6 +7,16 @@ least one lookahead ahead of the car, steer on the arc through it, drive at the 
 
   lookahead = clip(lookahead_time * drive speed, lookahead_min, lookahead_distance)
 
+adaptive_lookahead (default off): the lookahead is also capped by the curvature of the raceline near
+the car, so it does not cut corners (pure pursuit settles about lookahead^2 * kappa / 2 inside a curve;
+control/lookahead.py):
+
+  cap = max(lookahead_min, min over raceline points j of
+            (sqrt(2 * adaptive_lookahead_cut / |kappa_j|) + adaptive_lookahead_slope * |arc distance to j|))
+  lookahead = min(above, max(cap, adaptive_lookahead_min_time * drive speed))
+
+kappa from the raceline geometry, averaged over adaptive_lookahead_smooth m; cap precomputed per point.
+
 The closest point is searched within search_window m along the line of the previous one, so it
 cannot jump to another stretch of track that passes close by (iros2026: two legs 1.07 m apart,
 driven in opposite directions). On the first pose, or when that point is more than
@@ -40,6 +50,8 @@ from std_msgs.msg import Bool, String
 from perception.tracks import track_dir
 from planning.raceline import read_provenance
 
+from control.lookahead import curvature_cap, lookahead
+
 # raceline.csv columns: s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
 X, Y, VX = 1, 2, 5
 
@@ -56,6 +68,11 @@ class PurePursuit(Node):
         self.lookahead_distance = p('lookahead_distance', 3.0).value   # m, max
         self.lookahead_min = p('lookahead_min', 0.6).value             # m, ~2x the wheelbase
         self.lookahead_time = p('lookahead_time', 0.4).value           # s
+        adaptive = p('adaptive_lookahead', False).value                # cap by the curvature ahead
+        la_cut = p('adaptive_lookahead_cut', 0.1).value                # m, lookahead <= sqrt(2 cut / kappa)
+        la_slope = p('adaptive_lookahead_slope', 0.5).value            # + slope * arc distance to the curve
+        self.la_min_time = p('adaptive_lookahead_min_time', 0.25).value  # s, but >= min_time * speed
+        la_smooth = p('adaptive_lookahead_smooth', 0.5).value          # m, curvature averaged over
         search_window = p('search_window', 2.0).value                  # m along the line, each way
         self.reacquire_distance = p('reacquire_distance', 1.0).value   # m from the line
         self.max_pose_age = p('max_pose_age', 0.5).value   # s, as fast_bridge's /drive watchdog
@@ -81,10 +98,15 @@ class PurePursuit(Node):
         self.heading = np.arctan2(seg[:, 1], seg[:, 0])
         step = np.median(np.hypot(seg[:, 0], seg[:, 1]))
         self.window = max(1, int(np.ceil(search_window / step))) if step > 0 else len(self.xy)
+        self.cap = (curvature_cap(self.xy, la_cut, la_slope, self.lookahead_min, self.lookahead_distance, la_smooth)
+                    if adaptive else np.full(len(self.xy), np.inf))
         self.closest = None
         self.path_xy, self.path_stamp, self.path_valid = None, 0.0, False
         self.get_logger().info(f'Loaded {path}: {len(self.waypoints)} points; lookahead '
-                               f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m')
+                               f'{self.lookahead_time} s x speed, {self.lookahead_min}-{self.lookahead_distance} m'
+                               + (f'; adaptive: <= sqrt(2 x {la_cut} m / kappa) + {la_slope} x distance to the curve, '
+                                  f'>= {self.la_min_time} s x speed (cap {self.cap.min():.2f} m at the tightest)'
+                                  if adaptive else ''))
         self.report_provenance(path)
 
         self.create_subscription(PoseStamped, pose_topic, self.pose_callback, 10)
@@ -196,10 +218,11 @@ class PurePursuit(Node):
         # of being the closest point, which would cut straight across corners. At most one lap is
         # searched: on a tiny track every point may be within the lookahead, then the farthest
         # point (across the loop) is the target.
-        lookahead = np.clip(self.lookahead_time * self.drive_speed(closest),
-                            self.lookahead_min, self.lookahead_distance)
+        # adaptive_lookahead: also capped by the curvature ahead (the raceline's, as /local_path follows it)
+        lookahead_m = lookahead(self.drive_speed(closest), self.lookahead_time, self.lookahead_min,
+                                self.lookahead_distance, self.cap[closest], self.la_min_time)
         ahead = (closest + np.arange(n)) % n
-        far = np.flatnonzero(dists[ahead] >= lookahead + dists[closest])
+        far = np.flatnonzero(dists[ahead] >= lookahead_m + dists[closest])
         target = ahead[far[0]] if far.size else ahead[np.argmax(dists[ahead])]
         target_dist = dists[target]
         if target_dist < 1e-6:

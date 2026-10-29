@@ -69,6 +69,8 @@ def tracks_dir():
         write_raceline(d, 'tiny', xy, psi, 5.0, 1.0)
         xy, psi = hairpin(10.0, 1.0, 0.1)
         write_raceline(d, 'hairpin', xy, psi, 0.0, 3.0)
+        xy, psi = hairpin(10.0, 3.0, 0.1)   # corners of radius 1.5 m
+        write_raceline(d, 'stadium', xy, psi, 0.0, 6.0)
         xy, psi = circle(4.0, 200)
         clean = dict(method='mintime', clean=True, notes=[], changed={}, solver='IPOPT: Optimal Solution Found')
         write_raceline(d, 'clean', xy, psi, 0.25, 4.0, clean)
@@ -202,6 +204,27 @@ def test_hairpin_keeps_its_leg(run):
     assert driver.drive(5.0, 0.55, 0.0).steering_angle < 0.0  # first pose: heading picks the leg
     driver.drive(5.0, 0.0, 0.0)
     assert driver.drive(5.1, 0.55, 0.0).steering_angle < 0.0  # drifted off: stays on the leg
+
+
+@pytest.mark.parametrize('track', ['straight', 'stadium'])
+def test_adaptive_lookahead(run, track):
+    # speed 3 m/s: lookahead 1.2 m. Adaptive (cut 0.1 m) caps it at sqrt(2 x 0.1 x 1.5) = 0.55 -> 0.6 m in the
+    # corner (radius 1.5 m) and about 0.85 m half a metre before it: the target is not as deep into the turn.
+    # With adaptive_lookahead_cut:=1.0 the cap (1.7 m + ...) is above 1.2 m: as off.
+    pose = (5.0, 0.3, 0.0) if track == 'straight' else (9.5, 0.0, 0.0)
+    drives = []
+    for args in ([], ['adaptive_lookahead:=true'], ['adaptive_lookahead:=true', 'adaptive_lookahead_cut:=1.0']):
+        driver, proc = run(track, *args)
+        drives.append(driver.drive(*pose))
+        out = stop(proc)   # one node at a time: all publish /drive
+        assert out.count('Traceback') == out.count('] KeyboardInterrupt'), out
+    off, on, loose = drives
+    assert off.speed == on.speed == loose.speed
+    assert loose.steering_angle == pytest.approx(off.steering_angle, abs=1e-6)
+    if track == 'straight':  # no curvature: unchanged
+        assert on.steering_angle == pytest.approx(off.steering_angle, abs=1e-6)
+    else:
+        assert 0.0 < on.steering_angle < off.steering_angle
 
 
 @pytest.mark.parametrize('bad', [dict(age=2.0), dict(frame='world'), dict(y=10.0)],

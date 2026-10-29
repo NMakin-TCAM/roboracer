@@ -5,7 +5,9 @@ finds the closest raceline waypoint, picks the first waypoint one lookahead ahea
 `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`]), steers on the arc
 through it and drives at the raceline speed scaled by `speed_scale`. The speed is taken at the target
 waypoint, not the closest one: the car brakes early into corners, but on corner exits it can exceed the
-profile at its own position near `speed_scale` 1.0. See `docs/pipeline.md` for where
+profile at its own position near `speed_scale` 1.0. With `adaptive_lookahead:=true` the lookahead is
+also capped by the curvature of the raceline near the car, so at speed it does not cut corners (off by
+default; see Adaptive lookahead below). See `docs/pipeline.md` for where
 it sits in the stack.
 
 `follow_the_gap_node` is a reactive alternative that needs no map: it steers toward the farthest point
@@ -23,6 +25,7 @@ clipped to `max_steering_angle` (default 0.524 rad, the value in `config/vehicle
 ros2 launch control pure_pursuit.launch.py track:=<name>
 ros2 launch control pure_pursuit.launch.py track:=<name> speed_scale:=0.3
 ros2 launch control race.launch.py track:=<name> avoid:=true   # + obstacle avoidance
+ros2 launch control race.launch.py track:=<name> speed_scale:=1.0 adaptive_lookahead:=true
 ```
 
 Localization (Cartographer, `/tracked_pose`) must be running for the default pose topic.
@@ -73,6 +76,11 @@ poses stop arriving, `fast_bridge` stops the car after 0.5 s without `/drive`.
 | `lookahead_time` | `0.4` | s; lookahead = `lookahead_time` * drive speed, clipped to [`lookahead_min`, `lookahead_distance`] |
 | `lookahead_min` | `0.6` | m, about twice the wheelbase |
 | `lookahead_distance` | `3.0` | m, maximum lookahead |
+| `adaptive_lookahead` | `false` | cap the lookahead by the curvature of the raceline near the car (below); off = the speed term only |
+| `adaptive_lookahead_cut` | `0.1` | m; corner cut allowed: on a curve of radius R the lookahead is at most sqrt(2 * cut * R) |
+| `adaptive_lookahead_min_time` | `0.25` | s; the capped lookahead is never below this * drive speed |
+| `adaptive_lookahead_slope` | `0.5` | m per m: the cap rises by this much per metre of distance from the curve (before and after it). Node parameter only (not a launch argument) |
+| `adaptive_lookahead_smooth` | `0.5` | m; the raceline's curvature is averaged over this length of arc. Node parameter only (not a launch argument) |
 | `search_window` | `2.0` | m; the closest point is searched this far along the line either side of the previous one |
 | `reacquire_distance` | `1.0` | m; farther than this from that point, the whole line is searched (points heading within 90 deg of the car) |
 | `max_pose_age` | `0.5` | s; an older pose gets a stop (same as `fast_bridge`'s `/drive` watchdog) |
@@ -84,6 +92,30 @@ poses stop arriving, `fast_bridge` stops the car after 0.5 s without `/drive`.
 
 The raceline is the TUM output format: `;` separated, `#` header
 `s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2`.
+
+### Adaptive lookahead
+
+Pure pursuit steers on the chord to its target, so on a curve of curvature kappa it settles inside the
+line, about lookahead^2 * kappa / 2 deep (in the sim about 0.6 of that), and at a corner entry its target is
+already in the turn while the car is still on the straight. The racelines pass 0.25-0.4 m from the walls,
+so at `speed_scale` 1.0 (lookahead 1-2.4 m) the car cut into the inside walls of Porto's and Berlin's
+corners. With `adaptive_lookahead:=true` (`control/lookahead.py`) each raceline point i gets a cap,
+precomputed once from the line's geometry:
+
+    cap_i = max(lookahead_min, min over points j of (sqrt(2 * cut / |kappa_j|) + slope * |arc distance i to j|))
+    lookahead = min(clip(lookahead_time * speed, lookahead_min, lookahead_distance), max(cap_closest, min_time * speed))
+
+so on a curve the cut is at most about `adaptive_lookahead_cut` while `min_time` * speed is below the cap;
+where the floor wins it is larger (4 m/s on a radius of 1 m: lookahead 1.0 m, cut about 0.5 m), which is
+the trade for enough preview at speed. The cap shrinks toward a curve (and grows back after it) by at
+most `slope` m per metre driven (no steps, no chatter), with curves found by arc length, so uneven point
+spacing and repeated points do not matter. On straights the cap is infinite and nothing changes; at `speed_scale` 0.5 the speed
+term is mostly below the cap already. `kappa` comes from the raceline's points (heading change per metre,
+averaged over `adaptive_lookahead_smooth` m), not the csv column, so it also works for hand-made lines.
+With `avoid:=true` the cap is still the raceline's (per raceline point, which `/local_path` keeps one to
+one), not the curvature of `/local_path`'s swerve around an obstacle.
+Sim (MCL, 2026-10-29): Porto at 1.0, 0 collisions in 23 laps of 7.00 s (off: 25 collisions in 180 s);
+Berlin at 1.0, 0 collisions, 12.38 s laps (off: 30 collisions); lap times at 0.5 unchanged.
 
 ## Wall follower
 
