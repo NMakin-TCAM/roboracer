@@ -97,9 +97,16 @@ swapped in without touching anything downstream.
 on a baseline line and one running our stack, so detection and overtaking can be tested at all.
 Needs a second bridge instance and namespacing throughout.
 
-**5. A baseline local planner.** Something simple that avoids a tracked obstacle by deviating in
-`d` and rejoining the raceline. Not competitive, but it closes the loop end to end and gives a
-reference for whether anything fancier is actually better.
+**5. A baseline local planner.** Done, see `ws/src/planning/planning/spliner.py`. Reactive
+overtaking: pick a side from the real track bounds at the obstacle, spline through an apex that
+clears it, rejoin the raceline. Publishes `f1t_msgs/OTWpntArray` on
+`/planner/avoidance/otwpnts`, matching ForzaETH's topic and message exactly so their planners
+drop into the same socket.
+
+It assumes an obstacle stays where it was last seen. That is wrong for a moving opponent, and it
+is precisely the assumption Predictive Spliner replaces with a GP over the opponent's past laps.
+So this is both the floor the comparison measures against and most of the scaffolding prediction
+plugs into.
 
 **6. FSDP, or the parts of it worth having.** Only meaningful once 1 through 5 exist.
 
