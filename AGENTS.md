@@ -127,3 +127,15 @@ ROS_DOMAIN_ID=42 python3 -m pytest src/control/test/test_lookahead.py src/planni
 - Preserve pure pursuit's pose-loss watchdog, repeated stop burst, shutdown stops, and bridge command timeout. A single zero command can be insufficient because of the adapter speed ramp.
 - New driving paths must stop on stale/invalid required inputs and receive regression tests for that behavior. Do not weaken thresholds, disable adaptive lookahead, or increase speed defaults merely to pass a demonstration.
 - Existing checks are coarse: Cartographer can extrapolate fresh-stamped poses during a stall, and pure pursuit has no direct scan-based emergency stop. Do not represent current checks as complete collision protection.
+
+## Context efficiency
+
+- Start with AGENTS.md, the user-named files, and directly relevant neighboring code. Expand scope only when necessary.
+- Prefer targeted `rg` searches and bounded file reads over repository-wide dumps.
+- Exclude generated directories from routine searches: ws/build/, ws/install/, ws/log/, .idea/, __pycache__/, and .pytest_cache/.
+- Treat ws/tracks/ as experiment data. Read only explicitly relevant track artifacts; never modify validated tracks without approval.
+- When debugging a specific run, inspect its named log and report files rather than all historical runs.
+- Do not read large .pbstream, .posegraph, .data, .pgm, or image files as text; use appropriate parsers or metadata inspection when needed.
+- Avoid repeating unchanged repository scans or copying large tool outputs into the conversation. Summarize findings and cite file paths and relevant functions.
+- Run focused tests first, then expand to broader suites when the change warrants it.
+- These are default search and context rules, not restrictions on accessing files explicitly needed for an assigned task.
