@@ -1,5 +1,8 @@
 # Hairpin slowdown and wrong-way steering investigation
 
+Historical investigation and implementation record. Current conclusions, driving
+results and regression checks are consolidated in [VALIDATION.md](VALIDATION.md).
+
 The recorded failures explain the observed behavior: a timestamp step corrupts the
 estimated state, MAP briefly stops for stale data, then resumes with a fresh timestamp
 but an incorrect heading and wheel speed. It commands extreme steering in the wrong

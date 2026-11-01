@@ -1,5 +1,8 @@
 # Hairpin timing and recovery fix
 
+Historical investigation and implementation record. Current conclusions, driving
+results and regression checks are consolidated in [VALIDATION.md](VALIDATION.md).
+
 Goal: eliminate the recorded failure in which a host-clock step caused false low wheel
 speed and a large localization heading error, followed by wrong-way full-lock steering.
 See [hairpin_failure.md](hairpin_failure.md) for the recorded evidence and offline queries.
@@ -13,8 +16,8 @@ See [hairpin_failure.md](hairpin_failure.md) for the recorded evidence and offli
    focused checks; full checks and live results are recorded below when available.
 5. Run four identical MAP repeats at speed scale 0.5 and steering limit 3.2 rad/s. Target:
    eight completed laps, no collision or timing-induced wrong-way steering, and no ROS
-   clock steps even while host wall time continues to step. Live validation pending
-   simulator reconnection after the bridge restart.
+   clock steps even while host wall time continues to step. Four ordinary repeats
+   subsequently completed; no host-clock step occurred. See [validation](VALIDATION.md).
 
 ## Shared clock
 

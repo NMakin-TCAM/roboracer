@@ -29,6 +29,7 @@ def generate_launch_description():
         DeclareLaunchArgument('publish_restricted_topics', default_value='true'),
         # nothing in the stack uses the camera, and decoding it every frame slows the sim loop
         DeclareLaunchArgument('publish_camera', default_value='false'),
+        DeclareLaunchArgument('publish_wheel_slip', default_value='false'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='shared monotonic transport clock; false uses host wall time'),
         DeclareLaunchArgument('port', default_value='4567'),   # the sim's Connect port
@@ -38,6 +39,7 @@ def generate_launch_description():
                           'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
                           'publish_clock': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
                           'publish_camera': LaunchConfiguration('publish_camera'),
+                          'publish_wheel_slip': ParameterValue(LaunchConfiguration('publish_wheel_slip'), value_type=bool),
                           'frame_trace_path': ParameterValue(LaunchConfiguration('frame_trace_path'), value_type=str),
                           'port': LaunchConfiguration('port')}],
              on_exit=Shutdown(reason='fast_bridge exited')),

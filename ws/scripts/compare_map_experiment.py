@@ -48,13 +48,14 @@ def compare(directory, earlier=()):
     for trial in manifest['trials']:
         report = trial.get('report_summary', {})
         tracking = report.get('tracking_error', {})
+        slip_source = report.get('slip_source', 'kinematic')
         front = report.get('metrics', {}).get('front_lateral_peak_ratio', {})
         counts = report.get('crossing_counts', {}).get('front_lateral_peak_ratio', {})
         clock_events = trial.get('clock_discontinuities', [])
         comparable = (trial['status'] == 'completed' and
                       trial.get('report_status') in ('second_geometric_lap', 'native_flying_lap') and not clock_events)
         rows.append(dict(trial=trial['index'], rate_radps=trial['steering_rate_limit_radps'],
-            status=trial['status'], comparable=comparable,
+            status=trial['status'], comparable=comparable, slip_source=slip_source,
             flying_lap_mean_s=trial.get('mean_flying_lap_s'),
             tracking_rms_m=tracking.get('distance_weighted_rms_m'),
             tracking_p95_m=tracking.get('p95_abs_m'),
@@ -69,6 +70,12 @@ def compare(directory, earlier=()):
             clock_discontinuities=len(clock_events),
             host_wall_clock_steps=len(trial['host_wall_clock_steps']) if 'host_wall_clock_steps' in trial else None,
             report_path=str(Path(Path(trial['trial_directory']).name)/'report'/'report.html')))
+    slip_sources = sorted({r['slip_source'] for r in rows if r['report_status']})
+    if len(slip_sources) > 1:
+        raise ValueError('Cannot pool Unity and kinematic slip metrics; regenerate with a consistent --slip-source')
+    for prior in supplementary_overlays:
+        if slip_sources and prior['report_summary'].get('slip_source', 'kinematic') != slip_sources[0]:
+            raise ValueError('Earlier slip source differs; regenerate with a consistent --slip-source')
     groups = []
     for rate in sorted({r['rate_radps'] for r in rows}, reverse=True):
         eligible = [r for r in rows if r['rate_radps'] == rate and r['comparable'] and r['flying_lap_mean_s'] is not None]
@@ -79,7 +86,7 @@ def compare(directory, earlier=()):
             median_trial_tracking_rms_m=statistics.median(r['tracking_rms_m'] for r in eligible if r['tracking_rms_m'] is not None)
                 if any(r['tracking_rms_m'] is not None for r in eligible) else None))
     result = dict(status=manifest.get('status', 'not_started'), fixed_input_sha256=manifest.get('fixed_input_sha256'),
-                  speed_scale=manifest['speed_scale'], trials=rows, groups=groups)
+                  speed_scale=manifest['speed_scale'], slip_sources=slip_sources, trials=rows, groups=groups)
     repeat_stats = None
     if repeatability:
         measured = [r for r in rows if r['status'] == 'completed' and r['report_status'] == 'native_flying_lap']
@@ -126,7 +133,7 @@ def compare(directory, earlier=()):
         '|---|---:|---|---|---:|---:|---|---:|---:|---:|---|']
     table='<table><tr><th>Trial</th><th>Rate (rad/s)</th><th>Status</th><th>Report window</th><th>ROS clock jumps</th><th>Host wall steps</th><th>Eligible</th><th>Flying lap mean (s)</th><th>Tracking RMS (m)</th><th>Tracking P95 (m)</th><th>Front brief / sustained</th></tr>'
     for row in rows:
-        window = 'native flying lap' if row['report_status'] == 'native_flying_lap' else 'fallback / not flying-lap comparable'
+        window = ('native flying lap' if row['report_status'] == 'native_flying_lap' else 'fallback / not flying-lap comparable')+' ('+row['slip_source']+' slip)'
         cells=[str(row['trial']),str(row['rate_radps']),row['status'],window,str(row['clock_discontinuities']),
                str(row['host_wall_clock_steps']) if row['host_wall_clock_steps'] is not None else 'unrecorded',
                'yes' if row['comparable'] else 'no',fmt(row['flying_lap_mean_s']),
@@ -218,7 +225,7 @@ def compare(directory, earlier=()):
                 axes[1].axhline(1, color='red', linestyle='--', label='Documented peak coordinate')
                 axes[0].axhline(0, color='.5', linewidth=.7)
                 axes[0].legend(); axes[-1].set_xlabel('Mapped circuit progress since native lap start (%)')
-                fig.suptitle(f'{plotted} identical-configuration completed flying laps; timing flags retained')
+                fig.suptitle(f'{plotted} completed flying laps; slip source: {slip_sources}; timing flags retained')
                 fig.tight_layout(rect=(0,0,1,.97)); fig.savefig(directory/'repeatability_profiles.png', dpi=150)
                 images += '<h2>Flying-lap overlays</h2><img style="max-width:100%" src="data:image/png;base64,'+base64.b64encode((directory/'repeatability_profiles.png').read_bytes()).decode()+'">'
                 text += ['', '![Flying-lap overlays](repeatability_profiles.png)']

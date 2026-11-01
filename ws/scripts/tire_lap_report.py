@@ -151,7 +151,7 @@ def build_rows(gt, enc, steering, commands, cfg):
         if not moving: flags.append('low_speed_or_invalid_motion')
         if dt > cfg.frame_gap_warning: flags.append('long_frame_interval')
         if pair_age > cfg.max_steering_pair_age: flags.append('steering_unpaired')
-        row = dict(stamp_ns=tb, received_ns=int(b[0]), segment=segment, x_m=float(b[1]), y_m=float(b[2]),
+        row = dict(interval_start_stamp_ns=ta, stamp_ns=tb, received_ns=int(b[0]), segment=segment, x_m=float(b[1]), y_m=float(b[2]),
                    yaw_rad=float(b[3]), distance_step_m=distance if geometry_ok else 0.,
                    dt_wall_s=dt, vx_mps=float(vx), vy_mps=float(vy), yaw_rate_rps=float(rate),
                    steering_rad=float(steer) if np.isfinite(steer) else None,
@@ -325,9 +325,9 @@ def select_native_lap(rows, counter_samples, number):
         complete_laps_available=max(0, len(crossings)-1))
 
 
-def summarize(rows):
+def summarize(rows, metrics=METRICS):
     summary = {}
-    for metric in METRICS:
+    for metric in metrics:
         rr = [r for r in rows if r[metric] is not None and np.isfinite(r[metric])]
         distance = sum(r['distance_step_m'] for r in rr)
         values = [r[metric] for r in rr]
@@ -368,14 +368,14 @@ def tracking_summary(rows):
         p95_abs_heading_deg=float(np.percentile(np.abs(np.degrees([r['heading_error_rad'] for r in valid])), 95)))
 
 
-def crossing_events(rows, cfg):
+def crossing_events(rows, cfg, metrics=METRICS):
     """Classify sampled threshold runs, without bridging missing data or frame gaps.
 
     Durations use wall time, not verified physics time. Classification is a
     persistence heuristic and cannot establish sustained physical tire saturation.
     """
     events = []
-    for metric in METRICS:
+    for metric in metrics:
         key = metric.replace('_peak_ratio', '_crossing')
         run = []
 
@@ -416,15 +416,41 @@ def crossing_events(rows, cfg):
     return events
 
 
+def clean_unity_rows(rows):
+    """Remove estimate-only fields and quality flags from a native-only export."""
+    rejected = {'lateral_valid', 'longitudinal_valid', 'velocity_reference_x_inferred_m', 'velocity_direction_residual_rad'}
+    rejected.update(w+suffix for w in WHEELS for suffix in ('_alpha_rad', '_lateral_slip', '_longitudinal_slip'))
+    estimate_flags = {'steering_unpaired', 'velocity_reference_inconsistent', 'lateral_unavailable', 'longitudinal_unavailable', 'encoders_unpaired'}
+    result = []
+    for row in rows:
+        clean = {k:v for k,v in row.items() if k not in rejected and not k.startswith('kinematic_') and '_native_mean_' not in k}
+        clean['flags'] = ';'.join(f for f in row['flags'].split(';') if f and f not in estimate_flags)
+        result.append(clean)
+    return result
+
+
 def render(rows, output, report):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.colors import BoundaryNorm, ListedColormap
     distance = np.cumsum([r['distance_step_m'] for r in rows])
-    labels = ('Front lateral: max left/right', 'Rear lateral: max left/right', 'Rear longitudinal: max left/right')
-    fig, axes = plt.subplots(9, 1, figsize=(12, 20), sharex=True)
-    for ax, metric, label in zip(axes, METRICS, labels):
+    metrics = report.get('metric_names', METRICS)
+    axle_names = {
+        'front_lateral_peak_ratio': ('Front lateral', 'front-left / front-right tires'),
+        'front_longitudinal_peak_ratio': ('Front longitudinal', 'front-left / front-right tires'),
+        'rear_lateral_peak_ratio': ('Rear lateral', 'rear-left / rear-right tires'),
+        'rear_longitudinal_peak_ratio': ('Rear longitudinal', 'rear-left / rear-right tires'),
+    }
+    labels = tuple(f'{axle_names[m][0]} |slip| / peak slip (max of {axle_names[m][1]})'
+                   if m in axle_names else m.replace('_peak_ratio', '').replace('_', ' ').capitalize()
+                   for m in metrics)
+    source = report.get('slip_source', 'kinematic')
+    title = 'Unity wheel slip' if source == 'unity' else 'Kinematic slip estimates'
+    description = ('Primary profiles, maps, peak ratios and crossing events use instantaneous Unity WheelHit telemetry. Both wheels must be grounded; missing native readings remain unavailable.' if source == 'unity' else 'Primary profiles, maps, peak ratios and crossing events use kinematic estimates; native telemetry is unavailable or explicitly not selected.')
+    description += ' Slip ratios are not tire forces or percentages of available grip.'
+    fig, axes = plt.subplots(len(metrics)+6, 1, figsize=(12, 2.3*(len(metrics)+6)), sharex=True)
+    for ax, metric, label in zip(axes, metrics, labels):
         values = [r[metric] if r[metric] is not None else np.nan for r in rows]
         ax.plot(distance, values, linewidth=1, label=label)
         ax.axhline(1, color='red', linestyle='--', label='Documented peak-slip coordinate')
@@ -444,51 +470,68 @@ def render(rows, output, report):
             seen.add(kind)
         ax.legend(fontsize=8)
     numeric = lambda key: [r[key] if r[key] is not None else np.nan for r in rows]
-    axes[3].plot(distance, np.degrees(numeric('steering_rad')), label='Steering feedback (degrees)')
-    axes[3].axhline(0, color='.6', linewidth=.7); axes[3].legend(fontsize=8)
-    axes[4].plot(distance, numeric('steering_rate_wall_dps'), label='Steering feedback rate (degrees / wall second)')
-    axes[4].axhline(0, color='.6', linewidth=.7); axes[4].legend(fontsize=8)
-    axes[5].plot(distance, numeric('signed_tracking_error_m'), label='Signed distance to raceline (m; left positive)')
-    axes[5].axhline(0, color='.6', linewidth=.7)
-    axes[5].legend(fontsize=8)
-    axes[6].plot(distance, np.degrees(numeric('heading_error_rad')), label='Heading relative to raceline tangent (degrees)')
-    axes[6].axhline(0, color='.6', linewidth=.7); axes[6].legend(fontsize=8)
-    axes[7].plot(distance, [r['vx_mps'] for r in rows], label='Reported forward speed (m/s)')
-    axes[7].legend(fontsize=8)
-    axes[8].plot(distance, [1000*r['dt_wall_s'] for r in rows], label='ROS-stamp interval (ms)')
-    axes[8].axhline(report['settings']['frame_gap_warning']*1000, linestyle=':', color='orange', label='Long-interval warning')
-    axes[8].legend(fontsize=8); axes[8].set_xlabel('Distance traveled within selection (m)')
+    axes[len(metrics)+0].plot(distance, np.degrees(numeric('steering_rad')), label='Steering feedback (degrees)')
+    axes[len(metrics)+0].axhline(0, color='.6', linewidth=.7); axes[len(metrics)+0].legend(fontsize=8)
+    axes[len(metrics)+1].plot(distance, numeric('steering_rate_wall_dps'), label='Steering feedback rate (degrees / wall second)')
+    axes[len(metrics)+1].axhline(0, color='.6', linewidth=.7); axes[len(metrics)+1].legend(fontsize=8)
+    axes[len(metrics)+2].plot(distance, numeric('signed_tracking_error_m'), label='Signed distance to raceline (m; left positive)')
+    axes[len(metrics)+2].axhline(0, color='.6', linewidth=.7)
+    axes[len(metrics)+2].legend(fontsize=8)
+    axes[len(metrics)+3].plot(distance, np.degrees(numeric('heading_error_rad')), label='Heading relative to raceline tangent (degrees)')
+    axes[len(metrics)+3].axhline(0, color='.6', linewidth=.7); axes[len(metrics)+3].legend(fontsize=8)
+    axes[len(metrics)+4].plot(distance, [r['vx_mps'] for r in rows], label='Reported forward speed (m/s)')
+    axes[len(metrics)+4].legend(fontsize=8)
+    axes[len(metrics)+5].plot(distance, [1000*r['dt_wall_s'] for r in rows], label='ROS-stamp interval (ms)')
+    axes[len(metrics)+5].axhline(report['settings']['frame_gap_warning']*1000, linestyle=':', color='orange', label='Long-interval warning')
+    axes[len(metrics)+5].legend(fontsize=8); axes[len(metrics)+5].set_xlabel('Distance traveled within selection (m)')
     for ax in axes: ax.grid(alpha=.25)
-    fig.suptitle('Estimated tire operating region — not force utilization')
+    fig.suptitle(title+' — not force utilization')
     fig.tight_layout(rect=(0, 0, 1, .97)); fig.savefig(output/'lap_profiles.png', dpi=150); plt.close(fig)
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12)) if len(metrics) == 4 else plt.subplots(1, len(metrics), figsize=(15, 5))
+    axes = np.asarray(axes).ravel()
     # A discontinuous palette makes crossing the documented peak unmistakable.
     boundaries = [0., .25, .5, .75, 1., 1.25, 1.5, 1.75, 2.]
     colors = ListedColormap(['#e0f3ff', '#9acbed', '#4a98cf', '#155a96',
                              '#ffb347', '#f47926', '#d83a25', '#920d20'])
     norm = BoundaryNorm(boundaries, colors.N, clip=True)
-    for ax, metric, label in zip(axes, METRICS, labels):
+    for ax, metric, label in zip(axes, metrics, labels):
         ax.plot([r['x_m'] for r in rows], [r['y_m'] for r in rows], color='.75', linewidth=3, zorder=1)
-        rr = [r for r in rows if r[metric] is not None]
+        rr = sorted((r for r in rows if r[metric] is not None), key=lambda r: r[metric])
         points = ax.scatter([r['x_m'] for r in rr], [r['y_m'] for r in rr],
-                            c=[r[metric] for r in rr], norm=norm, cmap=colors, s=16, zorder=2)
+                            c=[r[metric] for r in rr], norm=norm, cmap=colors, s=12, alpha=.75, zorder=2)
+        peaks = [r for r in rr if r[metric] >= 1.]
+        if peaks:
+            ax.scatter([r['x_m'] for r in peaks], [r['y_m'] for r in peaks],
+                       c=[r[metric] for r in peaks], norm=norm, cmap=colors, s=65,
+                       edgecolors='black', linewidths=.8, zorder=4, label='At/above peak')
+        for event_no, event in enumerate(report['crossing_events'], 1):
+            if event['metric'] != metric: continue
+            peak = rows[event['peak_index']]
+            ax.scatter([peak['x_m']], [peak['y_m']], s=110, marker='D', facecolors='none', edgecolors='black', linewidths=1.4, zorder=5)
+            ymin, ymax = ax.get_ylim()
+            xmin, xmax = ax.get_xlim()
+            dx = -42 if peak['x_m'] > (xmin+xmax)/2 else 22
+            dy = -28 if peak['y_m'] > ymin+.8*(ymax-ymin) else 16+(event_no%3)*12
+            ax.annotate('E'+str(event_no), (peak['x_m'], peak['y_m']), xytext=(dx, dy), textcoords='offset points',
+                        fontsize=8, fontweight='bold', zorder=6, bbox=dict(boxstyle='round,pad=.2',fc='white',ec='.5',alpha=.9),
+                        arrowprops=dict(arrowstyle='-',color='black',lw=.8))
+        if peaks: ax.legend(fontsize=8,loc='lower left')
         bar = fig.colorbar(points, ax=ax, ticks=[0, .5, 1, 1.5, 2],
                            label='|slip| / peak (colors capped at 2)')
         bar.ax.set_yticklabels(['0', '0.5', '1 — peak', '1.5', '2+'])
         bar.ax.axhline(1., color='black', linewidth=2)
         ax.set_title(label); ax.set_aspect('equal'); ax.set_xlabel('World x (m)'); ax.set_ylabel('World y (m)')
     fig.tight_layout(); fig.savefig(output/'track_slip.png', dpi=150); plt.close(fig)
-    lines = ['# Estimated tire operating region', '',
-             '**These are kinematic slip estimates, not tire forces or percentages of available grip.**', '',
+    lines = ['# '+title, '', description, '',
              f"Selection: {report['lap']}. Distance: {distance[-1]:.2f} m.", '',
-             '| Estimate | Valid intervals | Median ratio | P95 ratio | Distance at/above peak |',
+             '| Slip metric | Valid samples | Median ratio | P95 ratio | Distance at/above peak |',
              '|---|---:|---:|---:|---:|']
     def fmt(value): return 'unavailable' if value is None else f'{value:.3f}'
     tracking = report['tracking_error']
     tracking_text = (f"Raceline tracking: distance-weighted RMS {fmt(tracking['distance_weighted_rms_m'])} m; "
                      f"P95 absolute {fmt(tracking['p95_abs_m'])} m; maximum {fmt(tracking['maximum_abs_m'])} m; "
                      f"P95 absolute heading error {fmt(tracking['p95_abs_heading_deg'])} degrees.")
-    for metric, label in zip(METRICS, labels):
+    for metric, label in zip(metrics, labels):
         v = report['metrics'][metric]
         lines.append(f"| {label} | {v['valid_intervals']} | {fmt(v['median'])} | {fmt(v['p95'])} | {fmt(v['beyond_peak_distance_pct'])}% |")
     lines += ['', tracking_text, '']
@@ -501,8 +544,8 @@ def render(rows, output, report):
               '|---|---|---:|---:|---:|---:|']
     event_table = '<h2>Threshold-crossing events</h2><p>'+html.escape(event_description)+'</p>'
     event_table += '<table><tr><th>Metric</th><th>Classification</th><th>Intervals</th><th>Wall duration (ms)</th><th>Peak ratio</th><th>Max steering rate (deg/wall s)</th></tr>'
-    for event in report['crossing_events']:
-        name = event['metric'].replace('_peak_ratio', '').replace('_', ' ')
+    for event_no, event in enumerate(report['crossing_events'], 1):
+        name = 'E'+str(event_no)+' — '+ event['metric'].replace('_peak_ratio', '').replace('_', ' ')
         cells = [name, event['classification'], str(event['intervals']),
                  fmt(event['duration_wall_s']*1000), fmt(event['peak_ratio']),
                  fmt(event['max_abs_steering_rate_wall_dps'])]
@@ -513,8 +556,8 @@ def render(rows, output, report):
         event_table += '<tr><td colspan="6">No threshold crossings in the selected data.</td></tr>'
     event_table += '</table>'
     lines += ['', '## Assumptions and limitations', '']+[f'- {w}' for w in report['warnings']]
-    lines += ['', '## Velocity reference consistency', '',
-              json.dumps(report['velocity_reference_diagnostics'], indent=2)]
+    if not report.get('unity_only'):
+        lines += ['', '## Velocity reference consistency', '', json.dumps(report['velocity_reference_diagnostics'], indent=2)]
     lines += ['', '## Regenerate', '', '```bash', report['regenerate_command'], '```', '',
               f'[Documented threshold source]({SOURCE})', '',
               '![Lap profiles](lap_profiles.png)', '', '![Track slip](track_slip.png)']
@@ -523,22 +566,39 @@ def render(rows, output, report):
     images = ''.join('<h2>'+title+'</h2><img style="max-width:100%" src="data:image/png;base64,'+
                      base64.b64encode((output/file).read_bytes()).decode()+'">'
                      for title, file in [('Lap profiles', 'lap_profiles.png'), ('Track maps', 'track_slip.png')])
-    table = '<table><tr><th>Estimate</th><th>Valid intervals</th><th>Median ratio</th><th>P95 ratio</th><th>Distance at/above peak</th></tr>'
-    for metric, label in zip(METRICS, labels):
+    table = '<table><tr><th>Slip metric</th><th>Valid samples</th><th>Median ratio</th><th>P95 ratio</th><th>Distance at/above peak</th></tr>'
+    for metric, label in zip(metrics, labels):
         v = report['metrics'][metric]
         table += f"<tr><td>{label}</td><td>{v['valid_intervals']}</td><td>{fmt(v['median'])}</td><td>{fmt(v['p95'])}</td><td>{fmt(v['beyond_peak_distance_pct'])}%</td></tr>"
     table += '</table>'
+    if not report.get('unity_only'):
+        native = report.get('native_slip_comparison', {})
+        native_html = '<h2>Native Unity wheel slip versus estimates</h2>'
+        if native.get('available_endpoint_frames'):
+            native_html += '<p>Exact source-stamp pairing; native values averaged over both interval endpoints. Airborne wheels are unavailable. Unity WheelHit and kinematic slip definitions and signs may differ; no fitted scaling is applied.</p>'
+            native_html += '<table><tr><th>Wheel / axis</th><th>Paired intervals</th><th>Estimate |slip| P95</th><th>Unity |slip| P95</th><th>Magnitude RMSE</th><th>Magnitude correlation</th><th>Estimate / Unity mean intervals above peak</th><th>Unity endpoint max</th><th>Unity endpoint samples above peak</th></tr>'
+            for key, m in native['metrics'].items():
+                native_html += '<tr><td>'+html.escape(key.replace('_', ' '))+'</td><td>'+str(m['paired_intervals'])+'</td>'
+                native_html += ''.join('<td>'+fmt(m.get(k))+'</td>' for k in ('estimate_abs_p95', 'native_abs_p95', 'magnitude_rmse', 'magnitude_correlation'))
+                native_html += '<td>'+str(m.get('estimate_above_peak_intervals', 0))+' / '+str(m.get('native_above_peak_intervals', 0))+'</td><td>'+fmt(m.get('native_endpoint_abs_max'))+'</td><td>'+str(m.get('native_endpoint_above_peak_samples', 0))+'</td></tr>'
+            native_html += '</table>'
+            native_html += '<img style="max-width:100%" src="data:image/png;base64,'+base64.b64encode((output/'native_slip_comparison.png').read_bytes()).decode()+'">'
+        else:
+            native_html += '<p>No native slip telemetry in this selection. Older bags cannot supply it retrospectively.</p>'
+        with open(output/'report.md', 'a') as stream:
+            stream.write('\n## Native Unity wheel slip versus estimates\n\n'+json.dumps(native, indent=2)+'\n')
+        table += native_html
     (output/'report.html').write_text('<!doctype html><meta charset="utf-8"><title>Tire operating region</title>'
         '<style>body{font-family:system-ui;max-width:1400px;margin:30px auto;padding:15px;color:#18232d}'
         'table{border-collapse:collapse}th,td{padding:10px;border-bottom:1px solid #ddd;text-align:left}'
         'pre{white-space:pre-wrap;background:#f2f4f5;padding:15px}li{margin:8px 0}</style>'
-        '<h1>Estimated tire operating region</h1>'
-        '<p><strong>Kinematic slip estimates, not tire forces or percentages of available grip.</strong></p>'
+        '<h1>'+html.escape(title)+'</h1>'
+        '<p><strong>'+html.escape(description)+'</strong></p>'+
         f"<p>Selection: {html.escape(str(report['lap']))}. Distance: {distance[-1]:.2f} m.</p>"+
         '<p>'+html.escape(tracking_text)+'</p>'+table+event_table+images+'<h2>Assumptions and limitations</h2><ul>'+
         ''.join('<li>'+html.escape(w)+'</li>' for w in report['warnings'])+'</ul>'+
-        '<h2>Velocity reference consistency</h2><pre>'+html.escape(json.dumps(report['velocity_reference_diagnostics'], indent=2))+
-        '</pre><h2>Regenerate</h2><pre>'+html.escape(report['regenerate_command'])+'</pre>'+
+        ('' if report.get('unity_only') else '<h2>Velocity reference consistency</h2><pre>'+html.escape(json.dumps(report['velocity_reference_diagnostics'], indent=2))+'</pre>')+
+        '<h2>Regenerate</h2><pre>'+html.escape(report['regenerate_command'])+'</pre>'+
         '<p><a href="'+SOURCE+'">Documented threshold source</a></p></body>')
 
 
@@ -551,8 +611,14 @@ def main():
     ap.add_argument('--track-dir', required=True, help='contains raceline.csv and map_to_world.yaml')
     ap.add_argument('--output', required=True, help='directory for regenerated report artifacts')
     ap.add_argument('--lap', default='auto', help='auto/integer: geometric circuit; native:2: second native increment (flying lap); all: entire recording')
+    ap.add_argument('--unity-only', action='store_true', help='Require Unity telemetry; omit estimated-slip comparisons and diagnostics')
+    ap.add_argument('--slip-source', choices=('auto', 'unity', 'kinematic'), default='auto',
+                    help='auto prefers Unity telemetry for the whole selection; no per-sample fallback')
     ap.add_argument('--settings', help='JSON overrides for Settings; saved in the report')
     args = ap.parse_args()
+    if args.unity_only:
+        if args.slip_source == 'kinematic': ap.error('--unity-only conflicts with --slip-source kinematic')
+        args.slip_source = 'unity'
     native = args.lap.startswith('native:')
     if native:
         if not args.lap[7:].isdigit() or int(args.lap[7:]) < 2:
@@ -566,6 +632,8 @@ def main():
     if int(cfg.sustained_crossing_min_intervals) != cfg.sustained_crossing_min_intervals:
         ap.error('sustained_crossing_min_intervals must be an integer')
     rows = build_rows(*read_bag(args.bag), cfg)
+    import wheel_slip_comparison as native_slip
+    native_slip.attach(rows, native_slip.read_native(args.bag))
     track_dir = Path(args.track_dir)
     path = np.loadtxt(track_dir/'raceline.csv', delimiter=';', comments='#', ndmin=2)
     if len(path) < 3: ap.error('raceline needs three or more points')
@@ -602,21 +670,47 @@ def main():
     if max((r['track_distance_m'] for r in selected if r['track_distance_m'] is not None), default=0) > 1.:
         warnings.append('Some samples are over 1 m from the supplied raceline: verify track/frame alignment.')
     warnings.append('Crossing durations and steering rates use wall time, not verified physics time. Brief or sustained classifications do not establish physical tire saturation.')
-    events = crossing_events(selected, cfg)
+    try:
+        slip_source = native_slip.select_primary(selected, cfg, args.slip_source)
+    except ValueError as exc:
+        ap.error(str(exc))
+    metrics = (('front_lateral_peak_ratio', 'front_longitudinal_peak_ratio',
+                'rear_lateral_peak_ratio', 'rear_longitudinal_peak_ratio')
+               if slip_source == 'unity' else METRICS)
+    if slip_source == 'unity':
+        warnings = [w for w in warnings if not w.startswith('Front longitudinal slip is unavailable')]
+        warnings.append('Kinematic assumptions apply to the comparison section only. Primary slip uses instantaneous Unity WheelHit endpoints without averaging. Distances/durations of crossings are sampled exposure approximations, not exact peak durations.')
+    events = crossing_events(selected, cfg, metrics)
     report = dict(bag=str(Path(args.bag).resolve()), track_dir=str(track_dir.resolve()),
                   lap=lap, track_length_m=length, selected_intervals=len(selected),
                   selected_distance_m=sum(r['distance_step_m'] for r in selected),
                   long_frame_intervals=sum('long_frame_interval' in r['flags'] for r in selected),
                   start_stamp_ns=selected[0]['stamp_ns'], end_stamp_ns=selected[-1]['stamp_ns'],
-                  settings=asdict(cfg), threshold_source=SOURCE, warnings=warnings,
+                  settings=asdict(cfg), unity_only=args.unity_only, slip_source=slip_source, metric_names=metrics, threshold_source=SOURCE, warnings=warnings,
                   quality_flag_counts={flag: sum(flag in r['flags'].split(';') for r in selected)
                                        for flag in sorted({f for r in selected for f in r['flags'].split(';') if f})},
                   velocity_reference_diagnostics=reference_diagnostics(selected),
                   tracking_error=tracking_summary(selected),
                   crossing_events=events,
                   crossing_counts={metric: {kind: sum(e['metric'] == metric and e['classification'] == kind for e in events)
-                                            for kind in ('brief', 'sustained', 'timing_uncertain')} for metric in METRICS},
-                  metrics=summarize(selected), regenerate_command=shlex.join(['python3', *sys.argv]))
+                                            for kind in ('brief', 'sustained', 'timing_uncertain')} for metric in metrics},
+                  metrics=summarize(selected, metrics), regenerate_command=shlex.join(['python3', *sys.argv]))
+    if not args.unity_only:
+        report['native_slip_comparison'] = native_slip.summary(selected, cfg.lateral_peak, cfg.longitudinal_peak)
+        if report['native_slip_comparison']['available_endpoint_frames']:
+            native_slip.render(selected, output, report['native_slip_comparison'])
+    else:
+        report.pop('velocity_reference_diagnostics', None)
+        report['warnings'] = [
+            'Unity WheelHit slip is simulator contact telemetry; slip ratios do not measure tire-force utilization.',
+            'Configured peak coordinates: lateral '+str(cfg.lateral_peak)+', longitudinal '+str(cfg.longitudinal_peak)+'. Serialized scene values were inspected separately; runtime overrides are not measured here.',
+            'Instantaneous endpoint slip is used. Both wheels must be grounded for an axle-level ratio. Missing native readings remain unavailable.',
+            'Distance fractions and crossing durations approximate sampled exposure. Shorter peaks between frames can be missed; timing-uncertain events are flagged.',
+            'Lap boundaries come from native counter receipt times, with approximately one frame uncertainty. Ground-truth pose supplies the track projection and tracking error.',
+            'Sustained crossings are a persistence heuristic, not proof of physical saturation.',
+        ]
+        selected = clean_unity_rows(selected)
+        report['quality_flag_counts'] = {f: sum(f in r['flags'].split(';') for r in selected) for f in sorted({f for r in selected for f in r['flags'].split(';') if f})}
     with open(output/'samples.csv', 'w', newline='') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(selected[0])); writer.writeheader(); writer.writerows(selected)
     with open(output/'events.csv', 'w', newline='') as stream:

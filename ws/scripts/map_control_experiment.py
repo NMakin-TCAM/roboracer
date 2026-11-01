@@ -163,7 +163,7 @@ def main():
                 topics = ['/ground_truth/odom', '/odom', '/localized_pose', '/drive', '/sensors/imu/raw']
                 topics += ['/autodrive/roboracer_1/'+name for name in
                            ('left_encoder', 'right_encoder', 'steering', 'throttle',
-                            'throttle_command', 'lap_count', 'lap_time', 'last_lap_time', 'collision_count')]
+                            'throttle_command', 'wheel_slip', 'lap_count', 'lap_time', 'last_lap_time', 'collision_count')]
                 bag = launch(['ros2', 'bag', 'record', *([] if args.wall_time else ['--use-sim-time']),
                               '-o', str(trial/'bag'), *topics, '/clock'], 'bag')
                 spin(1.5)

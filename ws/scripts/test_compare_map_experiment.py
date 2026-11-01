@@ -46,3 +46,14 @@ def test_repeatability_retains_clock_flagged_completed_laps_and_counts_failures(
     assert reliability['metrics']['flying_lap_mean_s']['n'] == 2
     assert reliability['metrics']['flying_lap_mean_s']['mean'] == 11.
     assert result['groups'][0]['mean_trial_lap_time_s'] == 10.
+
+
+def test_comparison_rejects_pooling_native_and_estimated_slip(tmp_path):
+    import pytest
+    trials = [dict(index=i, steering_rate_limit_radps=3.2, status='completed',
+                   mean_flying_lap_s=14., report_status='native_flying_lap',
+                   report_summary=dict(slip_source=source), trial_directory=str(tmp_path/f'trial_{i}'))
+              for i,source in enumerate(('unity','kinematic'),1)]
+    (tmp_path/'manifest.json').write_text(json.dumps(dict(speed_scale=.5, rates_radps=[3.2,3.2],trials=trials)))
+    with pytest.raises(ValueError,match='Cannot pool'):
+        compare(tmp_path)

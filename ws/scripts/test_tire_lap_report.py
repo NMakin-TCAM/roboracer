@@ -157,3 +157,12 @@ def test_native_flying_lap_selection_excludes_warmup_and_preserves_gap_warning()
         select_native_lap(rows, [(0, 0), (20, 2), (100, 3)], 2)
     with pytest.raises(ValueError):
         select_native_lap(rows, [(0, 0), (20, 1)], 2)
+
+
+def test_clean_unity_export_excludes_estimates_and_their_quality_flags():
+    from tire_lap_report import clean_unity_rows
+    rows = clean_unity_rows([dict(flags='long_frame_interval;lateral_unavailable;encoders_unpaired',
+                front_left_lateral_slip=99., kinematic_front_lateral_peak_ratio=99.,
+                front_left_native_lateral_slip=.01, front_left_native_mean_lateral_slip=.005,
+                front_lateral_peak_ratio=1., velocity_reference_x_inferred_m=.15)])
+    assert rows[0] == dict(flags='long_frame_interval', front_left_native_lateral_slip=.01, front_lateral_peak_ratio=1.)

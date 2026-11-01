@@ -1,5 +1,8 @@
 # AutoDRIVE MAP characterization
 
+Historical investigation and implementation record. Current conclusions, driving
+results and regression checks are consolidated in [VALIDATION.md](VALIDATION.md).
+
 The [2026 RoboRacer technical guide](https://autodrive-ecosystem.github.io/competitions/roboracer-sim-racing-guide-2026/#13-vehicle) describes a two-piece cubic tire-friction spline. Its listed lateral peak is at slip 0.01 with force 1.00, followed by an asymptote at slip 0.10 with force 0.50. These are **not** Pacejka B/C/D/E coefficients. The guide also lists 0.324 m wheelbase, 3.906 kg mass, center of mass x=0.15532 m, steering limit 0.5236 rad, and steering rate 3.2 rad/s. Confirm the installed simulator build before copying these numbers into configuration; the repo currently uses 0.330 m wheelbase measured from its vehicle frame transforms and a provisional Pacejka LUT.
 
 ## Reproduce

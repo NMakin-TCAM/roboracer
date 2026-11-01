@@ -22,6 +22,7 @@ import base64
 import errno
 import gzip
 import math
+import json
 import signal
 import threading
 import time
@@ -91,6 +92,8 @@ class FastBridge:
         self.cmd_timeout = p('cmd_timeout', 0.5).value   # s without a command -> reply zeros (stops the car)
         self.publish_restricted_topics = p('publish_restricted_topics', True).value
         self.publish_camera = p('publish_camera', False).value
+        self.publish_wheel_slip = p('publish_wheel_slip', False).value
+        self.slip_pub = self.node.create_publisher(String, ns+'/wheel_slip', 10) if self.publish_wheel_slip else None
         self.steady_epoch = SteadyEpoch() if p('publish_clock', False).value else None
         if self.steady_epoch:
             self.clock_lock = threading.Lock()
@@ -200,6 +203,17 @@ class FastBridge:
         t_in = time.perf_counter()
         stamp = self.publish_clock() if self.steady_epoch else self.node.get_clock().now().to_msg()
         P = self.pub
+        if self.slip_pub and 'V1 Wheel Slip' in d:
+            try:
+                values = [float(v) for v in d['V1 Wheel Slip'].split()]
+                if len(values) != 12 or not all(math.isfinite(v) for v in values) or any(values[i] not in (0., 1.) for i in (0, 3, 6, 9)):
+                    raise ValueError('expected four finite grounded/forward/sideways triples')
+                self.slip_pub.publish(String(data=json.dumps(dict(
+                    stamp_ns=stamp.sec*1000000000+stamp.nanosec,
+                    wheels=[dict(name=name, grounded=bool(values[3*i]), forward=values[3*i+1], sideways=values[3*i+2])
+                            for i, name in enumerate(('front_left', 'front_right', 'rear_left', 'rear_right'))]))))
+            except (ValueError, TypeError, AttributeError) as exc:
+                self.node.get_logger().warning('Invalid wheel slip telemetry: '+str(exc), throttle_duration_sec=5.)
         # Restricted only: without ground truth the gate would restart a respawned car at the map origin.
         seen = self.sim_reset(d) if self.publish_restricted_topics else None
         with self.lock:
@@ -243,7 +257,7 @@ class FastBridge:
             P[key].publish(js)
 
         rate = float(d['V1 LIDAR Scan Rate'])
-        if self.new_scan(d['V1 LIDAR Range Array'], enc, rate):
+        if d.get('V1 LIDAR Range Array') and self.new_scan(d['V1 LIDAR Range Array'], enc, rate):
             self.publish_scan(d['V1 LIDAR Range Array'], rate, stamp)
 
         if self.publish_camera:
