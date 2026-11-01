@@ -2,9 +2,10 @@
 
 ## Architecture
 
-- ROS 2 Humble; four Python `ament_python` packages under `ws/src/`.
+- ROS 2 Humble; four Python `ament_python` autonomy/bridge packages and the native `slam_graph_tools` snapshot exporter under `ws/src/`.
 - `autodrive_bridge`: simulator-only Socket.IO `fast_bridge`, sensor/command `adapter`, encoder-based `wheel_odom`, and keyboard teleop. On the car, hardware drivers/VESC replace these interfaces.
 - `perception`: Cartographer mapping and frozen-map localization, `localization_gate`, alternative numpy MCL, map saving, and map-origin recording. `ekf.launch.py` and `corrector` are experimental and outside the race pipeline.
+- Optional mapping backend: `slam_mapping.launch.py` runs async SLAM Toolbox plus `slam_mapping_pose` (native pose relay and online trajectory). `save_slam_map` stages native `.posegraph`/`.data` and uses `slam_graph_tools` to export a consistent final map/trajectory; it does not create a Cartographer pbstream or use simulator ground truth.
 - `planning`: offline centerline/width extraction and TUM minimum-time raceline generation; optional runtime `obstacle_spliner_node` for stationary obstacles absent from the map. TUM runs in a separate venv through subprocess/CSV exchange.
 - `control`: pure pursuit with adaptive lookahead, reactive follow-the-gap, centering wall follower, and experimental disparity-gap follower. `race.launch.py` orchestrates localization, pure pursuit, and optional avoidance.
 - Read `docs/pipeline.md`, relevant launch/config files, and neighboring tests before editing. Keep changes scoped; preserve working interfaces and validated behavior.
@@ -48,7 +49,7 @@ colcon build --symlink-install --packages-select <package>
 | `/autodrive/reset_command` | Simulator reset request, Bool |
 | `/autodrive/roboracer_1/sim_reset` | Bridge reset/respawn event, String; localizers consume it |
 
-- TF chain: `map -> odom -> base_link -> laser/imu/front_camera`. Cartographer OR MCL owns `map -> odom`; wheel odometry owns `odom -> base_link`; the sim adapter owns static mounts. `base_link` is the rear axle.
+- TF chain: `map -> odom -> base_link -> laser/imu/front_camera`. Exactly one of Cartographer, MCL, or SLAM Toolbox mapping owns `map -> odom`; wheel odometry owns `odom -> base_link`; the sim adapter owns static mounts. `base_link` is the rear axle.
 - Never run both localizers or competing `/drive` publishers. Preserve single-instance guards and bridge frame timestamps; duplicate odometry/IMU stamps can abort Cartographer.
 - Cartographer requires the IMU at the `base_link` origin (mount rotation is allowed). Preserve frame IDs, units, QoS compatibility, and timestamp alignment.
 - Bridge raw topics use `/autodrive/roboracer_1/*`. Current timestamps are arrival-clock based; do not assume deterministic simulation time or existing `/clock` support.
@@ -70,6 +71,7 @@ scripts/race.sh <name> speed_scale:=0.5 localizer:=mcl avoid:=true
 ```
 
 - Mapping resets the sim, starts `perception/mapping.launch.py`, drives laps, runs `save_map`, stops mapping, and runs `planning build_raceline`. Without `--wall-follow`, drive with `ros2 run autodrive_bridge teleop_keyboard` and answer the terminal prompts. `--gap-follow` is experimental; prefer wall following.
+- Opt in with `scripts/map_track.sh <new-name> --slam-toolbox --wall-follow --laps 2`. Existing track directories are refused. SLAM Toolbox exports final corrected poses and map pixels from the same serialized graph; retain online poses for diagnostics and preserve planner consistency checks. Its follower speed defaults to 0.5 m/s; calibration and Cartographer defaults stay unchanged. See `docs/pipeline.md` for saving and MCL compatibility; `race.sh` still requires a pbstream.
 - Individual commands: `ros2 run perception save_map <name>` while mapping; `ros2 run planning build_raceline <name>` to re-plan. Inspect `preview.png` before racing.
 - Planner exit codes: 0 clean mintime; 2 raceline written using fallback/unclean result; 1 failure. Preserve warnings and the JSON provenance header; never report fallback as clean optimization.
 - `race.sh` resets the sim and starts `control/race.launch.py`; direct launch does not reset it. Default localization is Cartographer; `localizer:=mcl` selects MCL. `avoid:=true` starts the obstacle planner and follows its path at raceline speeds.
@@ -101,6 +103,7 @@ ROS_DOMAIN_ID=42 python3 -m pytest src/control/test/test_lookahead.py src/planni
 - Optimizer tests in `planning/test/test_build_raceline.py` need the Docker TUM venv; some run for minutes. Missing optimizer dependencies cause skips. Report skips explicitly rather than claiming optimizer validation passed.
 - Full-simulator testing currently requires an external AutoDRIVE instance; there is no checked-in unattended scenario runner or CI workflow. Synthetic/node tests do not establish collision-free simulated laps. For relevant behavior changes, record track, parameters, localizer, laps/collisions, and failures from simulator validation, or state it was not performed.
 - Add focused behavioral regressions for algorithm/safety changes. Run affected tests, then broader integration/optimizer checks as warranted; report exact commands and results.
+- SLAM mapping tests: `ROS_DOMAIN_ID=65 python3 -m pytest src/perception/test/test_slam_mapping.py -q`; `test_slam_mapping_integration.py` runs a real mapper on isolated domain 66 with synthetic sensors and temporary artifacts. This is not an AutoDRIVE mapping validation.
 
 ## Preserve artifacts and validated behavior
 
