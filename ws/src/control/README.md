@@ -39,6 +39,26 @@ With `avoid:=true`, pure pursuit steers on `/local_path` instead of the raceline
 shifted sideways around an obstacle the map did not have, one point per raceline point. Speeds stay the
 raceline's.
 
+## Lap logger
+
+`race.launch.py` also starts `lap_logger_node` (`log_laps:=false` turns it off). It times every lap from
+the car's pose along the raceline (from one crossing of the raceline's start to the next, interpolated
+between poses; a lap only counts if the car passed halfway), so it needs no sim topics and works on the
+car too. In the sim it also counts collisions per lap, and a sim reset (crash respawn, reset command) or a
+pose jump over 1 m aborts the lap being timed. The first lap is a standing start, later laps are flying.
+
+Each run writes `tracks/<name>/runs/<UTC time>.csv`, one row per lap, flushed as it goes:
+`lap, status (ok/aborted), start (standing/flying), time_s, distance_m, mean_speed_mps, max_speed_mps,
+mean_offset_m, max_offset_m, collisions, note`. The offsets are the car's distance from the raceline as the
+localizer sees it (tracking error, not the true error). The first line, `# run: {json}`, records the track,
+the raceline's provenance and the race settings (`speed_scale`, `max_speed`, `localizer`, `avoid`).
+
+```bash
+ros2 run control lap_report <name>             # one line per run: settings, laps, best, mean flying lap, offset
+ros2 run control lap_report <name> --last 3
+ros2 run control lap_report tracks/<name>/runs/<run>.csv   # the laps of one run
+```
+
 ## Safety
 
 Each pose is checked before it is used; a failed check publishes a stop (speed 0, steering 0) and a

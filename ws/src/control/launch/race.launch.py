@@ -2,7 +2,7 @@
 
     ros2 launch control race.launch.py track:=<name> [speed_scale:=0.5] [max_speed:=0.0] [pose_topic:=/localized_pose]
         [avoid:=false] [localizer:=cartographer|mcl] [adaptive_lookahead:=true] [adaptive_lookahead_cut:=0.1]
-        [adaptive_lookahead_min_time:=0.25]
+        [adaptive_lookahead_min_time:=0.25] [log_laps:=true]
 
 Needs tracks/<name>/map.pbstream (map.yaml for localizer:=mcl) and raceline.csv (ws/scripts/map_track.sh
 <name>), and the car at the pose mapping started from (ws/scripts/race.sh resets the sim car there).
@@ -13,6 +13,8 @@ avoid:=true also starts planning's obstacle_spliner_node on the track's raceline
 pursuit follows its /local_path around obstacles the map did not have (stopping when there is none).
 adaptive_lookahead:=true (the default) caps pure pursuit's lookahead by the curvature of the raceline ahead (see
 pure_pursuit_node), for tight corners at full speed.
+log_laps:=true (the default) starts control's lap_logger_node: one CSV row per lap in tracks/<name>/runs/
+(compare runs with `ros2 run control lap_report <name>`).
 """
 import os
 
@@ -34,6 +36,14 @@ def obstacle_spliner(context):
         'raceline_path': os.path.join(d, 'raceline.csv'),
         'map_yaml': os.path.join(d, 'map.yaml'),
         'pose_topic': LaunchConfiguration('pose_topic'),
+    }])]
+
+
+def lap_logger(context):
+    if LaunchConfiguration('log_laps').perform(context).lower() not in ('true', '1'):
+        return []
+    return [Node(package='control', executable='lap_logger_node', output='screen', parameters=[{
+        k: LaunchConfiguration(k) for k in ('track', 'pose_topic', 'speed_scale', 'max_speed', 'localizer', 'avoid')
     }])]
 
 
@@ -61,10 +71,13 @@ def generate_launch_description():
                               description='with adaptive_lookahead: corner cut [m], lookahead <= sqrt(2 cut / kappa)'),
         DeclareLaunchArgument('adaptive_lookahead_min_time', default_value='0.25',
                               description='with adaptive_lookahead: but lookahead >= min_time x speed [s]'),
+        DeclareLaunchArgument('log_laps', default_value='true',
+                              description='time every lap and write tracks/<track>/runs/<time>.csv (lap_logger_node)'),
         include('perception', 'localization.launch.py', ['track'], UnlessCondition(use_mcl)),
         include('perception', 'mcl.launch.py', ['track'], IfCondition(use_mcl)),
         include('control', 'pure_pursuit.launch.py', [
             'track', 'pose_topic', 'speed_scale', 'max_speed', 'avoid',
             'adaptive_lookahead', 'adaptive_lookahead_cut', 'adaptive_lookahead_min_time']),
         OpaqueFunction(function=obstacle_spliner),
+        OpaqueFunction(function=lap_logger),
     ])

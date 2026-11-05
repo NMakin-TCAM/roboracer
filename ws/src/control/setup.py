@@ -19,7 +19,7 @@ setup(
     zip_safe=True,
     maintainer='zzangupenn, Hongrui Zheng',
     maintainer_email='zzang@seas.upenn.edu, billyzheng.bz@gmail.com',
-    description='Pure pursuit on the generated raceline, follow the gap, and the race launch file.',
+    description='Pure pursuit on the generated raceline, follow the gap, the race launch file and the lap logger.',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
@@ -28,6 +28,8 @@ setup(
             'follow_the_gap_node = control.follow_the_gap_node:main',
             'disparity_gap_node = control.disparity_gap_node:main',
             'wall_follow_node = control.wall_follow_node:main',
+            'lap_logger_node = control.lap_logger_node:main',
+            'lap_report = control.lap_report:main',
         ],
     },
 )

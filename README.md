@@ -36,6 +36,7 @@ new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time 
 | **Localization** | `perception` | Cartographer pure localization on the saved map. `localization_gate` lets the car drive only once Cartographer has localized, and relocalizes it after every sim reset. Alternative: a Monte Carlo localization particle filter (`mcl_node`, `localizer:=mcl`) on the saved `map.yaml` that finds the car by itself (global scan matching) and re-anchors after odometry jumps. |
 | **Planning** | `planning` | Centerline and track widths extracted from the occupancy grid, checked against the mapping lap; [TUM global race trajectory optimization](https://github.com/TUMFTM/global_racetrajectory_optimization) (`mintime`) with a RoboRacer vehicle model; if it fails, a loudly reported fallback line (mintime without the acceleration limits, then the centerline; exit status 2, recorded in `raceline.csv`'s header); a preview image of the result. Stationary-obstacle avoidance (`obstacle_spliner_node`): the raceline shifted sideways around obstacles the map did not have. |
 | **Control** | `control` | Pure pursuit on the raceline with a speed-dependent lookahead and safety stops on bad poses. With `avoid:=true`, it follows the obstacle-avoiding path instead, and stops when there is no collision-free one. Follow the gap as a no-map fallback. A centring wall follower (the default) and an experimental follow the gap with disparity extension, either of which drives the mapping laps by itself. |
+| **Lap logging** | `control` | `lap_logger_node` (started by `race.sh`) times every lap from the pose along the raceline (works on the car too) and writes one CSV row per lap to `tracks/<name>/runs/`: time, speeds, offset from the raceline, collisions and sim resets. `lap_report` compares runs. |
 | **Tooling** | `ws/scripts` | `map_track.sh` (map → save → centerline → raceline in one command) and `race.sh`; shell aliases; Foxglove bridge; 132 unit and integration tests. |
 
 ## Repository layout
@@ -105,6 +106,7 @@ scripts/map_track.sh <name> --wall-follow    # map the track: the wall follower 
                                              # (--gap-follow: follow the gap drives them; experimental, see ws/src/control/README.md)
 scripts/race.sh <name> speed_scale:=0.5      # reset the car, localize on the saved map, pure pursuit on the raceline
 scripts/race.sh <name> avoid:=true           #   ... and pass obstacles the map did not have
+ros2 run control lap_report <name>           # lap times of every run (logged to tracks/<name>/runs/)
 ```
 
 To drive the mapping laps by hand instead, run `scripts/map_track.sh <name>`, drive 1-2 clean laps with
