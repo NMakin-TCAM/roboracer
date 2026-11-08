@@ -134,6 +134,7 @@ for (const [key, title, unit, scale, what] of METRICS) {
 
 const COLS = {err_mean: 'mean err (m)', err_median: 'median (m)', err_p95: 'p95 (m)', err_max: 'max (m)',
   far_share: '> 0.2 m', head_mean: 'heading mean (°)', head_p95: 'heading p95 (°)', aligned_mean: 'aligned (m)',
+  jitter: 'jitter (m)',
   jumps: 'jumps', max_jump: 'max jump (m)', gap_s: 'no pose (s)', stalls: 'sim stalls', laps: 'laps',
   collisions: 'crashes', scan_hz: 'scan Hz'};
 const cell = (k, v) => v === undefined ? '–' : k === 'far_share' ? (v * 100).toFixed(1) + '%' :

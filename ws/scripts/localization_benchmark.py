@@ -20,6 +20,9 @@ Scores per run (summary.txt, summary.json):
             position mean / median / p95 / max [m], heading mean / p95 [deg], share of time over 0.2 m
   aligned   position error after the best rigid fit of the run's localized track onto the true one: what is
             left once a rotated or shifted map is taken out (error - aligned ~ the map's own placement error)
+  jitter    RMS change of the error over 50 ms [m]: how much the estimate wobbles around the truth, what
+            pure pursuit steers on (a constant offset scores 0). Cartographer's /tracked_pose: 20-110 mm
+            on Porto, and the car clipped corners on it; MCL: 6-20 mm
   jumps     steps of the localized pose faster than 15 m/s (and over 0.3 m): the localizer snapping (e.g.
             Cartographer's pose extrapolation running on while the sim stalls, then snapping back)
   stalls    gaps over 0.1 s between the sim's ground-truth frames: the sim froze (a loaded Mac)
@@ -49,6 +52,7 @@ MAX_PAIR_DT = 0.1                      # s: ground truth on both sides of a stam
 STILL, MAX_STILL_DT = 0.1, 2.0         # m, s: ... or a longer gap (a sim stall) the car barely moved across
 TELEPORT = 0.5                         # m between two ground-truth poses: a reset, never interpolated across
 FAR = 0.2                              # m: "share of time over"
+JITTER_DT = 0.05                       # s: the error's change over this long is the jitter
 
 
 def wrap(a):
@@ -110,6 +114,18 @@ def jumps_and_gaps(t, xy):
     return [float(j) for j in jumps], [float(g) for g in dt[dt > GAP]]
 
 
+def jitter(t, err, ok):
+    """RMS of the change of the error vector over JITTER_DT (pairs ok at both ends, at most 1.4 x apart)."""
+    t = np.asarray(t)
+    j = np.searchsorted(t, t + JITTER_DT)
+    v = ok & (j < len(t))
+    v[v] &= ok[j[v]] & (t[j[v]] - t[v] < 1.4 * JITTER_DT)
+    if v.sum() < 3:
+        return None
+    d = np.linalg.norm(err[j[v]] - err[v], axis=1)
+    return float(np.sqrt((d ** 2).mean()))
+
+
 def counter_delta(values):
     """Increase of a sim counter over a run, ignoring drops (a sim reset zeroes some counters)."""
     v = np.asarray(values, dtype=float)
@@ -138,6 +154,9 @@ def score(rows, origin):
                    head_mean=float(eh.mean()), head_p95=float(np.percentile(eh, 95)),
                    aligned_mean=float(ea.mean()), aligned_p95=float(np.percentile(ea, 95)),
                    fit_rot_deg=float(np.degrees(math.atan2(r[1, 0], r[0, 0]))), fit_shift=float(np.hypot(*tr)))
+        jit = jitter(lt, lp[:, :2] - truth[:, :2], ok)
+        if jit is not None:
+            out['jitter'] = jit
     jumps, gaps = jumps_and_gaps(lt, lp[:, :2])
     scans = sorted(r['recv'] for r in by.get('scan', []))
     gdt = np.diff([r['stamp'] for r in gt]) if len(gt) > 1 else np.zeros(0)
@@ -175,9 +194,8 @@ def read_origin(track_dir):
 
 COLUMNS = [('run', '{}'), ('err_mean', '{:.3f}'), ('err_median', '{:.3f}'), ('err_p95', '{:.3f}'),
            ('err_max', '{:.2f}'), ('far_share', '{:.1%}'), ('head_mean', '{:.2f}'), ('head_p95', '{:.2f}'),
-           ('aligned_mean', '{:.3f}'), ('jumps', '{}'), ('max_jump', '{:.2f}'), ('gap_s', '{:.1f}'),
-           ('stalls', '{}'),
-           ('laps', '{}'), ('collisions', '{}'), ('scan_hz', '{:.0f}')]
+           ('aligned_mean', '{:.3f}'), ('jitter', '{:.3f}'), ('jumps', '{}'), ('max_jump', '{:.2f}'),
+           ('gap_s', '{:.1f}'), ('stalls', '{}'), ('laps', '{}'), ('collisions', '{}'), ('scan_hz', '{:.0f}')]
 
 
 def table(results):

@@ -17,13 +17,13 @@ METRICS = [   # key, title, unit, scale, what it means
     ('err_mean', 'Mean position error', 'cm', 100, 'average distance between the estimate and the true pose'),
     ('err_max', 'Worst position error', 'cm', 100, 'the single largest error in the run'),
     ('head_p95', 'Heading error, 95th percentile', 'deg', 1, '95 % of the time the heading was off by less'),
-    ('aligned_mean', 'Error with map placement removed', 'cm', 100,
-     'mean error after the best rigid fit: the localizer alone, not the map'),
+    ('jitter', 'Pose jitter', 'mm', 1000,
+     'how much the estimate wobbles over 50 ms: what pure pursuit steers on'),
     ('jumps', 'Pose jumps per run', '', 1, 'steps of the estimate faster than 15 m/s (snaps)'),
     ('collisions', 'Crashes per run', '', 1, 'the sim\'s collision count over the 60 s'),
 ]
 TABLE = ['err_mean', 'err_median', 'err_p95', 'err_max', 'far_share', 'head_mean', 'head_p95', 'aligned_mean',
-         'jumps', 'max_jump', 'gap_s', 'stalls', 'laps', 'collisions', 'scan_hz']
+         'jitter', 'jumps', 'max_jump', 'gap_s', 'stalls', 'laps', 'collisions', 'scan_hz']
 
 
 def load(dirs):

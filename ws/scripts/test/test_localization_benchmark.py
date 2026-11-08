@@ -62,6 +62,15 @@ class ScoringTests(unittest.TestCase):
         self.assertLess(s['aligned_mean'], 1e-6)
         self.assertAlmostEqual(abs(s['fit_rot_deg']), math.degrees(0.05), places=3)
 
+    def test_jitter_ignores_a_constant_offset_and_measures_a_wobble(self):
+        t, p = circle()
+        steady = b.score(rows(t, p + [0.1, 0.0, 0.0], t, to_world(p)), ORIGIN)
+        self.assertLess(steady['jitter'], 1e-6)
+        wobble = p.copy()
+        wobble[:, 0] += 0.02 * np.where(np.arange(len(p)) % 2, 1.0, -1.0)   # +-2 cm sawtooth at 50 Hz
+        s = b.score(rows(t, wobble, t, to_world(p)), ORIGIN)
+        self.assertAlmostEqual(s['jitter'], 0.04, delta=0.005)
+
     def test_jumps_and_gaps(self):
         t, p = circle()
         loc = p.copy()
