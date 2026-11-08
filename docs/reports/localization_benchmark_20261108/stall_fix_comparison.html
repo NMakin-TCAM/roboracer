@@ -70,6 +70,9 @@ const LOCS = ["Carto before", "Carto + fix", "Carto odom", "MCL"];
 const COLOR = l => `var(--series-${LOCS.indexOf(l) + 1})`;
 const SPEEDS = [...new Set(RUNS.map(r => r.speed))].sort((a, b) => a - b);
 const name = l => l;
+// end labels: the name before ' (' when those stay distinct, so they fit beside the plot
+const SHORT = (() => { const s = LOCS.map(l => l.split(' (')[0]); return new Set(s).size === s.length ? s : LOCS; })();
+const short = l => SHORT[LOCS.indexOf(l)];
 const mean = v => v.reduce((a, b) => a + b, 0) / v.length;
 const NS = 'http://www.w3.org/2000/svg';
 const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag);
@@ -129,7 +132,7 @@ for (const [key, title, unit, scale, what] of METRICS) {
   for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
   for (const e of ends) {
     el('rect', {x: W - m.r + 12, y: e.y - 1, width: 8, height: 2, rx: 1, fill: COLOR(e.l)}, svg);
-    el('text', {x: W - m.r + 24, y: e.y + 3.5, class: 'end'}, svg).textContent = `${name(e.l)} ${fmt(e.v, unit)}`;
+    el('text', {x: W - m.r + 24, y: e.y + 3.5, class: 'end'}, svg).textContent = `${short(e.l)} ${fmt(e.v, unit)}`;
   }
 }
 
