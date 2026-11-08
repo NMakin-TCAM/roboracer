@@ -69,6 +69,29 @@ def test_standing_start_then_flying_laps():
         assert lap.max_speed_mps == pytest.approx(2.0, rel=0.02)
 
 
+def test_max_speed_and_distance_ignore_uneven_pose_timing_and_jitter():
+    # localizer poses arrive in bursts: a pose 1 ms after the last one, with 1 cm of noise, must not read as
+    # 10 m/s; the speed is measured over SPEED_WINDOW
+    tr = LapTracker(circle())
+    rng = np.random.default_rng(0)
+    t, pos, laps = 0.0, L / 2, []
+    while pos < 2.2 * L:
+        dt = 0.001 if rng.random() < 0.5 else 0.039
+        t, pos = t + dt, pos + 2.0 * dt
+        x, y = point(pos)
+        lap = tr.update(t, x + rng.normal(0, 0.005), y + rng.normal(0, 0.005))
+        laps += [lap] if lap else []
+    assert len(laps) == 1
+    assert laps[0].max_speed_mps == pytest.approx(2.0, abs=0.3)
+    assert laps[0].distance_m == pytest.approx(L, rel=0.02)     # jitter does not add up
+
+
+def test_start_just_before_the_line_is_a_standing_start():
+    tr = LapTracker(circle())
+    laps, _ = drive(tr, 2.1, start=L - 0.05, standstill=1.0)
+    assert [lap.start for lap in laps] == ['standing', 'flying']
+
+
 def test_start_mid_track_waits_for_the_line():
     tr = LapTracker(circle())
     laps, _ = drive(tr, 2.0, start=L / 2)
@@ -96,12 +119,32 @@ def test_pose_jump_aborts_the_lap_and_starts_over():
     tr = LapTracker(circle())
     laps, t = drive(tr, 1.6, start=L / 2)               # one lap, then 2.5 m into the next
     assert len(laps) == 1
-    aborted = tr.update(t, *point(0.0))                  # teleported back to the start (sim reset)
+    tr.update(t, *point(2.1 * L + 0.01))
+    aborted = tr.update(t + 0.02, *point(L / 2))         # carried 8 m across the track
     assert aborted.status == 'aborted' and 'jumped' in aborted.note
-    laps, _ = drive(tr, 1.05, t0=t + 0.02, start=0.02, standstill=1.0)
+    laps, _ = drive(tr, 1.05, t0=t + 0.04, start=0.02, standstill=1.0)
     assert len(laps) == 1 and laps[0].start == 'standing' and laps[0].number == 3
     assert summary(tr.laps) == f'2 laps, best {min(lap.time_s for lap in tr.laps if lap.status == "ok"):.2f} s, ' \
                                f'flying mean {tr.laps[0].time_s:.2f} s, 1 aborted'
+
+
+def test_relocalization_jump_is_counted_not_aborted():
+    tr = LapTracker(circle())
+    laps, t = drive(tr, 0.8, start=L / 2)                 # timing from the line, 0.3 laps in
+    tr.update(t, *point(1.3 * L + 1.0))                  # the localizer moves the pose 1 m ahead
+    laps, _ = drive(tr, 0.7, t0=t + 0.02, start=1.3 * L + 1.0)
+    assert len(laps) == 1 and laps[0].status == 'ok'
+    assert laps[0].pose_jumps == 1 and laps[0].max_jump_m == pytest.approx(1.0, abs=0.05)
+    assert laps[0].distance_m == pytest.approx(L - 1.0, rel=0.01)     # the jump is not driven distance
+    assert laps[0].max_speed_mps == pytest.approx(2.0, rel=0.05)
+
+
+def test_gap_in_the_poses_is_not_a_jump():
+    tr = LapTracker(circle())
+    laps, t = drive(tr, 0.8, start=L / 2)
+    laps, _ = drive(tr, 0.75, t0=t + 1.0, start=1.3 * L + 2.0)    # no poses for 1 s while driving 2 m
+    assert len(laps) == 1 and laps[0].pose_jumps == 0
+    assert laps[0].distance_m == pytest.approx(L, rel=0.01)
 
 
 def test_abort_without_a_lap_returns_none():
@@ -115,7 +158,7 @@ def write_run(path, header, rows):
         f.write('# run: ' + json.dumps(header) + '\n')
         w = csv.writer(f)
         w.writerow(['lap', 'status', 'start', 'time_s', 'distance_m', 'mean_speed_mps', 'max_speed_mps',
-                    'mean_offset_m', 'max_offset_m', 'collisions', 'note'])
+                    'mean_offset_m', 'max_offset_m', 'collisions', 'pose_jumps', 'max_jump_m', 'note'])
         w.writerows(rows)
 
 
@@ -124,9 +167,9 @@ def test_lap_report_compares_runs(tmp_path, monkeypatch, capsys):
     runs = tmp_path / 'porto' / 'runs'
     runs.mkdir(parents=True)
     write_run(runs / '20261105-100000.csv', {'speed_scale': 0.5, 'localizer': 'mcl', 'avoid': False}, [
-        [1, 'ok', 'standing', '9.000', '30', '3.3', '4', '0.100', '0.2', 0, ''],
-        [2, 'ok', 'flying', '8.000', '30', '3.7', '4', '0.060', '0.2', 0, ''],
-        [3, 'aborted', 'flying', '2.000', '5', '2.5', '3', '0.1', '0.3', 1, 'sim reset: collision']])
+        [1, 'ok', 'standing', '9.000', '30', '3.3', '4', '0.100', '0.2', 0, 0, '0.00', ''],
+        [2, 'ok', 'flying', '8.000', '30', '3.7', '4', '0.060', '0.2', 0, 1, '0.80', ''],
+        [3, 'aborted', 'flying', '2.000', '5', '2.5', '3', '0.1', '0.3', 1, 0, '0.00', 'sim reset: collision']])
     write_run(runs / '20261105-110000.csv', {'speed_scale': 1.0}, [])
     monkeypatch.setenv('TRACKS_DIR', str(tmp_path))
     assert lap_report.main(['porto']) == 0

@@ -44,12 +44,14 @@ raceline's.
 `race.launch.py` also starts `lap_logger_node` (`log_laps:=false` turns it off). It times every lap from
 the car's pose along the raceline (from one crossing of the raceline's start to the next, interpolated
 between poses; a lap only counts if the car passed halfway), so it needs no sim topics and works on the
-car too. In the sim it also counts collisions per lap, and a sim reset (crash respawn, reset command) or a
-pose jump over 1 m aborts the lap being timed. The first lap is a standing start, later laps are flying.
+car too. In the sim it also counts collisions per lap, and a sim reset (crash respawn, reset command)
+aborts the lap being timed. Pose jumps (the localizer correcting its pose: a step faster than 15 m/s) are
+counted per lap and left out of its distance and speed; one over 3 m (the car was moved) aborts the lap.
+The first lap is a standing start if the car began near the line, later laps are flying.
 
 Each run writes `tracks/<name>/runs/<UTC time>.csv`, one row per lap, flushed as it goes:
 `lap, status (ok/aborted), start (standing/flying), time_s, distance_m, mean_speed_mps, max_speed_mps,
-mean_offset_m, max_offset_m, collisions, note`. The offsets are the car's distance from the raceline as the
+mean_offset_m, max_offset_m, collisions, pose_jumps, max_jump_m, note`. The offsets are the car's distance from the raceline as the
 localizer sees it (tracking error, not the true error). The first line, `# run: {json}`, records the track,
 the raceline's provenance and the race settings (`speed_scale`, `max_speed`, `localizer`, `avoid`).
 

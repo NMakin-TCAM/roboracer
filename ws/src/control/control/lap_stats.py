@@ -4,15 +4,20 @@ A lap is timed from one crossing of the raceline's start (s = 0) to the next, in
 poses either side of the line. It only counts if the car passed the halfway point (s in [0.4, 0.6] of the
 lap) since the last crossing, so pose noise at the line or reversing over it never counts a lap.
 
-The first lap of a run is a standing start: if the car begins just after the line (s < 25 % of the lap),
-it is timed from when the car first moves; otherwise from the first crossing. Later laps are flying.
+The first lap of a run is timed from when the car first moves if it begins just after the line (s < 25 %
+of the lap), otherwise from the first crossing. It is a standing start if the car began within 25 % of the
+lap of the line (either side), else flying; later laps are flying.
 
-A lap is aborted, not finished, when the pose jumps more than max_jump between two poses (a sim reset,
-a respawn, a relocalization) or the node calls abort() (the sim reported a reset). The tracker then
-starts over as at the beginning of a run.
+A pose jump is a step between two poses faster than JUMP_SPEED (and over JUMP_MIN): the localizer
+corrected its pose (Cartographer does by up to ~1 m on Porto) or the car was moved. A gap in the pose
+stream is not one: the car may well have driven that far meanwhile. Jumps up to max_jump are counted in
+the lap (pose_jumps, max_jump_m) and left out of its distance and speed; a longer one (the car was put
+back at the start, a respawn) aborts the lap, as does abort() (lap_logger_node: the sim reported a reset).
+The tracker then starts over as at the beginning of a run.
 
 Statistics per lap: time, distance driven, mean and max distance of the car from the raceline (as the
-localizer sees it: pure pursuit's tracking error, not the true one), and max speed between poses.
+localizer sees it: pure pursuit's tracking error, not the true one), and max speed. Distance and speed are
+measured over SPEED_WINDOW steps, not pose to pose (localizer jitter).
 """
 import math
 from dataclasses import dataclass, field
@@ -22,6 +27,11 @@ import numpy as np
 START_WINDOW = 0.25    # fraction of the lap after the line where a run may begin as a standing start
 HALF = (0.4, 0.6)      # fraction of the lap that counts as the halfway point
 MOVED = 0.1            # m from the first pose: the car has started moving
+# s: speed is measured over at least this long (localizer poses arrive unevenly, and a 1 cm correction
+# 1 ms after the last pose would read as 10 m/s)
+SPEED_WINDOW = 0.1
+JUMP_SPEED = 15.0      # m/s between two poses: no RoboRacer drives that fast, so the pose jumped
+JUMP_MIN = 0.3         # m: smaller steps are never jumps (a pose 1 ms after the last, with noise)
 
 
 @dataclass
@@ -34,6 +44,8 @@ class Lap:
     mean_offset_m: float
     max_offset_m: float
     max_speed_mps: float
+    pose_jumps: int = 0         # localizer corrections (see the module docstring)
+    max_jump_m: float = 0.0
     note: str = ''              # why it was aborted
 
     @property
@@ -48,10 +60,11 @@ class _Acc:
     distance: float = 0.0
     offsets: list = field(default_factory=list)
     max_speed: float = 0.0
+    jumps: list = field(default_factory=list)
 
 
 class LapTracker:
-    def __init__(self, xy, max_jump=1.0):
+    def __init__(self, xy, max_jump=3.0):
         """xy: raceline points (N x 2, closed loop, the last point not repeating the first)."""
         xy = np.asarray(xy, dtype=float)
         if len(xy) > 1 and np.allclose(xy[0], xy[-1]):
@@ -73,7 +86,9 @@ class LapTracker:
         self.prev = None         # (t, x, y, s) of the last pose
         self.acc = None          # the lap being timed, or None
         self.armed = False       # standing start: time from the first movement
+        self.near_line = False   # the run began near the line: its first lap is a standing start
         self.half = False
+        self.speed_ref = None    # (t, x, y): start of the current speed window
 
     def project(self, x, y):
         """(s, offset): arc length of the closest raceline point and the car's distance from it."""
@@ -92,16 +107,26 @@ class LapTracker:
             self.first = (x, y)
             self.prev = (t, x, y, s)
             self.armed = s < START_WINDOW * L
+            self.near_line = self.armed or s > (1 - START_WINDOW) * L
             return None
         t1, x1, y1, s1 = self.prev
         self.prev = (t, x, y, s)
         step = math.hypot(x - x1, y - y1)
-        if step > self.max_jump:
+        jump = step > JUMP_MIN and step > JUMP_SPEED * (t - t1)
+        if jump and step > self.max_jump:
             return self.abort(f'pose jumped {step:.1f} m')
 
+        if self.speed_ref is None:
+            self.speed_ref = (t1, x1, y1)
+        if jump:            # close the window before it, restart it after: the jump is not driving
+            self._window(t1, x1, y1)
+            self.speed_ref = (t, x, y)
+            if self.acc is not None:
+                self.acc.jumps.append(step)
         if self.armed and math.hypot(x - self.first[0], y - self.first[1]) > MOVED:
             self.armed = False
             self.acc = _Acc(t1, 'standing')   # from the last pose before the car moved
+            self.speed_ref = (t1, x1, y1)
 
         finished = None
         crossed = s1 > (1 - START_WINDOW) * L and s < START_WINDOW * L
@@ -109,23 +134,34 @@ class LapTracker:
             ahead = L - s1 + s
             t_cross = t1 + (t - t1) * ((L - s1) / ahead if ahead > 0 else 1.0)
             if self.acc is not None and self.half:
+                self._window(t, x, y)            # the lap's last stretch, up to this pose
                 finished = self._close(t_cross, 'ok')
             if self.acc is None or finished is not None:
-                # first crossing of the run (standing if the car was still slow there), or the next
-                # lap starts where this one ended
-                slow = finished is None and step / max(t - t1, 1e-6) < 0.5
-                self.acc = _Acc(t_cross, 'standing' if slow else 'flying')
-                self.armed = False
+                # first crossing of the run, or the next lap starts where this one ended
+                self.acc = _Acc(t_cross, 'standing' if finished is None and self.near_line else 'flying')
+                self.armed = self.near_line = False
+                self.speed_ref = (t, x, y)
             self.half = False
         elif HALF[0] * L <= s <= HALF[1] * L:
             self.half = True
 
+        if t - self.speed_ref[0] >= SPEED_WINDOW:
+            self._window(t, x, y)
         if self.acc is not None:
-            self.acc.distance += step
             self.acc.offsets.append(offset)
-            if t > t1:
-                self.acc.max_speed = max(self.acc.max_speed, step / (t - t1))
         return finished
+
+    def _window(self, t, x, y):
+        """Close the distance/speed window at this pose: its straight-line length is added to the lap's
+        distance (summing every pose-to-pose step would add up the localizer's jitter, ~4 % on Porto), and
+        it is a speed sample if it is at least SPEED_WINDOW long."""
+        t0, x0, y0 = self.speed_ref
+        d = math.hypot(x - x0, y - y0)
+        if self.acc is not None:
+            self.acc.distance += d
+            if t - t0 >= SPEED_WINDOW:
+                self.acc.max_speed = max(self.acc.max_speed, d / (t - t0))
+        self.speed_ref = (t, x, y)
 
     def abort(self, reason):
         """End the lap being timed as aborted (returned, None if none) and start over."""
@@ -139,7 +175,8 @@ class LapTracker:
         a = self.acc
         offs = a.offsets or [0.0]
         lap = Lap(len(self.laps) + 1, status, a.start, t - a.t0, a.distance,
-                  float(np.mean(offs)), float(np.max(offs)), a.max_speed, note)
+                  float(np.mean(offs)), float(np.max(offs)), a.max_speed, len(a.jumps), max(a.jumps, default=0.0),
+                  note)
         self.laps.append(lap)
         self.acc = None
         return lap

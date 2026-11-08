@@ -6,7 +6,8 @@
 Laps come from the car's pose along the raceline (control.lap_stats): no sim topics are needed, so it
 also works on the real car. In the sim it also reads the bridge's restricted topics (when the bridge
 publishes them): collisions during each lap, and sim_reset, which aborts the lap being timed (the car
-was respawned or reset, so that lap is not a clean one).
+was respawned or reset, so that lap is not a clean one). Localizer pose jumps are counted per lap; one
+over max_jump (3 m) aborts the lap.
 
 Writes tracks/<track>/runs/<UTC time>.csv (out_dir overrides the folder), one row per finished or aborted
 lap, flushed as it happens so Ctrl-C loses nothing (no file if no lap started). Its first line is
@@ -21,6 +22,7 @@ Subscribed:
 import csv
 import json
 import os
+import signal
 import time
 from datetime import datetime, timezone
 
@@ -37,7 +39,7 @@ from perception.tracks import track_dir
 from planning.raceline import read_provenance
 
 COLUMNS = ['lap', 'status', 'start', 'time_s', 'distance_m', 'mean_speed_mps', 'max_speed_mps',
-           'mean_offset_m', 'max_offset_m', 'collisions', 'note']
+           'mean_offset_m', 'max_offset_m', 'collisions', 'pose_jumps', 'max_jump_m', 'note']
 SETTINGS = ('speed_scale', 'max_speed', 'localizer', 'avoid')   # recorded in the header only
 
 
@@ -50,7 +52,7 @@ class LapLogger(Node):
         pose_topic = p('pose_topic', '/localized_pose').value
         vehicle_ns = p('vehicle_ns', '/autodrive/roboracer_1').value
         out_dir = p('out_dir', '').value                   # default tracks/<track>/runs
-        max_jump = p('max_jump', 1.0).value                # m between two poses: a reset or relocalization
+        max_jump = p('max_jump', 3.0).value                # m: a longer pose jump aborts the lap (car moved)
         # race settings, recorded as given: any type, so speed_scale:=1 and :=1.0 both work
         any_type = ParameterDescriptor(dynamic_typing=True)
         self.settings = {k: p(k, None, any_type).value for k in SETTINGS}
@@ -111,10 +113,11 @@ class LapLogger(Node):
                 else self.collision_count - self.collisions)
         self.writer.writerow([lap.number, lap.status, lap.start, f'{lap.time_s:.3f}', f'{lap.distance_m:.2f}',
                               f'{lap.mean_speed_mps:.2f}', f'{lap.max_speed_mps:.2f}', f'{lap.mean_offset_m:.3f}',
-                              f'{lap.max_offset_m:.3f}', hits, lap.note])
+                              f'{lap.max_offset_m:.3f}', hits, lap.pose_jumps, f'{lap.max_jump_m:.2f}', lap.note])
         self.file.flush()
         text = (f'Lap {lap.number} ({lap.start}): {lap.time_s:.2f} s, mean {lap.mean_speed_mps:.2f} m/s, '
-                f'off the raceline mean {lap.mean_offset_m:.2f} m / max {lap.max_offset_m:.2f} m')
+                f'off the raceline mean {lap.mean_offset_m:.2f} m / max {lap.max_offset_m:.2f} m'
+                + (f', {lap.pose_jumps} pose jumps (max {lap.max_jump_m:.2f} m)' if lap.pose_jumps else ''))
         if lap.status == 'ok':
             self.get_logger().info(text)
         else:
@@ -138,6 +141,7 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
+    signal.signal(signal.SIGINT, signal.SIG_IGN)   # a second Ctrl-C (launch forwards one) must not cut the file short
     node.close()
     node.destroy_node()
     if rclpy.ok():
