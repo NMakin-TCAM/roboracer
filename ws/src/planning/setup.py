@@ -28,6 +28,7 @@ setup(
             'fake_opponent_node = planning.fake_opponent_node:main',
             'update_waypoints_node = planning.update_waypoints_node:main',
             'collision_prediction_node = planning.collision_prediction_node:main',
+            'opponent_trajectory_node = planning.opponent_trajectory_node:main',
         ],
     },
 )
