@@ -166,16 +166,19 @@ def test_lap_report_compares_runs(tmp_path, monkeypatch, capsys):
     from control import lap_report
     runs = tmp_path / 'porto' / 'runs'
     runs.mkdir(parents=True)
-    write_run(runs / '20261105-100000.csv', {'speed_scale': 0.5, 'localizer': 'mcl', 'avoid': False}, [
+    settings = {'controller': 'pure_pursuit', 'speed_scale': 0.5, 'localizer': 'mcl', 'avoid': False}
+    write_run(runs / '20261105-100000.csv', settings, [
         [1, 'ok', 'standing', '9.000', '30', '3.3', '4', '0.100', '0.2', 0, 0, '0.00', ''],
         [2, 'ok', 'flying', '8.000', '30', '3.7', '4', '0.060', '0.2', 0, 1, '0.80', ''],
-        [3, 'aborted', 'flying', '2.000', '5', '2.5', '3', '0.1', '0.3', 1, 0, '0.00', 'sim reset: collision']])
+        [3, 'aborted', 'flying', '2.000', '5', '2.5', '3', '0.1', '0.3', 1, 0, '0.00',
+         'sim reset: collision']])
     write_run(runs / '20261105-110000.csv', {'speed_scale': 1.0}, [])
     monkeypatch.setenv('TRACKS_DIR', str(tmp_path))
     assert lap_report.main(['porto']) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines[1].split() == ['20261105-100000', '0.5', 'mcl', 'false', '2', '1', '8.00', '8.00', '0.08']
-    assert lines[2].split() == ['20261105-110000', '1.0', '-', '-', '0', '0', '-', '-', '-']
+    assert lines[1].split() == ['20261105-100000', 'pure_pursuit', '0.5', 'mcl', 'false', '2', '1', '8.00', '8.00',
+                                '0.08']
+    assert lines[2].split() == ['20261105-110000', '-', '1.0', '-', '-', '0', '0', '-', '-', '-']
     assert lap_report.main(['porto', '--last', '1']) == 0
     assert len(capsys.readouterr().out.splitlines()) == 2
     assert lap_report.main(['nowhere']) == 1

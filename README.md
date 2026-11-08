@@ -11,8 +11,8 @@ Illinois Urbana-Champaign, for the RoboRacer (F1TENTH) 1:10 scale car and the
 
 The stack is built to race a track it has never seen. On the day it maps the track with Cartographer,
 extracts the centerline, plans a minimum-time raceline with the TUM optimizer, and races it with
-pure pursuit, localizing on the saved map. Nothing track-specific is committed: every map and
-raceline is generated into `ws/tracks/<name>/`.
+pure pursuit, localizing on the saved map. Maps and racelines are generated into `ws/tracks/<name>/` and remain local.
+A recorded Porto slip report is included under `docs/reports/` as a diagnostic example.
 
 ```
 new track ─► Cartographer mapping ─► centerline ─► TUM minimum-time ─► Cartographer localization
@@ -77,6 +77,12 @@ ros2 launch autodrive_bridge autodrive_launch.py                # alias: sim
 ```
 
 Start the simulator, **Connect** to `127.0.0.1:4567` and set **Driving Mode** to **Autonomous**.
+
+Simulator launches use a shared monotonic `/clock` (`use_sim_time:=true`) to prevent host clock
+corrections from corrupting odometry and localization. Direct `ros2 run` consumers need
+`--ros-args -p use_sim_time:=true`; record bags with `--use-sim-time`. For hardware, pass
+`use_sim_time:=false` consistently, or use `USE_SIM_TIME=false` with the mapping/racing scripts.
+See [the timing fix and validation plan](docs/hairpin_timing_fix.md) and [MAP handoff](docs/MAP_HANDOFF.md).
 With the stock simulator, restarting the bridge while it is connected makes it reconnect in a loop,
 so **Disconnect** first.
 
@@ -137,6 +143,13 @@ a scan that keeps not fitting (something the map does not have, or the car moved
 search: the car stops only when the particle cloud itself spreads.
 Parameters: `ws/src/perception/config/mcl.yaml`; `ros2 launch perception mcl.launch.py track:=<name> particles:=2000`.
 Never run it with `localization.launch.py`: both publish `map -> odom`.
+
+To see how far any localizer is from the sim's ground truth, run this next to `race.sh` (it needs
+`tracks/<name>/map_to_world.yaml`; Ctrl-C prints the run's total):
+
+```bash
+ros2 run perception localization_debug --ros-args -p track:=<name>
+```
 
 ### No map
 
@@ -207,3 +220,12 @@ This stack builds on these open-source projects:
 If this stack helps your work, please cite the projects it builds on, in particular the AutoDRIVE
 simulator ([Samak et al., 2023](https://arxiv.org/abs/2212.05241)) and the TUM minimum-time optimization
 ([Christ et al., 2021](https://doi.org/10.1080/00423114.2019.1704804)).
+
+### Tire slip diagnostics
+
+The [tire slip diagnostic tool](docs/tire_lap_report.md) maps native Unity wheel-slip
+telemetry to a measured lap, highlights brief peak-coordinate crossings, and relates
+them to steering, speed and tracking error. See the [validation record](docs/VALIDATION.md)
+and [Unity-only example report](docs/reports/unity_slip_20261101/report.html). The older
+kinematic lateral estimate is not accurate enough for tire-limit decisions; real-car
+estimation remains a documented TODO.

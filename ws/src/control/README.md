@@ -53,7 +53,7 @@ Each run writes `tracks/<name>/runs/<UTC time>.csv`, one row per lap, flushed as
 `lap, status (ok/aborted), start (standing/flying), time_s, distance_m, mean_speed_mps, max_speed_mps,
 mean_offset_m, max_offset_m, collisions, pose_jumps, max_jump_m, note`. The offsets are the car's distance from the raceline as the
 localizer sees it (tracking error, not the true error). The first line, `# run: {json}`, records the track,
-the raceline's provenance and the race settings (`speed_scale`, `max_speed`, `localizer`, `avoid`).
+the raceline's provenance and the race settings (`controller`, `speed_scale`, `max_speed`, `localizer`, `avoid`).
 
 ```bash
 ros2 run control lap_report <name>             # one line per run: settings, laps, best, mean flying lap, offset

@@ -24,10 +24,14 @@ setup(
     entry_points={
         'console_scripts': [
             'save_map = perception.save_map:main',
+            'save_slam_map = perception.save_slam_map:main',
+            'diagnose_mapping = perception.mapping_diagnostics:main',
+            'slam_mapping_pose = perception.slam_mapping_pose:main',
             'map_origin = perception.map_origin:main',
             'corrector = perception.corrector:main',
             'localization_gate = perception.localization_gate:main',
             'mcl_node = perception.mcl_node:main',
+            'localization_debug = perception.localization_debug:main',
         ],
     },
 )

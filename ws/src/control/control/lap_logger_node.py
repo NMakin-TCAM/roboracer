@@ -12,7 +12,7 @@ over max_jump (3 m) aborts the lap.
 Writes tracks/<track>/runs/<UTC time>.csv (out_dir overrides the folder), one row per finished or aborted
 lap, flushed as it happens so Ctrl-C loses nothing (no file if no lap started). Its first line is
 '# run: {json}': the track, the start time, the raceline's provenance and the race settings it was given
-(speed_scale, max_speed, localizer, avoid), for `ros2 run control lap_report <track>` to compare runs.
+(controller, speed_scale, max_speed, localizer, avoid), for `ros2 run control lap_report <track>` to compare runs.
 Logs each lap and a summary on exit.
 
 Subscribed:
@@ -40,7 +40,7 @@ from planning.raceline import read_provenance
 
 COLUMNS = ['lap', 'status', 'start', 'time_s', 'distance_m', 'mean_speed_mps', 'max_speed_mps',
            'mean_offset_m', 'max_offset_m', 'collisions', 'pose_jumps', 'max_jump_m', 'note']
-SETTINGS = ('speed_scale', 'max_speed', 'localizer', 'avoid')   # recorded in the header only
+SETTINGS = ('controller', 'speed_scale', 'max_speed', 'localizer', 'avoid')   # recorded in the header only
 
 
 class LapLogger(Node):

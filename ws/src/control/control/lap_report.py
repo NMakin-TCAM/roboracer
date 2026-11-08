@@ -4,8 +4,8 @@
     ros2 run control lap_report <track> [--last N]
     ros2 run control lap_report path/to/run.csv ...       (the laps of the given runs)
 
-Per run: its settings (speed_scale, localizer, avoid), laps finished and aborted, the best lap, the mean
-flying lap, and the mean distance from the raceline over the finished laps.
+Per run: its settings (controller, speed_scale, localizer, avoid), laps finished and aborted, the best lap,
+the mean flying lap, and the mean distance from the raceline over the finished laps.
 """
 import argparse
 import csv
@@ -38,8 +38,8 @@ def run_line(path):
     flying = [float(r['time_s']) for r in ok if r['start'] == 'flying']
     offsets = [float(r['mean_offset_m']) for r in ok]
     mean = lambda v: f'{sum(v) / len(v):.2f}' if v else '-'   # noqa: E731
-    return [os.path.basename(path)[:-4], setting(header.get('speed_scale')), setting(header.get('localizer')),
-            setting(header.get('avoid')), str(len(ok)), str(len(rows) - len(ok)),
+    settings = [setting(header.get(k)) for k in ('controller', 'speed_scale', 'localizer', 'avoid')]
+    return [os.path.basename(path)[:-4], *settings, str(len(ok)), str(len(rows) - len(ok)),
             f'{min(times):.2f}' if times else '-', mean(flying), mean(offsets)]
 
 
@@ -64,8 +64,8 @@ def main(argv=None):
         if args.last:
             runs = runs[-args.last:]
         table([run_line(r) for r in runs],
-              ['run', 'speed_scale', 'localizer', 'avoid', 'laps', 'aborted', 'best_s', 'flying_mean_s',
-               'offset_m'])
+              ['run', 'controller', 'speed_scale', 'localizer', 'avoid', 'laps', 'aborted', 'best_s',
+               'flying_mean_s', 'offset_m'])
         return 0
 
     for path in args.target:
