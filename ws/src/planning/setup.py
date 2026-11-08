@@ -27,6 +27,7 @@ setup(
             'frenet_state_node = planning.frenet_state_node:main',
             'fake_opponent_node = planning.fake_opponent_node:main',
             'update_waypoints_node = planning.update_waypoints_node:main',
+            'collision_prediction_node = planning.collision_prediction_node:main',
         ],
     },
 )
