@@ -3,13 +3,15 @@
 <title>Localization benchmark</title>
 <style>
 .viz-root { color-scheme: light; --page:#f9f9f7; --surface-1:#fcfcfb; --text-primary:#0b0b0b; --text-secondary:#52514e;
-  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10); --series-1:#2a78d6; --series-2:#eb6834; }
+  --muted:#898781; --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,0.10); --series-1:#2a78d6; --series-2:#eb6834;
+  --series-3:#1baf7a; --series-4:#eda100; }
 @media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) .viz-root { color-scheme: dark;
   --page:#0d0d0d; --surface-1:#1a1a19; --text-primary:#f0efec; --text-secondary:#c3c2b7; --muted:#898781;
-  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10); --series-1:#3987e5; --series-2:#d95926; } }
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10); --series-1:#3987e5; --series-2:#d95926;
+  --series-3:#199e70; --series-4:#c98500; } }
 :root[data-theme="dark"] .viz-root { color-scheme: dark; --page:#0d0d0d; --surface-1:#1a1a19; --text-primary:#f0efec;
   --text-secondary:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
-  --series-1:#3987e5; --series-2:#d95926; }
+  --series-1:#3987e5; --series-2:#d95926; --series-3:#199e70; --series-4:#c98500; }
 body { margin:0; }
 .viz-root { background:var(--page); color:var(--text-primary); font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
   min-height:100vh; padding:32px 24px 48px; box-sizing:border-box; }
@@ -48,7 +50,7 @@ td:first-child { white-space:nowrap; }
 .foot { font-size:12.5px; color:var(--muted); margin-top:14px; line-height:1.5; }
 </style></head>
 <body><div class="viz-root"><div class="wrap">
-<h1>Localization benchmark: Cartographer vs our MCL</h1>
+<h1>__TITLE__</h1>
 <p class="sub">__SUB__</p>
 <div class="findings" id="findings"></div>
 <h2>By speed</h2>
@@ -64,11 +66,10 @@ A pose jump is a step of the estimate faster than 15 m/s; a stall is a gap over 
 const RUNS = __RUNS__;
 const METRICS = __METRICS__;
 const TABLE = __TABLE__;
-const LOCS = [...new Set(RUNS.map(r => r.localizer))].sort();
-const NAMES = {cartographer: 'Cartographer', mcl: 'MCL (ours)'};
+const LOCS = __SERIES__;
 const COLOR = l => `var(--series-${LOCS.indexOf(l) + 1})`;
 const SPEEDS = [...new Set(RUNS.map(r => r.speed))].sort((a, b) => a - b);
-const name = l => NAMES[l] || l;
+const name = l => l;
 const mean = v => v.reduce((a, b) => a + b, 0) / v.length;
 const NS = 'http://www.w3.org/2000/svg';
 const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag);
@@ -108,7 +109,7 @@ for (const [key, title, unit, scale, what] of METRICS) {
     if (pts.length > 1) el('path', {d: pts.map((p, i) => (i ? 'L' : 'M') + x(p.s) + ' ' + y(p.v)).join(' '),
       fill: 'none', stroke: COLOR(l), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, svg);
     pts.forEach((p, i) => {
-      p.rs.forEach((r, j) => el('circle', {cx: x(p.s) + (j - (p.rs.length - 1) / 2) * 6 + (LOCS.indexOf(l) ? 3 : -3),
+      p.rs.forEach((r, j) => el('circle', {cx: x(p.s) + (j - (p.rs.length - 1) / 2) * 3 + (LOCS.indexOf(l) - (LOCS.length - 1) / 2) * 5,
         cy: y(r[key] * scale), r: 2.5, fill: COLOR(l), opacity: 0.45}, svg));
       el('circle', {cx: x(p.s), cy: y(p.v), r: 4.5, fill: COLOR(l), stroke: 'var(--surface-1)', 'stroke-width': 2}, svg);
       const hit = el('circle', {cx: x(p.s), cy: y(p.v), r: 14, fill: 'transparent', style: 'cursor:default'}, svg);
@@ -128,7 +129,7 @@ for (const [key, title, unit, scale, what] of METRICS) {
   for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
   for (const e of ends) {
     el('rect', {x: W - m.r + 12, y: e.y - 1, width: 8, height: 2, rx: 1, fill: COLOR(e.l)}, svg);
-    el('text', {x: W - m.r + 24, y: e.y + 3.5, class: 'end'}, svg).textContent = `${name(e.l).split(' ')[0]} ${fmt(e.v, unit)}`;
+    el('text', {x: W - m.r + 24, y: e.y + 3.5, class: 'end'}, svg).textContent = `${name(e.l)} ${fmt(e.v, unit)}`;
   }
 }
 
@@ -139,9 +140,12 @@ const COLS = {err_mean: 'mean err (m)', err_median: 'median (m)', err_p95: 'p95 
   collisions: 'crashes', scan_hz: 'scan Hz'};
 const cell = (k, v) => v === undefined ? '–' : k === 'far_share' ? (v * 100).toFixed(1) + '%' :
   Number.isInteger(v) ? v : ['head_mean', 'head_p95', 'gap_s', 'max_jump', 'err_max', 'scan_hz'].includes(k) ? v.toFixed(k === 'scan_hz' ? 0 : 2) : v.toFixed(3);
-const rows = [...RUNS].sort((a, b) => a.speed - b.speed || a.localizer.localeCompare(b.localizer) || a.name.localeCompare(b.name));
+const rows = [...RUNS].sort((a, b) => a.speed - b.speed || LOCS.indexOf(a.localizer) - LOCS.indexOf(b.localizer) ||
+  a.folder.localeCompare(b.folder) || a.name.localeCompare(b.name));
+const session = r => /-(\d\d)(\d\d)/.test(r.folder) ? ' <span style="color:var(--muted)">' +
+  r.folder.replace(/.*-(\d\d)(\d\d)\d\d$/, '$1:$2') + ' UTC</span>' : '';
 document.getElementById('table').innerHTML = '<tr><th>run</th><th>speed</th>' + TABLE.map(k => `<th>${COLS[k]}</th>`).join('') + '</tr>' +
-  rows.map(r => `<tr><td><i class="dot-key" style="background:${COLOR(r.localizer)}"></i>${name(r.localizer)} ${r.name.split('_').pop()}</td>` +
+  rows.map(r => `<tr><td><i class="dot-key" style="background:${COLOR(r.localizer)}"></i>${name(r.localizer)} ${r.name.split('_').pop()}${session(r)}</td>` +
     `<td>${r.speed}</td>` + TABLE.map(k => `<td>${cell(k, r[k])}</td>`).join('') + '</tr>').join('');
 
 document.getElementById('findings').innerHTML = __FINDINGS__.map(f =>

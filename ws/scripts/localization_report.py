@@ -2,7 +2,12 @@
 """HTML report of localization benchmark results (scripts/localization_benchmark.py), one page, no dependencies.
 
     python3 scripts/localization_report.py log/localization_benchmark/<a>/ log/localization_benchmark/<b>/ ...
-        [-o log/localization_benchmark/report.html]
+        [-o log/localization_benchmark/report.html] [--title TITLE]
+
+A folder may name its series: <folder>:cartographer=Carto before,mcl=MCL (runs of one localizer from several
+folders under one name are one series; e.g. to compare versions of the code). Default names: Cartographer,
+MCL (ours). Series keep the order they first appear in, or --order's (up to 4: the palette's adjacent-safe
+slots).
 
 Groups the runs by speed_scale (from each folder's meta.json) and localizer, and draws one small chart per
 metric (x = speed scale, one line per localizer through the mean of its runs, a dot per run), plus a table of
@@ -26,15 +31,27 @@ TABLE = ['err_mean', 'err_median', 'err_p95', 'err_max', 'far_share', 'head_mean
          'jitter', 'jumps', 'max_jump', 'gap_s', 'stalls', 'laps', 'collisions', 'scan_hz']
 
 
+DEFAULT_NAMES = {'cartographer': 'Cartographer', 'mcl': 'MCL (ours)'}
+
+
 def load(dirs):
-    runs = []
-    for d in dirs:
+    """(runs, series names in order). dirs: 'folder' or 'folder:localizer=Name,localizer=Name'."""
+    runs, series = [], []
+    for arg in dirs:
+        d, _, spec = arg.partition(':')
+        names = dict(DEFAULT_NAMES, **dict(kv.split('=', 1) for kv in spec.split(',') if kv))
         s = json.loads((Path(d) / 'summary.json').read_text())
         meta = s['meta']
         for name, r in s['runs'].items():
-            runs.append({'name': name, 'localizer': name.rsplit('_', 1)[0], 'speed': meta['speed_scale'],
+            loc = name.rsplit('_', 1)[0]
+            label = names.get(loc, loc)
+            if label not in series:
+                series.append(label)
+            runs.append({'name': name, 'localizer': label, 'speed': meta['speed_scale'],
                          'track': meta['track'], 'duration': meta['duration'], 'folder': Path(d).name, **r})
-    return runs
+    if len(series) > 4:
+        raise SystemExit(f'{len(series)} series; at most 4 (fold some together or make two reports)')
+    return runs, series
 
 
 PAGE = (Path(__file__).parent / 'localization_report.html').read_text()
@@ -44,20 +61,21 @@ def plural(n, one, many=None):
     return f'{n} {one if n == 1 else many or one + "s"}'
 
 
-def findings(runs):
-    """Headline tiles: (label, value, note)."""
+def findings(runs, series):
+    """Headline tiles, one per series: (label, value, note)."""
     out = []
 
-    def pick(loc, key, speeds=None):
-        v = [r[key] for r in runs if r['localizer'] == loc and key in r and (speeds is None or r['speed'] in speeds)]
-        return v
-    for loc, label in (('cartographer', 'Cartographer'), ('mcl', 'MCL (ours)')):
-        e = pick(loc, 'err_mean')
+    def pick(loc, key):
+        return [r[key] for r in runs if r['localizer'] == loc and key in r]
+    for label in series:
+        e, n = pick(label, 'err_mean'), sum(r['localizer'] == label for r in runs)
+        crashes = sum(pick(label, 'collisions'))
         if e:
-            out.append((f'{label}: mean error, all runs', f'{100 * sum(e) / len(e):.1f} cm',
-                        f'worst single error {100 * max(pick(loc, "err_max")):.0f} cm; '
-                        f'{plural(sum(pick(loc, "jumps")), "jump")}, '
-                        f'{plural(sum(pick(loc, "collisions")), "crash", "crashes")} in {len(e)} runs'))
+            out.append((f'{label}: crashes in {n} runs', f'{crashes}',
+                        f'mean error {100 * sum(e) / len(e):.1f} cm; worst {100 * max(pick(label, "err_max")):.0f} cm; '
+                        + (f'jitter {1000 * sum(pick(label, "jitter")) / len(pick(label, "jitter")):.0f} mm; '
+                           if pick(label, 'jitter') else '')
+                        + plural(sum(pick(label, 'jumps')), 'pose jump')))
     return out
 
 
@@ -65,8 +83,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('dirs', nargs='+')
     ap.add_argument('-o', '--output', default='log/localization_benchmark/report.html')
+    ap.add_argument('--title', default='Localization benchmark: Cartographer vs our MCL')
+    ap.add_argument('--order', help='series names in the order to show them, comma-separated')
     args = ap.parse_args(argv)
-    runs = load(args.dirs)
+    runs, series = load(args.dirs)
+    if args.order:
+        order = args.order.split(',')
+        series = sorted(series, key=lambda n: order.index(n) if n in order else len(order))
     tracks = sorted({r['track'] for r in runs})
     speeds = sorted({r['speed'] for r in runs})
     reps = max(sum(1 for r in runs if r['localizer'] == loc and r['speed'] == s)
@@ -77,7 +100,8 @@ def main(argv=None):
            'Ground truth from the simulator is used only for scoring.')
     page = (PAGE.replace('__SUB__', html.escape(sub)).replace('__RUNS__', json.dumps(runs))
             .replace('__METRICS__', json.dumps(METRICS)).replace('__TABLE__', json.dumps(TABLE))
-            .replace('__FINDINGS__', json.dumps(findings(runs))))
+            .replace('__FINDINGS__', json.dumps(findings(runs, series))).replace('__SERIES__', json.dumps(series))
+            .replace('__TITLE__', html.escape(args.title)))
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(page)
     print(f'Wrote {args.output} ({len(runs)} runs)')
