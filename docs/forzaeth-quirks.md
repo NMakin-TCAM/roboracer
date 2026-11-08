@@ -18,10 +18,38 @@ says so. The module docstrings hold the full detail; this page collects it
 in one place.
 
 **Pinned** names the unit test that fails if the behaviour changes. **Not
-pinned** means there is no such test. `opponent_trajectory` was also
-checked against upstream's unmodified file under stub ROS: 3,000 random
-scenarios on each of two seeds gave identical output. That harness is not
-in the repository, so it is listed separately from the unit tests.
+pinned** means there is no such test.
+
+**Differential** marks behaviour covered by
+`ws/src/planning/test/test_upstream_differential.py`. That test runs
+upstream's unmodified file under stub ROS against the port on random
+scenarios, requires identical output, and asserts that the run reached each
+listed branch. It is opt-in: set `FORZAETH_SPLINER_SRC` to a directory
+holding upstream's files (Predictive Spliner's `src/` or FSDP's `src/gp/`).
+Without that it skips, so CI and fresh clones are unaffected. A file with a
+different md5 from the one ported fails. The default is 300 scenarios. The
+ports were accepted at `DIFFERENTIAL_SCENARIOS=3000` on `DIFFERENTIAL_SEED`
+1 and 2.
+
+    FORZAETH_SPLINER_SRC=~/predictive-spliner/src \
+        python3 -m pytest src/planning/test/test_upstream_differential.py -q
+
+It covers `opponent_trajectory` only. collision_prediction's 3,000-scenario
+check was run once, during its port, and is not in the repository.
+
+Quirks that no unit test pins, and that the differential now covers:
+
+- `is_visible` never checked. About 5,600 published detections with
+  `is_visible` False per 300 scenarios, identical to upstream's.
+- The AttributeError deviation (§1). The run must reach upstream's crash,
+  and the port's output before it must match.
+
+Still covered by nothing:
+
+- The exactly-half-lap backwards step. Random floats never land on it.
+- The clock constraint.
+- The loop-timing deviations. The differential compares per cycle, so it
+  says nothing about cycle times.
 
 Section 1 covers deliberate deviations from upstream, which anyone comparing
 our results with published ones needs first. Sections 2 to 4 are the
@@ -38,6 +66,7 @@ stored). The port skips the on-trajectory check until a trajectory is
 stored, and tracking continues. This hit 69 of 3,000 random differential
 scenarios. A run that upstream would have ended keeps feeding the GP here.
 Pinned: `test_overtake_predictions_are_counted_but_not_stored`.
+Differential: `upstream_crash_AttributeError`.
 
 **opponent_trajectory: loop timing.** Upstream's main loop never sleeps when no
 opponent is in range, and its off-trajectory wait blocks in `time.sleep(0.02)`
@@ -126,8 +155,7 @@ message is reused every cycle, and `is_visible` is copied into each point
 but never checked. A tracker that keeps publishing a lost opponent's
 predicted position feeds those predictions to the GP as if they were seen.
 This matters as soon as real detection replaces `fake_opponent_node`. Not
-pinned. The differential test covers it: random `is_visible`, with identical
-output.
+pinned by a unit test. Differential: `invisible_detections_published`.
 
 **An opponent is only found if it is last in the obstacle array.** The pick is
 the dynamic obstacle whose `s_start` is nearest ahead of the ego (modulo
