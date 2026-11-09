@@ -20,7 +20,8 @@ from ackermann_msgs.msg import AckermannDriveStamped  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 from sensor_msgs.msg import LaserScan  # noqa: E402
 
-from control.wall_follow_node import LapCounter  # noqa: E402
+from control.wall_follow_node import (LapCounter, TrackWidth, centring_error, corner_turn,  # noqa: E402
+                                      front_speed_factor)
 
 SPEED = 1.0
 DOMAIN = random.randint(1, 101)  # not 0: the live stack (bridge, sim car) runs there
@@ -52,6 +53,46 @@ def test_lap_counter_needs_min_distance():
     for x in (0.0, 1.0, 2.0, 3.5, 2.0, 1.0, 0.0):  # out 3.5 m and straight back: 7 m < 10 m
         lc.update(x, 0.0)
     assert lc.laps == 0
+
+
+def test_track_width_is_learned_from_both_walls():
+    tw = TrackWidth(initial=1.2)
+    assert tw.update(1.0, None) == 1.2                    # one wall: nothing to measure yet
+    for _ in range(30):
+        tw.update(1.2, 1.2)                               # a 2.4 m wide track (Berlin)
+    assert tw.width == pytest.approx(2.4, abs=0.01)
+    for _ in range(30):
+        tw.update(0.4, 0.5)                               # into a 0.9 m hairpin
+    assert tw.width == pytest.approx(0.9, abs=0.01)
+    assert TrackWidth(lo=0.5, hi=6.0).update(0.1, 0.1) > 0.2   # implausible readings are clamped
+
+
+def test_one_wall_holds_half_the_learned_width():
+    # 2.4 m wide, car 1.3 m from the left wall, right wall out of view (an opening): nearly centred, so a small
+    # correction; with the old fixed 1.2 m it read 0.7 m off centre and steered at full lock into the left wall
+    assert centring_error(1.3, None, 2.4) == pytest.approx(0.1)
+    assert centring_error(1.3, None, 1.2) == pytest.approx(0.7)
+    assert centring_error(None, 0.3, 1.0) == pytest.approx(0.2)
+    assert centring_error(1.0, 1.4, 2.4) == pytest.approx(-0.2)
+    assert centring_error(None, None, 2.4) == 0.0
+
+
+def test_slows_down_for_a_wall_ahead():
+    assert front_speed_factor(5.0, 2.0, 0.5) == 1.0
+    assert front_speed_factor(1.5, 2.0, 0.5) == pytest.approx(0.75)
+    assert front_speed_factor(1.2, 2.5, 0.4) == pytest.approx(0.48)    # the defaults at full turning lock
+    assert front_speed_factor(0.2, 2.0, 0.5) == 0.5
+    assert front_speed_factor(0.2, 0.0, 0.5) == 1.0       # disabled
+
+
+def test_turns_towards_the_open_side_when_the_wall_ahead_is_close():
+    # a left hairpin: the inside (left) is open, the outside wall comes up ahead
+    assert corner_turn(3.0, 5.0, 1.5, 2.4, 1.2) == 0.0                # wall still far
+    assert corner_turn(1.8, 5.0, 1.5, 2.4, 1.2) == pytest.approx(0.5)  # halfway in: half lock to the left
+    assert corner_turn(1.2, 5.0, 1.5, 2.4, 1.2) == pytest.approx(1.0)  # full lock while the wall is 1.2 m away
+    assert corner_turn(0.4, 1.5, 5.0, 2.4, 1.2) == pytest.approx(-1.0)  # right hairpin: full lock to the right
+    assert corner_turn(0.5, 2.0, 2.0, 2.4, 1.2) == 0.0                # both sides alike: no preference
+    assert corner_turn(0.5, 5.0, 1.0, 1.0, 1.2) == 0.0                # disabled (start not beyond full)
 
 
 def corridor_scan(left, right, n=1080, angle_min=-2.35619, inc=0.004363323, range_max=10.0):
