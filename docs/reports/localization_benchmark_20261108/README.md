@@ -3,6 +3,8 @@
 Both localizers race the same track in the same simulator session, and their pose is scored against the
 simulator's ground truth. Open **[report.html](report.html)** in a browser for the charts and every run.
 
+The team had already chosen MCL for racing; this is the measured case for that choice.
+
 ## Result (clean session, 3 runs × 60 s per localizer and speed)
 
 | speed_scale | Crashes: Cartographer / MCL | Mean error (cm) | Pose jitter (mm) | Worst error (cm) |
@@ -11,7 +13,8 @@ simulator's ground truth. Open **[report.html](report.html)** in a browser for t
 | 0.7 | **4 / 0** | 7.2 / 8.0 | 20 / 8 | 34 / 20 |
 | 1.0 | **11 / 1** | 7.5 / 9.4 | 31 / 15 | 72 / 65 |
 
-Cartographer includes the stall fix (see below). Values are Cartographer / MCL.
+Cartographer includes the stall fix ([#25](https://github.com/SIGRobotics-UIUC/roboracer/pull/25), below).
+Values are Cartographer / MCL.
 
 - **Mean accuracy is a tie** (7–9 cm for both, about half of it the map's own placement error).
 - **MCL is far safer at speed:** 1 crash in 9 runs against Cartographer's 15.
@@ -24,8 +27,8 @@ Cartographer includes the stall fix (see below). Values are Cartographer / MCL.
 
 The simulator sometimes freezes for 0.1–0.8 s on a loaded machine. `/clock` keeps running, and Cartographer
 extrapolates `/tracked_pose` to the current time, so its pose ran 0.8–3 m ahead of a car that stood still, then
-snapped back. `localization_gate` now holds back poses stamped more than 60 ms after the newest `/odom`
-(normally the lead is 6 ms, 99 % under 30 ms).
+snapped back. [#25](https://github.com/SIGRobotics-UIUC/roboracer/pull/25) makes `localization_gate` hold back
+poses stamped more than 60 ms after the newest `/odom` (normally the lead is 6 ms, 99 % under 30 ms).
 [stall_fix_comparison.html](stall_fix_comparison.html) has the runs before and after (speed 0.7 and 1.0, 4 runs each):
 
 | Cartographer | before | stall fix | odom composition (rejected) |
