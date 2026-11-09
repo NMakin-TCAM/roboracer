@@ -21,7 +21,7 @@ from geometry_msgs.msg import PoseStamped  # noqa: E402
 from sensor_msgs.msg import LaserScan  # noqa: E402
 
 from control.wall_follow_node import (LapCounter, TrackWidth, centring_error, corner_turn,  # noqa: E402
-                                      front_speed_factor)
+                                      front_speed_factor, rate_limit)
 
 SPEED = 1.0
 DOMAIN = random.randint(1, 101)  # not 0: the live stack (bridge, sim car) runs there
@@ -93,6 +93,14 @@ def test_turns_towards_the_open_side_when_the_wall_ahead_is_close():
     assert corner_turn(0.4, 1.5, 5.0, 2.4, 1.2) == pytest.approx(-1.0)  # right hairpin: full lock to the right
     assert corner_turn(0.5, 2.0, 2.0, 2.4, 1.2) == 0.0                # both sides alike: no preference
     assert corner_turn(0.5, 5.0, 1.0, 1.0, 1.2) == 0.0                # disabled (start not beyond full)
+
+
+def test_steering_rate_is_limited():
+    assert rate_limit(None, 0.5, 1.5, 0.03) == 0.5                    # first command: as asked
+    assert rate_limit(0.0, 0.5, 1.5, 0.1) == pytest.approx(0.15)      # a snap to 0.5 rad moves 0.15 in 0.1 s
+    assert rate_limit(0.2, -0.5, 1.5, 0.1) == pytest.approx(0.05)
+    assert rate_limit(0.1, 0.12, 1.5, 0.1) == pytest.approx(0.12)     # small changes pass through
+    assert rate_limit(0.0, 0.5, 0.0, 0.1) == 0.5                      # disabled
 
 
 def corridor_scan(left, right, n=1080, angle_min=-2.35619, inc=0.004363323, range_max=10.0):

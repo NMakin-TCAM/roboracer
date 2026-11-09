@@ -1,7 +1,8 @@
 """Centring wall follower: drives the mapping lap(s) without a map, localization or ground truth.
 
 Measures the distance to the left and right walls, projected a short distance ahead of the car, and
-steers with a PD controller to keep the two equal (i.e. stay on the track centre). When only one wall
+steers with a PD controller to keep the two equal (i.e. stay on the track centre), its steering changing
+at most max_steer_rate. When only one wall
 is in view it holds half the track width from it, the width measured from the scans that see both
 (TrackWidth). When the wall straight ahead is close it turns towards the more open side (a hairpin) and
 slows down; "close" is measured in track widths, so it adapts to each track. It also slows in corners. Optionally counts
@@ -118,14 +119,26 @@ def corner_turn(front, open_left, open_right, start_distance, full_distance):
     return urgency * (1.0 if open_left > open_right else -1.0)
 
 
+def rate_limit(previous, target, max_rate, dt):
+    """target, moved from previous by at most max_rate * dt (no limit without a previous command, a positive
+    dt or a positive max_rate)."""
+    if previous is None or dt <= 0.0 or max_rate <= 0.0:
+        return target
+    step = max_rate * dt
+    return min(previous + step, max(previous - step, target))
+
+
 class WallFollower(Node):
 
     def __init__(self):
         super().__init__('wall_follow_node')
         p = self.declare_parameter
         self.speed = p('speed', 1.0).value                        # m/s on straights
-        self.kp = p('kp', 1.05).value                             # rad of steering per m off centre
-        self.kd = p('kd', 0.10).value                             # rad per (m/s) of drift towards a wall
+        # rad of steering per m off centre, and per (m/s) of drift towards a wall. Was 1.05 / 0.10: it overcorrected
+        # in tight corners (57 / 39 steering reversals a minute on Porto / Berlin, 33 / 27 now); more kd only
+        # added the scan noise's jitter (73 a minute at kd 0.25)
+        self.kp = p('kp', 0.8).value
+        self.kd = p('kd', 0.05).value
         self.lookahead = p('lookahead', 0.8).value                # m ahead at which wall distances are projected
         self.beam_angle = math.radians(p('beam_angle_deg', 45.0).value)  # forward beam, from the side beam
         self.max_range = p('max_range', 5.0).value                # beyond this a side counts as "no wall"
@@ -140,6 +153,10 @@ class WallFollower(Node):
         self.min_turn_full = p('min_turn_full', 0.5).value           # m: floor of the full-lock distance
         self.min_turn_span = p('min_turn_span', 0.3).value           # m: start at least this before full lock
         self.front_min_factor = p('front_min_factor', 0.4).value     # of speed, with the wall right ahead
+        # rad/s the steering may change: a wall dropping in or out of view, the corner turn starting, or the
+        # PD overcorrecting made the steering snap in tight corners. The sim's servo turns at ~3.2 rad/s.
+        self.max_steer_rate = p('max_steer_rate', 1.5).value
+        self.prev_steer = None
         self.open_angle = math.radians(p('open_angle_deg', 60.0).value)  # beams that compare the two sides
         self.corner_slowdown = p('corner_slowdown', 0.5).value    # fraction of speed shed at full steering
         self.max_steer = p('max_steering_angle', 0.524).value     # rad, steering is clipped to this; default mirrors
@@ -221,6 +238,9 @@ class WallFollower(Node):
         # wall's tip reappears close on the inside and centring alone steered away from the turn
         pd = float(np.clip(self.kp * error + self.kd * d_error, -self.max_steer, self.max_steer))
         steering = (1.0 - abs(turn)) * pd + turn * self.max_steer
+        steering = rate_limit(self.prev_steer, steering, self.max_steer_rate, t - self.prev_steer_t
+                              if self.prev_steer is not None else 0.0)
+        self.prev_steer, self.prev_steer_t = steering, t
         speed = self.speed * (1.0 - self.corner_slowdown * abs(steering) / self.max_steer)
         speed *= front_speed_factor(front, self.front_slow_widths * width, self.front_min_factor)
         self.publish(speed, steering)
