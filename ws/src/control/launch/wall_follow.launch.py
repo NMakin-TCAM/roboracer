@@ -3,6 +3,8 @@
     ros2 launch control wall_follow.launch.py [speed:=1.0] [laps:=0] [pose_topic:=/tracked_pose]
         [track_width:=1.2] [debug:=false]
 
+track_width is only the starting guess: the follower measures the width whenever it sees both walls.
+
 Needs only /scan. With laps > 0 it counts laps on pose_topic, stops the car after that many and exits
 (the launch shuts down with it). scripts/map_track.sh --wall-follow runs this during mapping.
 """
@@ -23,7 +25,7 @@ def generate_launch_description():
         DeclareLaunchArgument('pose_topic', default_value='/tracked_pose',
                               description='geometry_msgs/PoseStamped for lap counting'),
         DeclareLaunchArgument('track_width', default_value='1.2',
-                              description='track width [m], used when only one wall is visible'),
+                              description='initial track width [m], until both walls are seen (then measured)'),
         DeclareLaunchArgument('debug', default_value='false', description='log wall distances and steering'),
         Node(
             package='control',

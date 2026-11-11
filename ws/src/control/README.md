@@ -159,6 +159,11 @@ Berlin at 1.0, 0 collisions, 12.38 s laps (off: 30 collisions); lap times at 0.5
 `wall_follow_node` drives the mapping lap(s) of an unseen track: it needs only `/scan`, no map or
 localization. It measures the left and right wall distances (two beams per side, projected
 `lookahead` m ahead), steers with a PD controller to stay centred, and slows down in corners. With
+one wall out of view it holds half the track width from the other, the width measured whenever both are
+in view. When the wall straight ahead gets close (in track widths, so it adapts to each track) it turns
+towards the more open side, as a hairpin needs, and slows down. The steering changes at most
+`max_steer_rate`. No per-track settings: Porto (~1.3 m wide) and Berlin (~2.4 m, a hairpin) drive with the
+defaults. With
 `laps > 0` it counts returns to its start position on `pose_topic`, then stops the car and exits.
 
 ```bash
@@ -175,11 +180,15 @@ ros2 launch control wall_follow.launch.py speed:=1.0 debug:=true     # on its ow
 | Parameter | Default | |
 |---|---|---|
 | `speed` | `1.0` | m/s on straights; keep it low for clean scan matching |
-| `kp`, `kd` | `1.05`, `0.10` | rad per m off centre, rad per m/s of drift |
+| `kp`, `kd` | `0.8`, `0.05` | rad per m off centre, rad per m/s of drift |
+| `max_steer_rate` | `1.5` | rad/s the steering may change (no snaps); 0 = no limit |
 | `lookahead` | `0.8` | m ahead at which the wall distances are projected |
 | `beam_angle_deg` | `45` | angle between the side beam and the forward beam |
 | `max_range` | `5.0` | m, a side with no return within this has no wall |
-| `track_width` | `1.2` | m, holds half of it from the wall when only one wall is visible |
+| `track_width` | `1.2` | m, initial guess only: the width is measured whenever both walls are in view (`width_alpha` `0.2` smoothing) |
+| `turn_start_widths`, `turn_full_widths` | `1.0`, `0.5` | wall ahead within this many track widths: start turning towards the open side, full lock (floors `min_turn_full` `0.5` m, `min_turn_span` `0.3` m) |
+| `open_angle_deg` | `60` | beams that compare how open the two sides are |
+| `front_slow_widths`, `front_min_factor` | `1.05`, `0.4` | wall ahead within this many track widths: slow down, to this fraction of `speed` |
 | `corner_slowdown` | `0.5` | fraction of `speed` shed at full steering |
 | `max_steering_angle` | `0.524` | rad, steering is clipped to this; `wall_follow.launch.py` loads it from `config/vehicle.yaml` |
 | `laps` | `0` | stop after this many laps, 0 = never |
