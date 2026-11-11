@@ -144,6 +144,20 @@ search: the car stops only when the particle cloud itself spreads.
 Parameters: `ws/src/perception/config/mcl.yaml`; `ros2 launch perception mcl.launch.py track:=<name> particles:=2000`.
 Never run it with `localization.launch.py`: both publish `map -> odom`.
 
+### Localization benchmark
+
+`scripts/localization_benchmark.py` races each localizer on a mapped track (the normal `race.sh`), alternating
+them, and scores `/localized_pose` against the sim's ground truth: mean / p95 / worst error, heading error, pose
+jitter (how much the estimate wobbles over 50 ms), pose jumps, sim stalls, laps and crashes.
+`scripts/localization_report.py` turns result folders into one HTML page of charts.
+
+```bash
+python3 scripts/localization_benchmark.py run --track porto --repeats 3 --speed-scale 0.7    # in the container
+python3 scripts/localization_report.py log/localization_benchmark/<folder> ... -o report.html
+```
+
+Results on Porto (2026-11-08): [docs/reports/localization_benchmark_20261108](docs/reports/localization_benchmark_20261108/README.md).
+
 To see how far any localizer is from the sim's ground truth, run this next to `race.sh` (it needs
 `tracks/<name>/map_to_world.yaml`; Ctrl-C prints the run's total):
 
