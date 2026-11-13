@@ -33,6 +33,8 @@ setup(
             'predictor_opponent_trajectory_node = planning.predictor_opponent_trajectory_node:main',
             'global_waypoints_publisher_node = planning.global_waypoints_publisher_node:main',
             'state_machine_stub_node = planning.state_machine_stub_node:main',
+            'spliner_node = planning.spliner_node:main',
+            'local_path_node = planning.local_path_node:main',
         ],
     },
 )

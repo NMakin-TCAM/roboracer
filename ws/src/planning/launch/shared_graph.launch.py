@@ -38,34 +38,13 @@ localizer:=external here so the localizer is not started twice).
 import os
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo, OpaqueFunction
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
-from launch_ros.substitutions import FindPackageShare
 
 from perception.tracks import track_dir, tracks_dir
-
-LOCALIZERS = {
-    'cartographer': 'localization.launch.py',
-    'mcl': 'mcl.launch.py',
-}
-
-
-def localizer(context):
-    which = LaunchConfiguration('localizer').perform(context)
-    if which == 'external':
-        return [LogInfo(msg='localizer:=external: this launch starts NO localizer. Something '
-                            'else must publish /localized_pose (map frame), or nothing '
-                            'downstream of frenet_state_node will ever run.')]
-    if which not in LOCALIZERS:
-        raise RuntimeError(f'localizer must be cartographer, mcl or external, got {which!r}. '
-                           f'A localizer is required: frenet_state_node consumes '
-                           f'/localized_pose and does not fall back to /tracked_pose.')
-    return [IncludeLaunchDescription(
-        PathJoinSubstitution([FindPackageShare('perception'), 'launch', LOCALIZERS[which]]),
-        launch_arguments={'track': LaunchConfiguration('track'),
-                          'use_sim_time': LaunchConfiguration('use_sim_time')}.items())]
+from planning.launch_helpers import localizer
 
 
 def graph(context):
