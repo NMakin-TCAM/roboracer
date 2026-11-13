@@ -21,6 +21,17 @@ following ForzaETH so their planner code ports unedited:
 pose.pose.orientation additionally carries the car's heading relative to the
 reference tangent, as a yaw-only quaternion. ForzaETH leave it empty; a planner
 running a bicycle model in Frenet needs it, and filling it costs nothing.
+
+POSE SOURCE. The pose comes from /localized_pose: perception's
+localization_gate (Cartographer) or mcl_node, one of which race.launch.py
+always starts. AGENTS.md: racing consumes /localized_pose and must not
+bypass the gate with /tracked_pose. The gate withholds the pose until the
+car is localized and while Cartographer extrapolates it past the sensors:
+in a sim stall /tracked_pose ran 0.8-3 m ahead of a car that stood still,
+then snapped back (localization_gate.py), and every planner downstream of
+this node would have planned from that. So nothing is published until the
+car is localized, which is what the consumers should see. Only for a run
+without a localizer, such as mapping, set pose_topic:=/tracked_pose.
 """
 
 import math
@@ -45,15 +56,15 @@ def wrap_to_pi(a):
 
 class FrenetStateNode(Node):
 
-    def __init__(self):
-        super().__init__('frenet_state_node')
+    def __init__(self, **kwargs):
+        super().__init__('frenet_state_node', **kwargs)   # kwargs: Node's, e.g. parameter_overrides (tests)
         p = lambda n, v: self.declare_parameter(n, v).value
 
         tracks_dir = p('tracks_dir', os.environ.get('TRACKS_DIR',
                                                     os.path.expanduser('~/ws/tracks')))
         track_name = p('track_name', '')
         reference = p('reference', 'raceline')       # 'raceline' | 'centerline'
-        pose_topic = p('pose_topic', '/tracked_pose')
+        pose_topic = p('pose_topic', '/localized_pose')   # see POSE SOURCE
         odom_topic = p('odom_topic', '/odom')
         out_topic = p('out_topic', '/car_state/odom_frenet')
 
