@@ -19,6 +19,9 @@
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-pil</exec_depend>
+  <!-- predictor_opponent_trajectory. Installed with pip (scikit-learn 1.3.2) in
+       docker/install_deps.sh: the apt package's 0.23.2 is too old (needs >= 1.1). -->
+  <exec_depend>python3-sklearn</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>tf2_ros</exec_depend>   <!-- obstacle_spliner_node: lidar pose on the car -->
   <exec_depend>geometry_msgs</exec_depend>

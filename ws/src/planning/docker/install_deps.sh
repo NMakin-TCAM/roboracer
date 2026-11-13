@@ -17,6 +17,18 @@ apt-get install -y --no-install-recommends \
     python3-venv python3-dev build-essential git
 rm -rf /var/lib/apt/lists/*
 
+# scikit-learn for predictor_opponent_trajectory (ROS's Python, not the TUM venv). Not apt's
+# python3-sklearn: 0.23.2 returns the GP mean as (n, 1), on which upstream's code fails, and only
+# from 1.1 does the port match upstream. --no-deps keeps apt's numpy and scipy; 1.3.2 accepts them
+# (numpy >= 1.17.3, scipy >= 1.5) and is the version the TUM venv pins.
+pip3 install --no-cache-dir --no-deps scikit-learn==1.3.2 joblib==1.3.2 threadpoolctl==3.2.0
+python3 -c "
+import numpy, scipy, sklearn
+from sklearn.gaussian_process import GaussianProcessRegressor
+assert sklearn.__version__ == '1.3.2', sklearn.__version__
+print('ROS Python: scikit-learn', sklearn.__version__, 'numpy', numpy.__version__, 'scipy', scipy.__version__)
+"
+
 git clone --quiet "$TUM_REPO" "$TUM_DIR"
 git -C "$TUM_DIR" checkout --quiet "$TUM_COMMIT"
 # Scaling factors / yaw-rate bound configurable for a 1/10 car, and the yaw-moment arm fix.
