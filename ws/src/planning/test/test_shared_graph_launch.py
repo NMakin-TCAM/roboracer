@@ -7,11 +7,15 @@ without them. It publishes no /drive and no simulator topic, but still keep it
 off a live stack's domain.
 
 Phase 1 asserts what the graph can do by itself today: every node that does not
-depend on the main GP publishes within a bounded time, the waypoints are latched
+depend on the main GP publishes within a bounded time, the planners' obstacles
+come from obstacle_tracker_node (one stable id, is_static False, vs near the
+opponent's speed) and opponent_trajectory builds its half lap from them, the waypoints are latched
 for a late subscriber, and the two nodes that need the GP's /opponent_trajectory
 (predictor_opponent_trajectory, collision_prediction) stay silent. Phase 2 stands
 in for the missing GP with a synthetic /opponent_trajectory along the raceline,
 and asserts that both of them then leave their wait loops and publish.
+collision_prediction publishes force_trailing only when it has taken a dynamic
+obstacle as the opponent, so that message is the evidence it sees the tracked one.
 
 This exercises transport, QoS and launch wiring only. It says nothing about
 whether an overtake would work.
@@ -52,6 +56,7 @@ WATCH = {
     '/global_waypoints_scaled': (WpntArray, WAYPOINTS_QOS),
     '/state_machine': (String, None),
     '/car_state/odom_frenet': (Odometry, None),
+    '/perception/detections': (ObstacleArray, None),
     '/perception/obstacles': (ObstacleArray, None),
     '/proj_opponent_trajectory': (ProjOppTraj, None),
     '/global_waypoints_updated': (WpntArray, None),
@@ -65,7 +70,8 @@ PHASE1 = {
     '/global_waypoints_scaled': 'global_waypoints_publisher',
     '/state_machine': 'state_machine_stub',
     '/car_state/odom_frenet': 'frenet_state_node',
-    '/perception/obstacles': 'fake_opponent_node',
+    '/perception/detections': 'fake_opponent_node',
+    '/perception/obstacles': 'obstacle_tracker_node',
     '/proj_opponent_trajectory': 'opponent_trajectory',
     '/global_waypoints_updated': 'waypoint_updater',
 }
@@ -167,6 +173,8 @@ class Harness:
         self.opp_s = None
         self.opp_seen = 0.0
         self.t0 = time.monotonic()
+        self.tracked = []             # (t, id, is_static, vs, is_visible) per tracked obstacle
+        self.vs_var = []
 
         for topic, (kind, qos) in WATCH.items():
             node.create_subscription(kind, topic, lambda m, t=topic: self.record(t, m),
@@ -182,6 +190,10 @@ class Harness:
         if topic == '/perception/obstacles' and msg.obstacles:
             self.opp_s = float(msg.obstacles[0].s_center)
             self.opp_seen = time.monotonic()
+            for o in msg.obstacles:
+                self.tracked.append((time.monotonic() - self.t0, o.id, o.is_static, o.vs,
+                                     o.is_visible))
+                self.vs_var.append(o.vs_var)
         self.first.setdefault(topic, time.monotonic() - self.t0)
         self.last[topic] = msg
 
@@ -248,6 +260,20 @@ def test_graph_comes_up_and_only_the_gp_is_missing(graph):
             'a GP-dependent node published without any /opponent_trajectory'
         assert 'Not falling back to /tracked_pose' not in log   # the pose did arrive
 
+        # The planners' obstacles are the tracker's: one id, moving, at the opponent's speed,
+        # nothing coasted. The fake's own vs and is_static never reach them.
+        assert {i for _, i, _, _, _ in h.tracked} == {0}
+        settled = [x for x in h.tracked if x[0] > h.tracked[0][0] + 1.0]
+        assert settled and not any(st for _, _, st, _, _ in settled)
+        assert all(vis for *_, vis in h.tracked)
+        assert np.median([vs for _, _, _, vs, _ in settled]) == pytest.approx(SPEED, abs=0.2)
+        # The fake here is an ideal sensor and reports vs_var at the 1e-6 floor; the filter's
+        # is far above it, so these are the tracker's numbers, not the fake's passed through.
+        assert min(h.vs_var) > 1e-4
+        # opponent_trajectory picked the tracked opponent: its half lap is made of it.
+        half_lap = h.last['/proj_opponent_trajectory'].detections
+        assert half_lap and not any(p.is_static for p in half_lap)
+
         # A subscriber that joins now, long after the single publish, still gets them.
         late = []
         node.create_subscription(WpntArray, '/global_waypoints', late.append, WAYPOINTS_QOS)
@@ -259,6 +285,8 @@ def test_graph_comes_up_and_only_the_gp_is_missing(graph):
         # ---- phase 2: a synthetic GP output unblocks the last two
         h.start_synthetic_gp()
         h.spin_until(NEEDS_GP, PHASE2_TIMEOUT, proc, log_path)
+        # force_trailing is only published once collision_prediction has an opponent, the
+        # first dynamic obstacle: the tracked one, since nothing else publishes obstacles.
         assert not missing(h, NEEDS_GP), (f'still silent with a synthetic /opponent_trajectory: '
                                           f'{missing(h, NEEDS_GP)}\n'
                                           f'{log_path.read_text()[-4000:]}')

@@ -4,6 +4,7 @@
         [localizer:=cartographer|mcl|external] [state:=GB_TRACK|TRAILING|OVERTAKE]
         [use_sim_time:=true] [opponent_mode:=constant_speed] [opponent_speed:=2.0]
         [opponent_s0:=5.0] [opponent_d:=0.0] [opponent_seed:=0] [opponent_max_range:=10.0]
+        [tracker:=true|false]
 
 Starts, in one launch:
 
@@ -13,10 +14,11 @@ Starts, in one launch:
                                     /global_waypoints_scaled (latched)
     state_machine_stub_node         fixed `state` -> /state_machine (a stand-in)
     frenet_state_node               /localized_pose + /odom -> /car_state/odom_frenet
-    fake_opponent_node              -> /perception/obstacles (its Marker moved to
+    fake_opponent_node              -> /perception/detections (its Marker moved to
                                     /fake_opponent/marker: opponent_trajectory_node
                                     publishes a MarkerArray on /opponent_marker, and two
                                     types on one topic breaks every subscriber)
+    obstacle_tracker_node           /perception/detections -> /perception/obstacles
     opponent_trajectory_node        -> /proj_opponent_trajectory
     predictor_opponent_trajectory_node -> /opponent_trajectory
     update_waypoints_node           -> /global_waypoints_updated
@@ -30,6 +32,15 @@ need sensors: the AutoDRIVE bridge (autodrive_bridge autodrive_launch.py) or the
 car. localizer:=external starts none, for when one is already running, e.g. under
 race.launch.py, or when a test publishes /localized_pose itself. Never run two.
 With no pose arriving, frenet_state_node logs an ERROR every 5 s saying so.
+
+THE TRACKER (tracker:=true, the default) stands where a real detector's tracker
+will: the planners consume tracked obstacles, whose ids, velocities, variances
+and is_static come from obstacle_tracker_node, not from the fake publisher. Both
+opponent_trajectory and collision_prediction discard obstacles whose is_static
+is True, so the tracker's classification decides whether they see the opponent.
+Every field of the fake's own output except the position and footprint is
+ignored. tracker:=false wires fake_opponent_node straight to
+/perception/obstacles, as before, with its ground-truth vs, vd and is_static.
 
 NOTHING HERE DRIVES. No node in this graph publishes /drive; the car stays where
 it is unless a controller is started separately (race.launch.py, with
@@ -56,6 +67,10 @@ def graph(context):
                                f'(scripts/map_track.sh {track})')
 
     track_params = {'tracks_dir': tracks_dir(), 'track_name': track, 'reference': 'raceline'}
+    tracked = LaunchConfiguration('tracker').perform(context).lower()
+    if tracked not in ('true', 'false'):
+        raise RuntimeError(f'tracker must be true or false, got {tracked!r}')
+    tracked = tracked == 'true'
 
     def node(executable, extra=None):
         return Node(package='planning', executable=executable, output='screen',
@@ -73,12 +88,16 @@ def graph(context):
         'seed': ParameterValue(LaunchConfiguration('opponent_seed'), value_type=int),
         'max_range': ParameterValue(LaunchConfiguration('opponent_max_range'), value_type=float),
         'marker_topic': '/fake_opponent/marker',
+        'out_topic': '/perception/detections' if tracked else '/perception/obstacles',
     }
+    tracker = [node('obstacle_tracker_node', {'in_topic': '/perception/detections',
+                                              'out_topic': '/perception/obstacles'})]
     return [
         node('global_waypoints_publisher_node'),
         plain('state_machine_stub_node', {'state': LaunchConfiguration('state')}),
         node('frenet_state_node'),
         node('fake_opponent_node', opponent),
+        *(tracker if tracked else []),
         node('opponent_trajectory_node'),
         node('predictor_opponent_trajectory_node'),
         # update_waypoints takes no track: it works on the waypoints it receives.
@@ -107,6 +126,9 @@ def generate_launch_description():
         DeclareLaunchArgument('opponent_seed', default_value='0'),
         DeclareLaunchArgument('opponent_max_range', default_value='10.0',
                               description='fake sensor range ahead of the ego, m'),
+        DeclareLaunchArgument('tracker', default_value='true',
+                              description='true: fake_opponent_node -> obstacle_tracker_node -> '
+                                          'planners; false: the fake feeds the planners directly'),
         SetParameter(name='use_sim_time',
                      value=ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)),
         OpaqueFunction(function=localizer),
