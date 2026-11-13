@@ -28,6 +28,9 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>launch</exec_depend>          <!-- shared_graph.launch.py -->
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>perception</exec_depend>      <!-- shared_graph.launch.py: localizer, track paths -->
   <!-- apt deps + the TUM optimizer venv (/opt/tum_venv): docker/install_deps.sh, run by the Dockerfile -->
 
   <test_depend>python3-pytest</test_depend>

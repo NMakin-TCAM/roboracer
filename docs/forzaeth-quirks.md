@@ -73,7 +73,8 @@ Still covered by nothing:
 Section 1 covers deliberate deviations from upstream, which anyone comparing
 our results with published ones needs first. Sections 2 to 5 are the
 preserved quirks, ordered by how much they can change what the comparison
-is able to claim.
+is able to claim. Section 6 covers the stand-ins this repository puts where
+upstream's own publishers would be, so that the four ports can run at all.
 
 ## 1. Deviations from upstream (behaviour differs)
 
@@ -487,3 +488,87 @@ waypoints change while running. Pinned:
   The ports stamp markers at publish time, and opponent_trajectory's get an
   identity quaternion where upstream left it all zeros. rclpy needs ints
   converted to float and bool. Not pinned.
+
+## 6. Stand-ins for upstream's publishers
+
+The four ports wait on `/global_waypoints`, `/global_waypoints_scaled` and
+`/state_machine`. Upstream, ForzaETH's global planner and state machine
+publish them; nothing in this repository did, so none of the ports could
+leave its wait loop. `planning shared_graph.launch.py` starts the ports
+together with the stand-ins below. None of these is a port, and each one
+simplifies in a way that the comparison has to account for.
+
+**global_waypoints_publisher_node: the raceline as global waypoints.**
+`tracks/<name>/raceline.csv` (build_raceline's output, the same file
+pure_pursuit and FrenetConverter read) becomes one `WpntArray`, published once
+on both topics. The conversion is in `global_waypoints_publisher.py`, which
+imports no ROS. Its docstring gives the source of every `Wpnt` field. In
+brief:
+
+- `d_m` is 0, because the waypoints are the reference line that
+  `frenet_state_node` measures d against. Only `reference=raceline` is
+  accepted.
+- `d_left` and `d_right` are positive distances from the raceline to the
+  track edges, as upstream's are. They are computed from `centerline.csv`,
+  because the raceline file has no widths.
+- `psi_rad` is ROS yaw. The file's TUM heading (yaw - pi/2) is converted and
+  checked against the path direction first.
+- The closing row is kept, because `opponent_trajectory` and the predictor
+  take `wpnts[-1].s_m` as the track length.
+- A raceline without positive speeds is refused rather than zero-filled.
+  Curvature and acceleration are recomputed only when the file has none, and
+  the log says so when that happens.
+
+Pinned: `test_global_waypoints_publisher.py`.
+
+**/global_waypoints_scaled is unscaled.** Upstream it is the raceline with
+the speeds multiplied by a velocity factor that the state machine owns. There
+is no velocity scaler here, so the factor is 1 and both topics carry
+identical messages. This is a deliberate simplification. `update_waypoints`
+republishes the scaled array as `/global_waypoints_updated`, and
+`collision_prediction` predicts the ego's motion from that, so every collision
+region is computed at full raceline speed. Upstream would compute it at
+whatever speed its scaler had set. The node logs a WARN about this at startup.
+Not pinned.
+
+**Latched waypoints (a deviation in all four node wrappers).** Both waypoint
+topics are TRANSIENT_LOCAL, KEEP_LAST(1), RELIABLE, on the publisher and on
+every port's subscription (`planning/waypoint_qos.py`). The ports use only the
+first message, and a VOLATILE subscription never receives one published before
+it started, so with the original VOLATILE subscriptions a port that started
+after the publisher waited forever. The side effect is that a VOLATILE
+publisher on these topics now reaches no port. To publish by hand, use
+`ros2 topic pub --qos-durability transient_local --qos-depth 1`. Pinned by
+the late-subscriber check in `test_shared_graph_launch.py`.
+
+**state_machine_stub_node: a fixed state, not a state machine.** It publishes
+the `state` parameter (`GB_TRACK`, `TRAILING` or `OVERTAKE`) on
+`/state_machine` as `std_msgs/String` at 10 Hz. The state can be changed at
+runtime with `ros2 param set /state_machine_stub state OVERTAKE`. The stub
+never changes state by itself, and it ignores
+`collision_prediction/force_trailing`, the output that upstream's state
+machine uses to decide whether an overtake is allowed. By the ports' code:
+
+- `update_waypoints` writes measured speeds only in GB_TRACK, after
+  `hysteresis_time`.
+- `opponent_trajectory` stops storing GP output in OVERTAKE.
+- `collision_prediction` stores the state and never reads it.
+- The predictor does not subscribe.
+
+Unknown or lower-case state names are refused, since they would leave both
+gated branches inert without any error. Pinned (validation only):
+`test_known_states_pass`, `test_unknown_states_are_refused`.
+
+**fake_opponent_node's marker moves to `/fake_opponent/marker` in the
+launch.** `opponent_trajectory_node` publishes a `MarkerArray` on
+`/opponent_marker` (upstream's name), and the fake opponent defaulted to a
+`Marker` on the same topic. Two types on one topic break every subscriber.
+Not pinned.
+
+**Still missing: the main GP.** `predictor_opponent_trajectory` and
+`collision_prediction` both wait for an `/opponent_trajectory`. Upstream,
+that comes first from `gaussian_process_opp_traj.py`, which differs between
+Predictive Spliner and FSDP and so is not shared code. Until a branch ports
+its own GP, neither node ever publishes. `test_shared_graph_launch.py` asserts
+both halves: the two nodes are silent without the GP, and once a synthetic
+`/opponent_trajectory` along the raceline stands in for it, both publish.

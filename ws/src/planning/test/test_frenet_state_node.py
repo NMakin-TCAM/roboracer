@@ -60,3 +60,20 @@ def test_pose_topic_can_still_be_overridden(ros, tracks):
         assert subscribed(node) == {'/tracked_pose', '/odom'}
     finally:
         node.destroy_node()
+
+
+def test_missing_localizer_is_measured_from_start_then_from_the_last_pose(ros, tracks):
+    """The no-pose ERROR (see NO LOCALIZER) counts from startup until a pose arrives."""
+    import time
+    from geometry_msgs.msg import PoseStamped
+    node = make_node(tracks, pose_timeout=5.0)
+    try:
+        assert node.last_pose is None
+        assert node.pose_silence(node.started + 7.0) == pytest.approx(7.0)
+        pose = PoseStamped()
+        pose.header.frame_id = 'map'
+        pose.pose.position.x, pose.pose.orientation.w = R, 1.0
+        node.pose_cb(pose)
+        assert node.pose_silence(time.monotonic()) < 1.0
+    finally:
+        node.destroy_node()

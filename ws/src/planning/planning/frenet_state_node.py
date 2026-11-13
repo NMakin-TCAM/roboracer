@@ -32,14 +32,23 @@ then snapped back (localization_gate.py), and every planner downstream of
 this node would have planned from that. So nothing is published until the
 car is localized, which is what the consumers should see. Only for a run
 without a localizer, such as mapping, set pose_topic:=/tracked_pose.
+
+NO LOCALIZER. Every planner downstream waits on this node, so a missing
+localizer used to look like a hang. While nothing arrives on pose_topic for
+pose_timeout seconds (steady time, so it also fires with use_sim_time and no
+/clock), the node logs an ERROR naming the localizer it needs, every
+pose_timeout seconds. It never falls back to another pose source.
 """
 
 import math
 import os
+import time
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
+from rclpy.clock import Clock, ClockType
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 from planning.frenet import FrenetConverter
@@ -67,6 +76,7 @@ class FrenetStateNode(Node):
         pose_topic = p('pose_topic', '/localized_pose')   # see POSE SOURCE
         odom_topic = p('odom_topic', '/odom')
         out_topic = p('out_topic', '/car_state/odom_frenet')
+        self.pose_timeout = float(p('pose_timeout', 5.0))
 
         if not track_name:
             raise RuntimeError('frenet_state_node needs the track_name parameter')
@@ -88,6 +98,13 @@ class FrenetStateNode(Node):
         self.create_subscription(Odometry, odom_topic, self.odom_cb, 10)
         self.create_subscription(PoseStamped, pose_topic, self.pose_cb, 10)
 
+        self.pose_topic = pose_topic
+        self.started = time.monotonic()
+        self.last_pose = None          # time.monotonic() of the last pose
+        if self.pose_timeout > 0:
+            self.create_timer(self.pose_timeout, self.check_pose,
+                              clock=Clock(clock_type=ClockType.STEADY_TIME))
+
         self.get_logger().info(
             f'{self.conv!r} on {track_name}: d measured against the {reference}, '
             f'lap {self.conv.length:.2f} m, publishing {out_topic} as {self.frame}')
@@ -98,7 +115,23 @@ class FrenetStateNode(Node):
         self.speed = float(msg.twist.twist.linear.x)
         self.have_odom = True
 
+    def pose_silence(self, now):
+        """Seconds without a pose on pose_topic (since start if none ever came)."""
+        return now - (self.started if self.last_pose is None else self.last_pose)
+
+    def check_pose(self):
+        silent = self.pose_silence(time.monotonic())
+        if silent < self.pose_timeout:
+            return
+        what = 'no pose yet' if self.last_pose is None else 'no pose'
+        self.get_logger().error(
+            f'{what} on {self.pose_topic} for {silent:.0f} s: nothing is published on '
+            f'/car_state/odom_frenet and every planner downstream is waiting. A localizer is '
+            f'required (perception localization.launch.py or mcl.launch.py), and it must have '
+            f'localized. Not falling back to /tracked_pose.')
+
     def pose_cb(self, msg):
+        self.last_pose = time.monotonic()
         x = msg.pose.position.x
         y = msg.pose.position.y
         yaw = yaw_from_quaternion(msg.pose.orientation)
@@ -128,7 +161,7 @@ def main(args=None):
     node = FrenetStateNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
