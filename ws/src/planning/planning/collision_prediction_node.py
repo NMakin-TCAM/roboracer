@@ -24,8 +24,13 @@ ROS 1 to ROS 2 differences:
     have each delivered a message. Upstream waited on the first two and never
     used them, and still does not here. Upstream also waited in sequence,
     each for a message after the previous one arrived; here any order counts.
-    Default (VOLATILE) QoS, as in update_waypoints_node.py, for the same
-    reasons.
+    /global_waypoints and /global_waypoints_scaled are subscribed
+    TRANSIENT_LOCAL, KEEP_LAST(1)
+    (planning.waypoint_qos), matching global_waypoints_publisher_node, which
+    publishes them once, latched. A VOLATILE subscription would never see a
+    message published before it started, and the node would wait forever.
+    The other inputs are published continuously and keep default (VOLATILE)
+    QoS.
   * The dynamic_reconfigure Config subscription became ROS 2 parameters with
     upstream's names and defaults (n_time_steps, dt, save_distance_front,
     save_distance_back, max_v, min_v, max_a, min_a, max_expire_counter),
@@ -51,6 +56,7 @@ from visualization_msgs.msg import Marker
 from f1t_msgs.msg import Obstacle, ObstacleArray, OpponentTrajectory, WpntArray
 from planning.collision_prediction import CollisionParams, CollisionPredictor
 from planning.frenet import FrenetConverter
+from planning.waypoint_qos import WAYPOINTS_QOS
 
 # Upstream parameter name -> CollisionParams field, with the type it must have.
 PARAMS = {
@@ -111,9 +117,9 @@ class CollisionPredictionNode(Node):
                                  self.opponent_trajectory_cb, 10)
         self.create_subscription(WpntArray, '/global_waypoints_updated', self.updated_cb, 10)
         self.create_subscription(WpntArray, '/global_waypoints',
-                                 lambda _: self._saw('global'), 10)
+                                 lambda _: self._saw('global'), WAYPOINTS_QOS)
         self.create_subscription(WpntArray, '/global_waypoints_scaled',
-                                 lambda _: self._saw('scaled'), 10)
+                                 lambda _: self._saw('scaled'), WAYPOINTS_QOS)
         self.create_subscription(String, '/state_machine', self.state_cb, 10)
         self.create_timer(1.0 / rate, self.tick)
 

@@ -23,8 +23,12 @@ ROS 1 to ROS 2 differences:
     computed until /global_waypoints and /perception/obstacles have both
     delivered a message, in either order (upstream waited for the waypoints
     three times, then the obstacles). Upstream did not wait for odometry and
-    still does not: no opponent is found until it arrives. Default (VOLATILE)
-    QoS, as in update_waypoints_node.py, for the same reasons.
+    still does not: no opponent is found until it arrives.
+    /global_waypoints is subscribed TRANSIENT_LOCAL, KEEP_LAST(1)
+    (planning.waypoint_qos), matching global_waypoints_publisher_node, which
+    publishes them once, latched. A VOLATILE subscription would never see a
+    message published before it started, and the node would wait forever.
+    The other inputs keep default (VOLATILE) QoS.
   * The waypoints, bounds and track length are fixed from the first
     /global_waypoints message, as upstream's loop fixed them from the one it
     started with. Later messages only update the second track length (see
@@ -58,6 +62,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from f1t_msgs.msg import (ObstacleArray, OpponentTrajectory, ProjOppPoint, ProjOppTraj,
                           WpntArray)
 from planning.frenet import FrenetConverter
+from planning.waypoint_qos import WAYPOINTS_QOS
 from planning.opponent_trajectory import OpponentTrajectoryTracker
 
 
@@ -96,7 +101,8 @@ class OpponentTrajectoryNode(Node):
 
         self.create_subscription(ObstacleArray, '/perception/obstacles', self.obstacles_cb, 10)
         self.create_subscription(Odometry, '/car_state/odom_frenet', self.odom_cb, 10)
-        self.create_subscription(WpntArray, '/global_waypoints', self.waypoints_cb, 10)
+        self.create_subscription(WpntArray, '/global_waypoints', self.waypoints_cb,
+                                 WAYPOINTS_QOS)
         self.create_subscription(OpponentTrajectory, '/opponent_trajectory',
                                  self.opponent_trajectory_cb, 10)
         self.create_subscription(String, '/state_machine', self.state_cb, 10)

@@ -16,8 +16,13 @@ ROS 1 to ROS 2 differences:
     same messages are processed.
   * The rospy.wait_for_message calls on /global_waypoints (three) and then
     /opponent_trajectory became subscriptions. Nothing is processed until both
-    have delivered a message, in either order. Default (VOLATILE) QoS, as in
-    the other ports.
+    have delivered a message, in either order.
+    /global_waypoints is subscribed TRANSIENT_LOCAL, KEEP_LAST(1)
+    (planning.waypoint_qos), matching global_waypoints_publisher_node, which
+    publishes them once, latched. A VOLATILE subscription would never see a
+    message published before it started, and the node would wait forever.
+    /proj_opponent_trajectory and /opponent_trajectory keep default
+    (VOLATILE) QoS.
   * Upstream's node was named gaussian_process_opp_traj, the same name as the
     main GP node, which only worked because both were anonymous. Here it is
     predictor_opponent_trajectory. Upstream's rospy.Rate(10) was never slept on
@@ -40,6 +45,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from f1t_msgs.msg import OpponentTrajectory, ProjOppTraj, WpntArray
 from planning.frenet import FrenetConverter
+from planning.waypoint_qos import WAYPOINTS_QOS
 from planning.predictor_opponent_trajectory import ReturnPredictor
 
 
@@ -71,7 +77,8 @@ class PredictorOpponentTrajectoryNode(Node):
         self.pub_markers = self.create_publisher(MarkerArray, '/opponent_traj_markerarray', 10)
 
         self.create_subscription(ProjOppTraj, '/proj_opponent_trajectory', self.proj_cb, 10)
-        self.create_subscription(WpntArray, '/global_waypoints', self.waypoints_cb, 10)
+        self.create_subscription(WpntArray, '/global_waypoints', self.waypoints_cb,
+                                 WAYPOINTS_QOS)
         # Includes this node's own output, as upstream's did.
         self.create_subscription(OpponentTrajectory, '/opponent_trajectory',
                                  self.opponent_trajectory_cb, 10)

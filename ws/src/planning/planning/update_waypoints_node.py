@@ -7,19 +7,13 @@ file reads topics, hands them to WaypointUpdater, and publishes on a timer.
 ROS 1 to ROS 2 differences:
 
   * rospy.wait_for_message on the two waypoint topics became subscriptions;
-    nothing is published until both have arrived. They use default (VOLATILE)
-    QoS, which matches both VOLATILE and TRANSIENT_LOCAL publishers, whereas a
-    TRANSIENT_LOCAL subscriber silently gets nothing from a VOLATILE publisher.
-    Nothing in the Predictive Spliner source latches these topics, so there was
-    no evidence for anything stronger.
-
-    The catch: only the first message on each topic is used, and a VOLATILE
-    subscriber never sees a message published before it started. If the
-    waypoints are published once, a node that starts late waits forever.
-    Whoever writes the /global_waypoints and /global_waypoints_scaled
-    publishers should decide the durability, and set it on both sides: either
-    publish TRANSIENT_LOCAL and change these two subscriptions to match, or
-    keep publishing periodically.
+    nothing is published until both have arrived. Only the first message on
+    each topic is used, so both are subscribed TRANSIENT_LOCAL, KEEP_LAST(1)
+    (planning.waypoint_qos), matching global_waypoints_publisher_node, which
+    publishes them once, latched. With VOLATILE subscriptions, as first ported,
+    a node started after the publisher waited forever. The cost: a VOLATILE
+    publisher on these topics is now incompatible and delivers nothing (see
+    waypoint_qos.py for publishing by hand).
   * The dynamic_reconfigure Config subscription became the ROS 2 parameters
     update_waypoints and speed_offset, which can be changed at runtime with
     ros2 param set. Upstream read speed_offset with no default; it is 0.0 here.
@@ -38,6 +32,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from f1t_msgs.msg import WpntArray
 from planning.update_waypoints import WaypointUpdater
+from planning.waypoint_qos import WAYPOINTS_QOS
 
 
 class UpdateWaypointsNode(Node):
@@ -68,8 +63,8 @@ class UpdateWaypointsNode(Node):
         self.marker_pub = self.create_publisher(MarkerArray, marker_topic, 10)
         self.create_subscription(Odometry, odom_topic, self.odom_cb, 10)
         self.create_subscription(String, state_topic, self.state_cb, 10)
-        self.create_subscription(WpntArray, scaled_topic, self.scaled_cb, 10)
-        self.create_subscription(WpntArray, global_topic, self.global_cb, 10)
+        self.create_subscription(WpntArray, scaled_topic, self.scaled_cb, WAYPOINTS_QOS)
+        self.create_subscription(WpntArray, global_topic, self.global_cb, WAYPOINTS_QOS)
         self.create_timer(1.0 / rate, self.tick)
 
         self.get_logger().info('[Update Wpnts] Update Wpnts waiting...')
