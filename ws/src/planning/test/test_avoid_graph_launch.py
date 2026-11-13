@@ -36,7 +36,7 @@ from planning.raceline import write_raceline  # noqa: E402
 
 DOMAIN = 60
 A, B, N = 7.0, 4.0, 360           # oval semi-axes, points: lap about 35 m
-TRACK_HALF_WIDTH = 1.0
+TRACK_HALF_WIDTH = 1.2   # not 1.0: a 0.4 m obstacle there leaves exactly the 0.65 m needed
 EGO_S, OBSTACLE_AHEAD = 1.0, 6.0
 TIMEOUT = 30.0
 

@@ -5,7 +5,8 @@ import pytest
 from planning.frenet import FrenetConverter
 from planning.local_path import Pairer, Plan, decide, load_raceline_rows, splice
 from planning.raceline import write_raceline
-from planning.spliner import CLEAR, EVADING, NO_ROOM, TOO_CLOSE, SplinerParams, plan
+from planning.spliner import (CLEAR, EVADING, LEFT, NO_ROOM, TOO_CLOSE, Spliner,
+                              SplinerParams, plan)
 
 R, N, W = 10.0, 600, 1.5
 MAX_PLAN, MAX_EGO = 0.25, 0.25
@@ -196,56 +197,119 @@ def test_a_late_old_pair_does_not_replace_a_newer_one():
     assert p.plan.status == CLEAR
 
 
-# ------------------------------------------------------------------ closed loop, pinned
+# ------------------------------------------------------------------ closed loop
+#
+# The only tests here that ask whether the planner WORKS, not whether it is self-consistent:
+# a car steered as pure pursuit steers, replanning every cycle through Spliner (what
+# spliner_node runs), must get past a stationary obstacle without touching it.
 
 
-def closed_loop(conv, obstacle, speed, dt=0.05, horizon=14.0):
+def closed_loop(conv, obstacle, speed, start_s=0.0, dt=0.05, distance=14.0, planner=None):
     """The car follows the plan as pure pursuit would: toward the point one lookahead ahead.
 
-    Returns (statuses seen, final s, whether the car's footprint overlapped the obstacle).
+    Returns (statuses seen, distance travelled, smallest footprint gap, legacy hit flag).
+    The footprint gap is the lateral gap between the car's rectangle (car_rear behind to
+    car_front ahead of the rear axle, car_width wide) and the obstacle's, over every cycle
+    their s spans overlap; negative means they overlapped. The legacy flag is the original
+    criterion of test_a_stationary_obstacle_is_never_hit, kept as it was.
     """
     lookahead = min(max(0.4 * speed, 0.6), 3.0)        # control/config/vehicle.yaml's law
-    params, side = SplinerParams(), None
-    s = d = 0.0
-    seen, hit = [], False
-    for _ in range(int(horizon / speed / dt)):
-        r = plan(s, d, [obstacle], conv, params, side)
-        side = r.side or side
+    params = SplinerParams()
+    planner = planner or Spliner(conv, params)
+    s, d, travelled = start_s, 0.0, 0.0
+    seen, gap, hit = [], np.inf, False
+    half = params.car_width / 2.0
+    for _ in range(int(distance / speed / dt)):
+        r = planner.step(s, d, [obstacle])
         if not seen or seen[-1] != r.status:
             seen.append(r.status)
         if not r.collision_free:
             break
         if r.status == EVADING:
             u = np.concatenate(([0.0], np.cumsum(np.diff(r.s) % conv.length)))
-            d += (float(np.interp(lookahead, u, r.d)) - d) * speed * dt / lookahead
+            u_car = conv.ds(r.s[0], s)
+            d += (float(np.interp(u_car + lookahead, u, r.d)) - d) * speed * dt / lookahead
         else:
             d -= np.clip(d, -speed * dt / lookahead, speed * dt / lookahead)
-        s += speed * dt
-        if (obstacle.s_start - 0.25 <= s <= obstacle.s_end + 0.25
-                and abs(d - obstacle.d_center) < 0.15 + params.car_width / 2):
+        s = (s + speed * dt) % conv.length
+        travelled += speed * dt
+        rear = conv.ds(obstacle.s_end, s - params.car_rear)      # > 0: tail past its end
+        front = conv.ds(obstacle.s_start, s + params.car_front)  # > 0: nose past its start
+        if front > 0 and rear < 0:
+            gap = min(gap, max(obstacle.d_right - (d + half), (d - half) - obstacle.d_left))
+        u_obs = conv.ds(s, obstacle.s_center)
+        if -obstacle_half(obstacle) - 0.25 <= -u_obs <= obstacle_half(obstacle) + 0.25 \
+                and abs(d - obstacle.d_center) < 0.15 + half:
             hit = True
-    return seen, s, hit
+    return seen, travelled, gap, hit
+
+
+def obstacle_half(o):
+    return (o.s_end - o.s_start) / 2.0
+
+
+CASES = {                                 # name: (obstacle, car start s)
+    'on the line': (FakeObs(8.0), 0.0),
+    'right of it': (FakeObs(8.0, d_center=-0.4), 0.0),
+    'left of it': (FakeObs(8.0, d_center=0.4), 0.0),
+    'past the start line': (FakeObs(2.0), 2 * np.pi * R - 6.0),
+}
 
 
 @pytest.mark.parametrize('speed', [1.5, 3.0])
 def test_a_stationary_obstacle_is_never_hit(track, speed):
-    """Whatever the planner does, it must not drive the car into the obstacle. This holds
-    today only because the adapter stops the car on TOO_CLOSE (see the xfail below)."""
+    """Whatever the planner does, it must not drive the car into the obstacle."""
     conv, _, _ = track
-    seen, s, hit = closed_loop(conv, FakeObs(8.0), speed)
+    seen, travelled, gap, hit = closed_loop(conv, FakeObs(8.0), speed)
     assert not hit
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'Known planner gap, found by this replay before any simulator run. Replanning from the '
-    'car every cycle, the cubic first bulges away from the chosen side (the car drifts up to '
-    '+0.3 m the wrong way), and once the car is within ~0.3 m of the obstacle the lead-in '
-    'collapses and plan() reports TOO_CLOSE mid-evasion. local_path_node then stops the car '
-    'just short of the obstacle every time. Fix in spliner.py, not here.'))
+@pytest.mark.parametrize('case', CASES)
 @pytest.mark.parametrize('speed', [1.5, 3.0])
-def test_a_stationary_obstacle_on_the_line_is_passed(track, speed):
+def test_a_stationary_obstacle_is_passed_without_touching_it(track, speed, case):
+    """Reaches the far side, never inside the obstacle's footprint, and never stops.
+
+    Before the smoothstep path and the commitment this stopped the car 0.25 m short of the
+    obstacle (too close), after first steering it up to 0.3 m the wrong way."""
     conv, _, _ = track
-    obstacle = FakeObs(8.0)
-    seen, s, hit = closed_loop(conv, obstacle, speed)
+    obstacle, start = CASES[case]
+    seen, travelled, gap, hit = closed_loop(conv, obstacle, speed, start_s=start)
     assert TOO_CLOSE not in seen and NO_ROOM not in seen, seen
-    assert s > obstacle.s_end + 2.0 and not hit
+    far_side = conv.ds(start, obstacle.s_end) + SplinerParams().car_rear + 1.0
+    assert travelled > far_side, f'stopped after {travelled:.2f} m, statuses {seen}'
+    assert np.isfinite(gap), 'the car never drew level with the obstacle'
+    assert gap > 0.0, f'the car\'s footprint overlapped the obstacle by {-gap:.3f} m'
+
+
+@pytest.mark.parametrize('speed', [1.5, 3.0])
+def test_the_evasion_starts_toward_the_chosen_side_in_closed_loop(track, speed):
+    """Problem 1 in the loop: the car's d never moves away from the side it is passing on
+    before it reaches the obstacle (the cubic drove it up to 0.3 m the wrong way)."""
+    conv, _, _ = track
+    params = SplinerParams()
+    planner = Spliner(conv, params)
+    obstacle = FakeObs(8.0, d_center=-0.4)          # passed on the left: d must not go negative
+    lookahead = min(max(0.4 * speed, 0.6), 3.0)
+    s = d = 0.0
+    worst = 0.0
+    while s < obstacle.s_start:
+        r = planner.step(s, d, [obstacle])
+        assert r.status == EVADING and r.side == LEFT
+        u = np.concatenate(([0.0], np.cumsum(np.diff(r.s) % conv.length)))
+        d += (float(np.interp(conv.ds(r.s[0], s) + lookahead, u, r.d)) - d) * speed * 0.05 / lookahead
+        worst = min(worst, d)
+        s += speed * 0.05
+    assert worst >= -1e-9, f'drifted {-worst:.3f} m the wrong way'
+
+
+def test_stateless_planning_alone_still_stops_short(track):
+    """Why spliner_node uses Spliner: plan() every cycle, with no commitment, gives up as the
+    lead-in collapses. If this ever passes, the commitment may no longer be needed."""
+    conv, _, _ = track
+
+    class Stateless:
+        def step(self, s, d, obstacles):
+            return plan(s, d, obstacles, conv, SplinerParams())
+
+    seen, travelled, gap, hit = closed_loop(conv, FakeObs(8.0), 1.5, planner=Stateless())
+    assert TOO_CLOSE in seen and not hit

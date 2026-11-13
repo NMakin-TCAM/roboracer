@@ -32,7 +32,7 @@ from visualization_msgs.msg import Marker
 
 from f1t_msgs.msg import ObstacleArray, OTWpntArray, PlannerStatus, Wpnt
 from planning.frenet import FrenetConverter
-from planning.spliner import SplinerParams, plan
+from planning.spliner import Spliner, SplinerParams
 
 
 class SplinerNode(Node):
@@ -69,8 +69,13 @@ class SplinerNode(Node):
             car_width=float(p('car_width', 0.30)),
             evasion_dist=float(p('evasion_dist', 0.35)),
             bound_margin=float(p('bound_margin', 0.15)),
-            back_to_raceline_before=float(p('back_to_raceline_before', 1.5)),
             back_to_raceline_after=float(p('back_to_raceline_after', 2.0)),
+            car_front=float(p('car_front', 0.45)),
+            car_rear=float(p('car_rear', 0.10)),
+            apex_margin=float(p('apex_margin', 0.15)),
+            max_lateral_slope=float(p('max_lateral_slope', 0.5)),
+            max_commit_offset=float(p('max_commit_offset', 0.30)),
+            match_tolerance=float(p('match_tolerance', 0.5)),
             speed_scale=float(p('speed_scale', 0.8)),
             resolution=float(p('resolution', 0.10)),
             switch_hysteresis=float(p('switch_hysteresis', 0.25)),
@@ -82,6 +87,7 @@ class SplinerNode(Node):
         self.obstacles = []
         self.obstacles_received = None
         self.last_stale = None
+        self.planner = Spliner(self.conv, self.params)   # commits to an evasion once begun
         self.side = None
         self.last_switch = self.get_clock().now()
         self.last_note = None
@@ -139,8 +145,10 @@ class SplinerNode(Node):
         if stale:
             return
 
-        result = plan(self.ego_s, self.ego_d, self.obstacles, self.conv, self.params, self.side)
+        result = self.planner.step(self.ego_s, self.ego_d, self.obstacles)
         s, d, v, side, note = result.s, result.d, result.v, result.side, result.note
+        if result.released:
+            self.get_logger().warn(f'evasion released: {result.released}; now {result.status}')
 
         switched = side is not None and self.side is not None and side != self.side
         if switched:
