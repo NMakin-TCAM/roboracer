@@ -19,9 +19,9 @@ size of the run. The ports were accepted on 3,000 scenarios on each of seeds 1
 and 2. Below 300 the branch-coverage assertions are skipped, since a small run
 need not reach every branch.
 
-Upstream's ROS modules are stubbed only while its file is loaded
-(unittest.mock.patch.dict on sys.modules), so they never leak into other tests
-in the same pytest process.
+Upstream's ROS modules are put in sys.modules only while its file is loaded,
+and only those keys are restored afterwards, so the stubs never leak into
+other tests in the same pytest process.
 """
 import copy
 import hashlib
@@ -29,9 +29,9 @@ import importlib.util
 import math
 import os
 import random
+import sys
 import types
 from collections import Counter
-from unittest import mock
 
 import numpy as np
 import pytest
@@ -43,6 +43,7 @@ COVERAGE_MIN_SCENARIOS = 300
 
 PORTED_MD5 = {
     'opponent_trajectory.py': '6122505fb6ca6a0c6f62bc5cf7be03fc',
+    'predictor_opponent_trajectory.py': 'abe61f939c29d991e9e3ec3d016089d5',
 }
 
 
@@ -183,11 +184,25 @@ def stub_modules(world, msg_types):
 
 
 def load_upstream(path, stubs, name):
-    """Execute upstream's file with the stubs visible, then take them away again."""
-    with mock.patch.dict('sys.modules', stubs):
+    """Execute upstream's file with the stubs visible, then put back only those keys.
+
+    Not mock.patch.dict(sys.modules): that restores the whole dict, evicting the
+    real modules (sklearn, scipy, matplotlib) upstream imports for the first time,
+    so every scenario re-imported them. That leaked memory and could crash in C
+    extensions.
+    """
+    saved = {k: sys.modules.get(k) for k in stubs}
+    sys.modules.update(stubs)
+    try:
         spec = importlib.util.spec_from_file_location(name, path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
     return mod
 
 
@@ -468,4 +483,263 @@ def test_opponent_trajectory_matches_upstream():
                        'stale_flush_published', 'stale_dropped', 'off_trajectory_wait',
                        'nan_row_frames', 'fractional_lapcount',
                        'invisible_detections_published', 'upstream_crash_AttributeError'):
+            assert counts[branch] > 0, f'the run never reached {branch}'
+
+
+# ================================================================== predictor_opponent_trajectory
+
+PRED_SCENARIOS = int(os.environ.get('DIFFERENTIAL_PREDICTOR_SCENARIOS', '100'))
+START = int(os.environ.get('DIFFERENTIAL_START', '0'))
+PRED_COVERAGE_MIN_SCENARIOS = 100
+WPNT_FIELDS = ('s_m', 'd_m', 'x_m', 'y_m', 'proj_vs_mps', 'vd_mps', 'd_var', 'vs_var')
+
+
+class OppWpnt(Msg):
+    def __init__(self, **kw):
+        defaults = dict(id=0, s_m=0.0, d_m=0.0, x_m=0.0, y_m=0.0, proj_vs_mps=0.0, vd_mps=0.0,
+                        d_var=0.0, vs_var=0.0)
+        defaults.update(kw)
+        super().__init__(**defaults)
+
+
+class OpponentTrajectory(Msg):
+    def __init__(self):
+        self.header = Msg(seq=0, stamp=None, frame_id='')
+        self.id = 0
+        self.lap_count = 0.0
+        self.opp_is_on_trajectory = False
+        self.oppwpnts = []
+
+
+PRED_TYPES = dict(ObstacleArray=Msg, OpponentTrajectory=OpponentTrajectory, Obstacle=Obstacle,
+                  Wpnt=Msg, OppWpnt=OppWpnt, WpntArray=Msg, ProjOppTraj=ProjOppTraj,
+                  ProjOppPoint=Msg)
+
+
+def pred_scenario(rng):
+    """Global waypoints, then a sequence of GP trajectories and ProjOppTraj half laps."""
+    L = rng.uniform(10.0, 40.0)
+    n = int(L / rng.choice([0.1, 0.2, 0.3, 0.5]))
+    ego_s = [i * L / n for i in range(n + 1)]       # last duplicates the first
+    top = 0.0 if rng.random() < 0.01 else rng.uniform(3.0, 9.0)
+    wpnts = [Msg(s_m=s, x_m=s, y_m=0.0, vx_mps=top * rng.uniform(0.5, 1.0)) for s in ego_s]
+    amp, k = rng.uniform(0, 0.8), rng.uniform(0.1, 1.0)
+
+    def gp_trajectory():
+        """As the main GP lays it out: one waypoint per ego s, minus the duplicate."""
+        r = rng.random()
+        if r < 0.03:
+            return []
+        s_list = ego_s[:-1]
+        if r < 0.10:
+            s_list = sorted(rng.sample(s_list, max(1, len(s_list) // 3)))
+        ws = [OppWpnt(s_m=s + (1e-6 if r < 0.15 and rng.random() < 0.3 else 0.0),
+                      d_m=amp * math.sin(k * s) + rng.gauss(0, 0.05), x_m=rng.uniform(-9, 9),
+                      y_m=rng.uniform(-9, 9), proj_vs_mps=rng.uniform(2, 8),
+                      vd_mps=rng.gauss(0, 0.3), d_var=rng.random() * 0.2,
+                      vs_var=rng.random()) for s in s_list]
+        if rng.random() < 0.05:
+            rng.shuffle(ws)                  # list order, not s order, picks the 15
+        return ws
+
+    def half_lap():
+        on = rng.random() < 0.25
+        m = 0 if rng.random() < 0.05 else rng.randint(1, 60)
+        s = rng.uniform(0, L)
+        if rng.random() < 0.3:
+            s = L - rng.uniform(0, 3.0)      # crosses the start line
+        off = rng.choice([-1, 1]) * rng.uniform(0.3, 1.0)
+        dets = []
+        for i in range(m):
+            s += rng.uniform(0.05, 0.5) if rng.random() > 0.03 else -rng.uniform(0, 0.3)
+            dets.append(Msg(s=s % L, d=amp * math.sin(k * s) + off * (1 - i / max(m, 1)),
+                            vs=rng.uniform(2, 8), vd=rng.gauss(0, 0.5), is_static=False,
+                            is_visible=True, time=float(i), s_var=0.0, d_var=0.0,
+                            vs_var=0.0, vd_var=0.0))
+        msg = ProjOppTraj()
+        msg.lapcount = rng.choice([1.0, 1.5, 2.0, rng.uniform(1, 5)])
+        msg.nrofpoints = float(m)
+        msg.opp_is_on_trajectory = on
+        msg.detections = dets
+        return msg
+
+    events = []
+    if rng.random() < 0.1:
+        events.append(('proj', half_lap()))  # before any trajectory: ignored
+    events.append(('traj', gp_trajectory()))
+    for _ in range(rng.randint(2, 10)):
+        r = rng.random()
+        if r < 0.2:
+            events.append(('traj', gp_trajectory()))
+        elif r < 0.23:
+            scale = rng.uniform(0.95, 1.05)
+            events.append(('wpnts', [Msg(s_m=w.s_m * scale, x_m=w.x_m, y_m=0.0,
+                                         vx_mps=w.vx_mps) for w in wpnts]))
+        else:
+            events.append(('proj', half_lap()))
+    return wpnts, events
+
+
+class PredWorld:
+    """Upstream blocks in wait_for_message; the stub hands it the next event of that topic."""
+
+    TOPIC = {'traj': '/opponent_trajectory', 'proj': '/proj_opponent_trajectory',
+             'wpnts': '/global_waypoints'}
+
+    def __init__(self, scen):
+        self.wpnts, self.events = scen
+        self.subs = {}
+        self.log = []
+        self.frame = -1
+        self.now = 0.0
+
+    def deliver(self, topic, msg):
+        for cb in self.subs.get(topic, []):
+            cb(msg)
+
+    def msg_for(self, kind, payload):
+        if kind == 'traj':
+            m = OpponentTrajectory()
+            m.oppwpnts = copy.deepcopy(payload)
+            return m
+        if kind == 'wpnts':
+            return Msg(wpnts=payload)
+        return copy.deepcopy(payload)
+
+    def wait_for_message(self, topic, typ):
+        if topic == '/global_waypoints' and self.frame < 0:
+            msg = Msg(wpnts=self.wpnts)
+            self.deliver(topic, msg)
+            return msg
+        while True:
+            self.frame += 1
+            if self.frame >= len(self.events):
+                raise StopSim
+            kind, payload = self.events[self.frame]
+            msg = self.msg_for(kind, payload)
+            self.deliver(self.TOPIC[kind], msg)
+            if self.TOPIC[kind] == topic:
+                return msg
+
+    def next_frame_main(self):
+        return self.frame + 1 >= len(self.events)
+
+    def publish_hook(self, topic, msg):
+        if topic == '/opponent_trajectory':      # upstream hears its own output
+            self.deliver(topic, copy.deepcopy(msg))
+
+
+def pred_marker(m):
+    return (m.id, float(m.pose.position.x), float(m.pose.position.y), float(m.pose.position.z),
+            float(m.scale.x), float(m.scale.y), float(m.scale.z),
+            float(m.color.r), float(m.color.g), float(m.color.b), float(m.color.a))
+
+
+def pred_wpnts(ws):
+    return tuple(tuple(float(getattr(w, f)) for f in WPNT_FIELDS) for w in ws)
+
+
+def pred_run_upstream(path, scen):
+    world = PredWorld(scen)
+    stubs = stub_modules(world, PRED_TYPES)
+    base = stubs['rospy'].Publisher
+
+    class Publisher(base):
+        def publish(self, msg):
+            super().publish(msg)
+            world.publish_hook(self.topic, msg)
+
+    stubs['rospy'].Publisher = Publisher
+    mod = load_upstream(path, stubs, 'upstream_predictor_opponent_trajectory')
+    node = mod.GaussianProcessOppTraj()
+    crash = None
+    try:
+        node.get_gp_opp_traj()
+    except StopSim:
+        pass
+    except Exception as e:      # an upstream bug: only the events before it compare
+        crash = (world.frame, type(e).__name__)
+    trajs, marks = [], []
+    for frame, topic, msg in world.log:
+        if topic == '/opponent_trajectory':
+            trajs.append((frame, float(msg.lap_count), pred_wpnts(msg.oppwpnts)))
+        else:
+            marks.append((frame, tuple(pred_marker(m) for m in msg.markers)))
+    return trajs, marks, crash
+
+
+def pred_port_marker(rec):
+    """The node's Marker fields, as the harness compares them."""
+    rgba = (1.0, 0.0, 0.0, 0.8) if rec.predicted else (1.0, 1.0, 0.0, 1.0)
+    return (rec.id, float(rec.x), float(rec.y), float(rec.height) / 2, float(rec.width),
+            float(rec.width), float(rec.height)) + rgba
+
+
+def pred_run_port(scen, counts, last_frame=None):
+    from planning import predictor_opponent_trajectory as pot
+    wpnts, events = scen
+    pr = pot.ReturnPredictor()
+    pr.set_global_waypoints(wpnts)
+    to_xy = lambda s, d: (np.asarray(s, float), np.asarray(d, float))
+    trajs, marks = [], []
+    for i, (kind, payload) in enumerate(events):
+        if last_frame is not None and i > last_frame:
+            break
+        if kind == 'traj':
+            pr.set_opponent_trajectory(copy.deepcopy(payload))
+        elif kind == 'wpnts':
+            pr.set_global_waypoints(payload)
+        else:
+            dets = copy.deepcopy(payload.detections)
+            acting = pr.ready and not payload.opp_is_on_trajectory and len(dets) > 0
+            if acting:
+                L = pr.track_length
+                if any(abs(a.s - b.s) > L / 2 for a, b in zip(dets, dets[1:])):
+                    counts['unwrapped_detections'] += 1
+                if any(w.vs_var == pot.PREDICTED for w in pr.oppwpnts):
+                    counts['built_on_own_prediction'] += 1
+            elif not pr.ready:
+                counts['ignored_before_ready'] += 1
+            else:
+                counts['ignored_on_trajectory_or_empty'] += 1
+            pred = pr.on_proj_trajectory(payload.lapcount, payload.opp_is_on_trajectory,
+                                         dets, to_xy)
+            if acting and pred is None:
+                counts['skipped_empty_span'] += 1
+            if pred is not None:
+                counts['predictions'] += 1
+                trajs.append((i, float(pred.lap_count), pred_wpnts(pred.oppwpnts)))
+                marks.append((i, tuple(pred_port_marker(m) for m in pred.markers)))
+                pr.set_opponent_trajectory(copy.deepcopy(pred.oppwpnts))   # hears itself
+    return trajs, marks
+
+
+def test_predictor_opponent_trajectory_matches_upstream():
+    sklearn = pytest.importorskip('sklearn')
+    if tuple(int(x) for x in sklearn.__version__.split('.')[:2]) < (1, 1):
+        pytest.skip(f'sklearn {sklearn.__version__}: before 1.1 upstream raises in '
+                    'get_cartesian on every prediction, so there is nothing to compare')
+    import warnings
+    path = upstream_file('predictor_opponent_trajectory.py')
+    counts, differing = Counter(), []
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')      # sklearn ConvergenceWarning, the same on both sides
+        for i in range(START, START + PRED_SCENARIOS):
+            scen = pred_scenario(random.Random(SEED * 1_000_003 + i))
+            up_t, up_m, crash = pred_run_upstream(path, scen)
+            po_t, po_m = pred_run_port(scen, counts, None if crash is None else crash[0])
+            if crash is not None:
+                counts['upstream_crash_' + crash[1]] += 1
+                keep = lambda xs: [x for x in xs if x[0] < crash[0]]
+                up_t, up_m, po_t, po_m = keep(up_t), keep(up_m), keep(po_t), keep(po_m)
+            counts['upstream_published'] += len(up_t)
+            if not (same(tuple(up_t), tuple(po_t)) and same(tuple(up_m), tuple(po_m))):
+                differing.append(i)
+    print(f'\npredictor: scenarios {START}..{START + PRED_SCENARIOS - 1}, seed {SEED}: '
+          f'{dict(counts)}')
+    assert differing == [], f'scenarios {differing[:10]} differ from upstream'
+
+    if PRED_SCENARIOS >= PRED_COVERAGE_MIN_SCENARIOS:
+        for branch in ('predictions', 'unwrapped_detections', 'built_on_own_prediction',
+                       'ignored_before_ready', 'ignored_on_trajectory_or_empty'):
             assert counts[branch] > 0, f'the run never reached {branch}'

@@ -29,6 +29,7 @@ setup(
             'update_waypoints_node = planning.update_waypoints_node:main',
             'collision_prediction_node = planning.collision_prediction_node:main',
             'opponent_trajectory_node = planning.opponent_trajectory_node:main',
+            'predictor_opponent_trajectory_node = planning.predictor_opponent_trajectory_node:main',
         ],
     },
 )

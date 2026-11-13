@@ -1,16 +1,19 @@
 # Preserved upstream quirks in the shared Predictive Spliner / FSDP code
 
-Three files are byte-identical between ForzaETH's Predictive Spliner and ZJU's
+Four files are byte-identical between ForzaETH's Predictive Spliner and ZJU's
 FSDP, and are ported once into `ws/src/planning/planning/` for both comparison
-branches to import:
+branches to import. They are the whole of the shared code: every other
+same-named file in the two repositories differs (`gaussian_process_opp_traj.py`,
+`dynamic_collision_server.py` and `dynamic_sqp_server.py` were checked).
 
 | Upstream file | Port | Tests |
 |---|---|---|
 | `update_waypoints.py` | `update_waypoints.py`, `update_waypoints_node.py` | `test_update_waypoints.py` |
 | `collision_prediction.py` | `collision_prediction.py`, `collision_prediction_node.py` | `test_collision_prediction.py` |
 | `opponent_trajectory.py` | `opponent_trajectory.py`, `opponent_trajectory_node.py` | `test_opponent_trajectory.py` |
+| `predictor_opponent_trajectory.py` | `predictor_opponent_trajectory.py`, `predictor_opponent_trajectory_node.py` | `test_predictor_opponent_trajectory.py` |
 
-All three ports keep upstream's defects, and for the same main reason: if
+All four ports keep upstream's defects, and for the same main reason: if
 the shared code is "fixed", both branches stop running the code they claim
 to port, and our numbers can no longer be compared with ForzaETH's or ZJU's
 published results. Wherever a quirk had another reason as well, its entry
@@ -27,15 +30,24 @@ scenarios, requires identical output, and asserts that the run reached each
 listed branch. It is opt-in: set `FORZAETH_SPLINER_SRC` to a directory
 holding upstream's files (Predictive Spliner's `src/` or FSDP's `src/gp/`).
 Without that it skips, so CI and fresh clones are unaffected. A file with a
-different md5 from the one ported fails. The default is 300 scenarios. The
-ports were accepted at `DIFFERENTIAL_SCENARIOS=3000` on `DIFFERENTIAL_SEED`
-1 and 2.
+different md5 from the one ported fails.
 
     FORZAETH_SPLINER_SRC=~/predictive-spliner/src \
         python3 -m pytest src/planning/test/test_upstream_differential.py -q
 
-It covers `opponent_trajectory` only. collision_prediction's 3,000-scenario
-check was run once, during its port, and is not in the repository.
+It covers `opponent_trajectory` and `predictor_opponent_trajectory`:
+
+- **opponent_trajectory:** 300 scenarios by default (`DIFFERENTIAL_SCENARIOS`),
+  about 13 s.
+- **predictor:** 100 by default (`DIFFERENTIAL_PREDICTOR_SCENARIOS`), about
+  22 s, because every prediction is a GP fit run twice. It also needs
+  scikit-learn 1.1 or later and skips otherwise (see §1).
+
+Both ports were accepted at 3,000 scenarios on `DIFFERENTIAL_SEED` 1 and 2.
+For the predictor that run was sharded with `DIFFERENTIAL_START`. Use
+`OMP_NUM_THREADS=1` when running shards in parallel. collision_prediction's
+3,000-scenario check was run once, during its port, and is not in the
+repository.
 
 Quirks that no unit test pins, and that the differential now covers:
 
@@ -43,6 +55,13 @@ Quirks that no unit test pins, and that the differential now covers:
   `is_visible` False per 300 scenarios, identical to upstream's.
 - The AttributeError deviation (§1). The run must reach upstream's crash,
   and the port's output before it must match.
+- The predictor feeding on its own output (§3), across sequences of
+  predictions. Counted as `built_on_own_prediction`, about 5,300 per 3,000
+  scenarios.
+- The predictor's two crash-avoidance deviations (§1). Upstream's
+  `ValueError` and `ZeroDivisionError` crashes are counted, though not
+  asserted: on seed 1, 33 and 37 in 3,000 scenarios. The 33 `ValueError`
+  crashes equal the port's 33 skipped empty spans.
 
 Still covered by nothing:
 
@@ -52,11 +71,55 @@ Still covered by nothing:
   says nothing about cycle times.
 
 Section 1 covers deliberate deviations from upstream, which anyone comparing
-our results with published ones needs first. Sections 2 to 4 are the
+our results with published ones needs first. Sections 2 to 5 are the
 preserved quirks, ordered by how much they can change what the comparison
 is able to claim.
 
 ## 1. Deviations from upstream (behaviour differs)
+
+**predictor_opponent_trajectory: depends on the sklearn version.** Before
+scikit-learn 1.1, `GaussianProcessRegressor.predict` returns the mean as
+(n, 1). This applies to 1.0.2 and to Ubuntu 22.04's apt `python3-sklearn`
+0.23.2. Upstream passes that mean to ForzaETH's `get_cartesian`, whose
+in-place `x += d * cos(...)` then raises ValueError on **every** prediction,
+so upstream never publishes. This was checked against ForzaETH's ROS 1
+converter with sklearn 0.23.2, 1.0.2, 1.1.3, 1.2.2 and 1.3.2. ForzaETH's
+requirements leave scikit-learn unpinned, so their runs had a working
+version.
+
+The port flattens the mean. With sklearn 1.1 or later it matches upstream
+exactly; below that it publishes where upstream would not. The image
+therefore needs pip `scikit-learn` 1.1 or later (1.3.2, matching the TUM
+venv), not the apt package.
+
+Pinned: not by a unit test, since that would need two sklearn versions.
+Differential: skips below 1.1.
+
+**predictor_opponent_trajectory: no crash on an empty span.** If no
+`/global_waypoints` s falls inside the fitted span, upstream's `predict`
+raises ValueError on an empty array and the node dies. The port skips that
+half lap. Pinned: `test_span_with_no_global_s_is_skipped`. Differential:
+`upstream_crash_ValueError` against `skipped_empty_span`.
+
+**predictor_opponent_trajectory: no crash on a zero top speed.** If every
+global waypoint speed is 0, upstream's marker heights divide by zero. The
+port draws them with height 0. Pinned:
+`test_marker_height_is_zero_without_a_top_speed`.
+
+**predictor_opponent_trajectory: no messages dropped while busy.** Upstream
+calls `wait_for_message` on `/proj_opponent_trajectory` once per pass, so a
+message arriving during a GP fit, or between passes, is lost. The port
+handles every message in its callback, and messages arriving mid-fit queue
+(depth 10). Off-trajectory messages are rare, because opponent_trajectory
+waits up to 3 s after each, so the same messages are normally processed.
+Not pinned (node only).
+
+**predictor_opponent_trajectory: node name and header.** Upstream named the
+node `gaussian_process_opp_traj`, the same name as the main GP node, which
+only worked because both were anonymous. The port is
+`predictor_opponent_trajectory`. Upstream's `header.seq = lap_count` is
+dropped: ROS 2 headers have no seq, and rospy overwrote seq on publish
+anyway. Not pinned.
 
 **opponent_trajectory: no crash on predictions received only during OVERTAKE.**
 Upstream raises AttributeError and the node dies once lapcount ≥ 1 and
@@ -90,10 +153,12 @@ service was only used for marker positions. Pinned:
 **update_waypoints: clock.** `time.time()` became the node clock, so the
 GB_TRACK hysteresis follows sim time when `use_sim_time` is set. Not pinned.
 
-**opponent_trajectory and collision_prediction: marker converter.** Upstream
-built its converter from `/global_waypoints` x and y. The ports use
-`FrenetConverter.from_track`, so the nodes need `track_name`. This affects
-markers only. Not pinned.
+**opponent_trajectory, collision_prediction and predictor: Frenet converter.**
+Upstream built its converter from `/global_waypoints` x and y. The ports
+use `FrenetConverter.from_track`, so the nodes need `track_name`. For
+opponent_trajectory and collision_prediction this affects markers only. For
+the predictor it also sets the published `x_m`/`y_m` of predicted
+waypoints. Their s and d are unaffected. Not pinned.
 
 ## 2. What the GP is given: opponent_trajectory
 
@@ -231,7 +296,95 @@ header stamps. If `use_sim_time` is set on one side only, every detection
 from lapcount 1 is stale, or none ever is. This is a deployment constraint
 rather than a defect. Not pinned.
 
-## 3. What the planners do with it: collision_prediction and update_waypoints
+## 3. After the opponent leaves its line: predictor_opponent_trajectory
+
+The predictor acts only on the half laps opponent_trajectory publishes with
+`opp_is_on_trajectory` False. It fits a local sklearn GP to the latest
+detections and to the stored trajectory 7 m beyond them, and writes the
+result back into `/opponent_trajectory`, the message collision_prediction
+reads for the opponent's d and speed.
+
+The stage is identical on both branches, but its base is not: it edits
+whichever trajectory the branch's main GP (dense or sparse) last published.
+So the behaviour after an off-trajectory event is not a clean dense-versus-sparse
+comparison. It is each GP's output, patched by this shared GP over the span
+of the return.
+
+**It feeds on its own output.** It publishes on `/opponent_trajectory`, the
+topic it subscribes to and the main GP publishes on, and edits the stored
+waypoints in place. A second off-trajectory prediction therefore builds on
+the first, until the main GP publishes again. Pinned:
+`test_stored_trajectory_is_edited_in_place`. Differential:
+`built_on_own_prediction`.
+
+**It is what ends opponent_trajectory's wait.** opponent_trajectory's 3 s
+wait after an off-trajectory cut ends on any new `/opponent_trajectory`
+message, and the predictor's answer is normally the first. A slow or
+skipped prediction (see the empty span in §1) lets the wait run its full
+3 s. Not pinned (two nodes).
+
+**Only d is predicted.** `proj_vs_mps` keeps the stored trajectory's value
+(upstream's vs resampling is commented out), so the predicted return keeps
+the old speed profile, and collision_prediction's timing uses it. vd is
+linearly interpolated over the merged points, which assumes their s is
+increasing; `np.interp` is silently wrong otherwise. Pinned:
+`test_waypoints_in_the_span_are_replaced_and_marked`,
+`test_vd_is_interpolated_linearly_across_the_merged_points`.
+
+**`d_var` is a standard deviation, and `vs_var` = 69 is a flag.** Predicted
+waypoints get the GP's sigma in `d_var` and the sentinel 69 in `vs_var`,
+which only the markers use (red). The main GP fills `vs_var` with its
+sigma_vs, so anything reading `vs_var` as a variance on predicted points
+gets 69 m²/s². Pinned: `test_waypoints_in_the_span_are_replaced_and_marked`,
+`test_markers_follow_speed_and_variance`.
+
+**The GP's training points.** It takes the last 15 detections, then the first
+15 trajectory points, in list order and not by nearest s, that lie more than
+7 m beyond the last detection. The search runs over the trajectory repeated
+for a second lap, so a return past the start line lands at the start of the
+lap. Near the end of the second lap fewer points, or none, are found, and the
+GP is fitted to detections alone. Pinned:
+`test_merge_takes_the_last_15_detections_and_15_points_7m_beyond`,
+`test_merge_takes_trajectory_points_in_list_order`,
+`test_merge_near_the_end_of_the_second_lap_finds_fewer_points`,
+`test_a_return_past_the_start_line_lands_at_the_start`.
+
+**Unwrapping.** From the first consecutive pair of detections more than half a
+lap apart, every later detection gets a lap added, even one close to the
+shifted s before it, and a forward jump of more than half a lap counts as a
+wrap too. The shift edits the received message. Pinned:
+`test_unwrap_adds_a_lap_from_the_first_big_step_onwards`,
+`test_unwrap_keeps_shifting_once_it_has_started`,
+`test_unwrap_also_shifts_a_forward_jump_of_more_than_half_a_lap`,
+`test_detections_are_unwrapped_in_the_message`. Differential:
+`unwrapped_detections`.
+
+**Only waypoints on a global s are replaced.** A waypoint changes only if its s
+is within 1e-8 of a `/global_waypoints` s in the fitted span (taken modulo
+the lap). The main GP lays its waypoints on those s, so this holds for its
+output. Pinned: `test_waypoint_not_on_a_global_s_is_left_alone`.
+
+**Kernel.** C(0.5) · Matern(1.0, ν = 1.5) + C(0.2) · White(1.0), with one
+L-BFGS-B run from those values and no restarts, so the fit is
+deterministic. Only the two constants are bounded, to [1e-6, 1e3]. The
+length scale and noise level keep sklearn's defaults, (1e-5, 1e5), and fits
+do run into them (sklearn's ConvergenceWarning). Pinned:
+`test_kernel_is_upstreams` (the kernel; the default bounds are not
+pinned).
+
+**Which half laps it acts on.** On-trajectory half laps, and half laps with
+no detections, are ignored. Nothing is done until both `/global_waypoints`
+and an `/opponent_trajectory` have arrived. Pinned:
+`test_on_trajectory_and_empty_half_laps_are_ignored`,
+`test_nothing_before_waypoints_and_a_trajectory`.
+
+**Second-lap copies and two track lengths.** The second-lap copies of the
+trajectory carry no `d_var` or `vs_var`. The double-lap s list and the top
+speed are fixed from the first `/global_waypoints`, while lap arithmetic uses
+the latest one. Pinned: `test_second_lap_copies_carry_no_variances`,
+`test_waypoints_fixed_from_the_first_message_but_lap_length_follows`.
+
+## 4. What the planners do with it: collision_prediction and update_waypoints
 
 These shape the region the avoidance planner treats as blocked, and whether
 it may overtake at all. Both comparison branches share them, but they
@@ -311,8 +464,12 @@ gap test uses the latest `/global_waypoints`. The two only differ if the
 waypoints change while running. Pinned:
 `test_later_waypoints_change_only_the_gap_test_track_length`.
 
-## 4. Cosmetic
+## 5. Cosmetic
 
+- **predictor_opponent_trajectory:** cylinders are as tall as the waypoint's
+  speed over the top speed, 5 × `d_var` wide (clamped to [0.07, 0.7]), and
+  red where predicted, yellow elsewhere. Pinned:
+  `test_markers_follow_speed_and_variance`.
 - **opponent_trajectory:** after a few cycles the marker array alternates
   DELETEALL with single markers, so RViz shows only the newest. Pinned:
   `test_marker_array_settles_to_deleteall_between_single_markers`.
