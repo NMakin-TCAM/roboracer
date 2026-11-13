@@ -80,6 +80,21 @@ ports see obstacles, and so which car each of them follows.
 
 ## 1. Deviations from upstream (behaviour differs)
 
+**obstacle_tracker: coasted tracks are not published.** Upstream's perception
+keeps publishing a lost obstacle at its predicted position, with `is_visible`
+False, for a while after it was last seen. opponent_trajectory never reads
+`is_visible` (§2), so every such prediction enters the GP's training data as a
+sighting. The GP exists to infer from sightings, so our tracker, by default,
+publishes only obstacles detected this cycle: `publish_coasted` (parameter of
+`obstacle_tracker_node`) is False. Nothing downstream needs the coasted ones:
+collision_prediction holds a lost opponent through a gap with its own
+`expire_counter`, and the spliner commits to an evasion and holds its "gone"
+release until "passed". The track still coasts internally, so an obstacle seen
+again within `max_misses` cycles returns under the same id. Set
+`publish_coasted:=true` to restore upstream's behaviour. Pinned:
+`test_coasted_tracks_are_not_published_by_default`,
+`test_every_published_obstacle_is_visible_by_default`.
+
 **predictor_opponent_trajectory: depends on the sklearn version.** Before
 scikit-learn 1.1, `GaussianProcessRegressor.predict` returns the mean as
 (n, 1). This applies to 1.0.2 and to Ubuntu 22.04's apt `python3-sklearn`
@@ -223,7 +238,9 @@ message is reused every cycle, and `is_visible` is copied into each point
 but never checked. A tracker that keeps publishing a lost opponent's
 predicted position feeds those predictions to the GP as if they were seen.
 This matters as soon as real detection replaces `fake_opponent_node`. Not
-pinned by a unit test. Differential: `invisible_detections_published`.
+pinned by a unit test. Differential: `invisible_detections_published`. Our
+obstacle_tracker does not publish coasted tracks by default, so the quirk is
+preserved but not exercised (§1).
 
 **An opponent is only found if it is last in the obstacle array.** The pick is
 the dynamic obstacle whose `s_start` is nearest ahead of the ego (modulo
@@ -607,8 +624,8 @@ behind the ego sorts to the end.
   one ahead. opponent_trajectory takes none, because the last obstacle is
   farther ahead than its first pick. The two ports never follow different
   cars, but while a second car is tracked the GP gets no new points. That
-  includes a car behind the ego, if the detector sees astern, and a coasted
-  track during its `max_misses` cycles.
+  includes a car behind the ego, if the detector sees astern (and a coasted
+  track, if `publish_coasted` is set).
 
 **Why this order, not the reverse.** Dynamic obstacles nearest-ahead last
 would give opponent_trajectory the nearest car and collision_prediction the
@@ -630,9 +647,14 @@ Pinned (against the ports' own selection functions, `first_dynamic` and
 `test_a_car_behind_does_not_split_the_consumers`,
 `test_without_an_ego_position_dynamic_obstacles_are_ordered_by_id`.
 
-**Coasted tracks are published with `is_visible` False.** A confirmed track
+**Coasted tracks are not published by default** (§1). A confirmed track
 survives `max_misses` cycles (10, 0.25 s at 40 Hz) without a detection, at its
-constant-velocity prediction with growing variances. opponent_trajectory does
-not check `is_visible` (§2), so the GP receives up to that many predicted
-points per occlusion. `max_misses` bounds this. Pinned (the coasting):
-`test_a_track_survives_a_dropout_shorter_than_max_misses`.
+constant-velocity prediction with growing variances, and keeps its id if seen
+again, but nothing is published for it meanwhile. With `publish_coasted:=true`
+it is published with `is_visible` False, and since opponent_trajectory does not
+check that flag (§2) the GP then receives up to `max_misses` predicted points
+per occlusion. A coasted track never counts towards "two or more dynamic
+obstacles" by default. Pinned:
+`test_coasted_tracks_are_not_published_by_default`,
+`test_a_track_survives_a_dropout_shorter_than_max_misses` (with
+`publish_coasted`).

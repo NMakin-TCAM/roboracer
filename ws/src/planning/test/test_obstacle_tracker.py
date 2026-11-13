@@ -126,7 +126,7 @@ def test_one_obstacle_keeps_one_id_through_a_noisy_run(conv):
     log = simulate(conv, [Weaving(conv.length, 3.0, 0.4, 12.0, 10.0)], duration=30.0)
     ids = {o.id for _, _, out in log for o in out}
     assert ids == {0}
-    assert sum(1 for _, _, out in log if out) > 0.95 * len(log)
+    assert sum(1 for _, _, out in log if out) > 0.85 * len(log)   # 90% detected; coasting is silent
 
 
 def test_two_obstacles_keep_their_ids_as_one_passes_the_other(conv):
@@ -144,8 +144,32 @@ def test_two_obstacles_keep_their_ids_as_one_passes_the_other(conv):
     assert sorted(id_of.values()) == ['car', 'cone']
 
 
-def test_a_track_survives_a_dropout_shorter_than_max_misses(conv, lap):
+def test_coasted_tracks_are_not_published_by_default(conv):
+    """opponent_trajectory never reads is_visible, so a published prediction would enter the
+    GP as a sighting. Hidden while coasting; back under the same id when seen again."""
     p = TrackerParams()
+    assert not p.publish_coasted
+    tr = ObstacleTracker(conv, p)
+    t = 0.0
+    for k in range(20):
+        out = tr.step([det(10.0 + 2.0 * t)], t)
+        t += DT
+    assert [o.id for o in out] == [0]
+    for k in range(p.max_misses):
+        assert tr.step([], t) == []
+        t += DT
+    out = tr.step([det(10.0 + 2.0 * t)], t)
+    assert [o.id for o in out] == [0] and out[0].is_visible
+
+
+def test_every_published_obstacle_is_visible_by_default(conv):
+    sensor = dataclasses.replace(NOISY, detection_prob=0.6)
+    log = simulate(conv, [ConstantSpeed(conv.length, 4.0, 10.0, 0.1)], sensor=sensor, duration=10.0)
+    assert all(o.is_visible for _, _, out in log for o in out)
+
+
+def test_a_track_survives_a_dropout_shorter_than_max_misses(conv, lap):
+    p = TrackerParams(publish_coasted=True)
     tr = ObstacleTracker(conv, p)
     t = 0.0
     for k in range(20):
@@ -300,7 +324,7 @@ def test_a_car_that_stops_becomes_static_and_moving_again_when_it_leaves(conv):
 # ---------------------------------------------------------------- variances
 
 def test_variances_are_floored_and_grow_while_coasting(conv):
-    tr = ObstacleTracker(conv)
+    tr = ObstacleTracker(conv, TrackerParams(publish_coasted=True))
     for k in range(80):
         out = tr.step([det(10.0 + 2.0 * k * DT)], k * DT)
     seen = out[0]

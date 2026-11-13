@@ -42,7 +42,9 @@ PER CYCLE (step):
      the last static_window s with two thresholds (hysteresis). Until a track
      has existed for static_window s it is not static: hiding a moving car from
      the opponent half of the stack is the costlier mistake.
-  6. Output the confirmed tracks in the order described under ORDERING.
+  6. Output the confirmed tracks in the order described under ORDERING. A
+     coasting track (confirmed, unmatched this cycle) is kept for association
+     but published only if publish_coasted is set; see COASTED TRACKS.
 
 LIFECYCLE DEFAULTS, at the 40 Hz fake_opponent_node and lidar rate:
   confirm_frames = 3 (75 ms). One spurious return, or one that recurs for two
@@ -52,10 +54,9 @@ LIFECYCLE DEFAULTS, at the 40 Hz fake_opponent_node and lidar rate:
     detection range.
   max_misses = 10 (0.25 s). Survives the dropouts the sensor model produces
     (at detection_prob 0.8, eleven misses in a row happen with probability
-    2e-8 per cycle) and a car briefly hidden behind another. Coasting longer
-    costs accuracy (half of 3 m/s^2 over 1 s is 1.5 m) and, because
-    opponent_trajectory counts invisible obstacles as detections (see
-    docs/forzaeth-quirks.md), feeds the GP predictions instead of sightings.
+    2e-8 per cycle) and a car briefly hidden behind another, so it comes back
+    with its id. Coasting longer costs accuracy (half of 3 m/s^2 over 1 s is
+    1.5 m) and widens the gate a wrong detection can fall into.
   Both are counted in cycles, so they scale with the input rate: at the 15 Hz
   of a scan-rate spliner they are 0.2 s and 0.67 s.
 
@@ -71,6 +72,15 @@ collision_prediction takes the nearest one ahead and opponent_trajectory takes
 none, so they never follow two different cars. Statics must come first:
 opponent_trajectory resets its pick on any obstacle after it. Without an ego
 position the dynamic ones are ordered by id. See docs/forzaeth-quirks.md.
+
+COASTED TRACKS are not published by default (publish_coasted False). Upstream's
+tracker publishes them with is_visible False, but opponent_trajectory never
+reads is_visible, so each occlusion would put up to max_misses predicted
+positions into the GP's training data as if they had been seen. Nothing
+downstream needs them: collision_prediction holds a lost opponent with its own
+expire_counter, and the spliner holds a committed evasion until the obstacle is
+passed. Coasting still runs internally, so a track that is seen again within
+max_misses cycles is published again under the same id.
 """
 
 from dataclasses import dataclass, field
@@ -94,6 +104,7 @@ class TrackerParams:
     static_speed: float = 0.3      # m/s: below this the track becomes static
     moving_speed: float = 0.6      # m/s: above this it becomes dynamic again
     reset_gap: float = 1.0         # s without input after which every track is dropped
+    publish_coasted: bool = False  # publish unmatched confirmed tracks (is_visible False)
 
 
 @dataclass
@@ -275,7 +286,8 @@ class ObstacleTracker:
             is_static=bool(t.is_static), is_visible=bool(t.visible))
 
     def _output(self, ego_s):
-        out = [self._obstacle(t) for t in self.tracks if t.confirmed]
+        out = [self._obstacle(t) for t in self.tracks
+               if t.confirmed and (t.visible or self.p.publish_coasted)]
         static = sorted((o for o in out if o.is_static), key=lambda o: (o.s_center, o.id))
         moving = [o for o in out if not o.is_static]
         if ego_s is None:
