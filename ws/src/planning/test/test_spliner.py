@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from planning.frenet import FrenetConverter
-from planning.spliner import (LEFT, RIGHT, SplinerParams, build_evasion, choose_side,
-                              obstacles_ahead, plan)
+from planning.spliner import (CLEAR, EVADING, LEFT, NO_ROOM, RIGHT, STATUSES, TOO_CLOSE,
+                              SplinerParams, build_evasion, choose_side, obstacles_ahead, plan)
 
 R, W_LEFT, W_RIGHT = 10.0, 1.5, 1.5
 
@@ -174,25 +174,59 @@ def test_an_obstacle_on_top_of_us_is_not_planned_around(track, params):
 
 # ------------------------------------------------------------------ end to end
 
-def test_clear_track_produces_no_trajectory(track, params):
-    s, d, v, side, note = plan(0.0, 0.0, [], track, params)
-    assert len(s) == 0 and side is None and note == 'clear'
+def test_clear_track_is_clear_with_no_trajectory(track, params):
+    r = plan(0.0, 0.0, [], track, params)
+    assert r.status == CLEAR and r.collision_free
+    assert len(r.s) == 0 and r.side is None and r.obstacle is None and r.note == 'clear'
 
 
-def test_an_obstacle_produces_a_trajectory(track, params):
-    s, d, v, side, note = plan(0.0, 0.0, [FakeObs(6.0, d_center=-0.5)], track, params)
-    assert len(s) > 10 and side == LEFT
-    assert 'overtaking left' in note
+def test_an_obstacle_produces_an_evasion(track, params):
+    obs = FakeObs(6.0, d_center=-0.5)
+    r = plan(0.0, 0.0, [obs], track, params)
+    assert r.status == EVADING and r.collision_free
+    assert len(r.s) > 10 and len(r.s) == len(r.d) == len(r.v)
+    assert r.side == LEFT and r.obstacle is obs
+    assert 'overtaking left' in r.note
 
 
-def test_a_blocked_track_trails_instead_of_planning(track, params):
-    s, d, v, side, note = plan(0.0, 0.0, [FakeObs(6.0, width=2.8)], track, params)
-    assert len(s) == 0 and side is None
-    assert note.startswith('trailing')
+def test_a_blocked_track_is_no_room_and_not_collision_free(track, params):
+    """Same empty trajectory as CLEAR, opposite meaning: this one must stop the car."""
+    blocker = FakeObs(6.0, width=2.8)
+    r = plan(0.0, 0.0, [blocker], track, params)
+    assert r.status == NO_ROOM and not r.collision_free
+    assert len(r.s) == 0 and r.side is None and r.obstacle is blocker
+    assert r.note.startswith('trailing')
+
+
+def test_an_obstacle_on_top_of_us_is_too_close_and_not_collision_free(track, params):
+    """The lead-in collapses (see build_evasion), so there is nothing safe to publish."""
+    obs = FakeObs(0.5, d_center=-0.5)
+    r = plan(0.0, 0.0, [obs], track, params)
+    assert r.status == TOO_CLOSE and not r.collision_free
+    assert len(r.s) == 0 and r.side is None and r.obstacle is obs
+
+
+def test_the_empty_cases_differ_only_in_status(track, params):
+    """Before PlanResult these three were indistinguishable to a caller."""
+    results = [plan(0.0, 0.0, obs, track, params)
+               for obs in ([], [FakeObs(6.0, width=2.8)], [FakeObs(0.5, d_center=-0.5)])]
+    assert all(len(r.s) == 0 for r in results)
+    assert [r.status for r in results] == [CLEAR, NO_ROOM, TOO_CLOSE]
+    assert [r.collision_free for r in results] == [True, False, False]
+
+
+@pytest.mark.parametrize('obstacles', [[], [FakeObs(6.0, d_center=-0.5)], [FakeObs(6.0, width=2.8)],
+                                       [FakeObs(0.5, d_center=-0.5)], [FakeObs(40.0)]])
+def test_status_and_trajectory_always_agree(track, params, obstacles):
+    r = plan(0.0, 0.0, obstacles, track, params)
+    assert r.status in STATUSES
+    assert (len(r.s) > 0) == (r.status == EVADING)
+    assert (r.side is not None) == (r.status == EVADING)
 
 
 def test_the_nearest_obstacle_is_the_one_planned_around(track, params):
     """Two in the way: handle the one about to hit us, not the far one."""
     near, far = FakeObs(4.0, d_center=-0.6), FakeObs(9.0, d_center=0.6)
-    s, d, v, side, note = plan(0.0, 0.0, [far, near], track, params)
-    assert side == LEFT, 'planned around the far obstacle instead of the near one'
+    r = plan(0.0, 0.0, [far, near], track, params)
+    assert r.status == EVADING and r.obstacle is near
+    assert r.side == LEFT, 'planned around the far obstacle instead of the near one'

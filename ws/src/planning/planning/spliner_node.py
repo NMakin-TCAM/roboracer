@@ -7,6 +7,17 @@ point of fixing the interface before writing any planner.
 
 All the planning lives in spliner.py, which imports no ROS and is unit tested.
 This file reads topics, calls plan() on a timer, and publishes.
+
+STATUS. Each cycle also publishes f1t_msgs/PlannerStatus on status_topic
+(/planner/avoidance/status) with the same header stamp as that cycle's
+OTWpntArray. An empty OTWpntArray means "clear" or "cannot get round" (no room,
+too close); the status says which, and consumers must pair the two by stamp
+(local_path_node does). OTWpntArray itself stays identical to ForzaETH's.
+
+STALE INPUTS. Nothing is published while the ego state or the obstacle array
+is older than max_input_age (time since arrival, node clock), so a dead
+perception or localizer stack makes the planner output go stale downstream
+rather than keep reporting the last obstacles, or "clear", forever.
 """
 
 import os
@@ -15,10 +26,11 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from visualization_msgs.msg import Marker
 
-from f1t_msgs.msg import ObstacleArray, OTWpntArray, Wpnt
+from f1t_msgs.msg import ObstacleArray, OTWpntArray, PlannerStatus, Wpnt
 from planning.frenet import FrenetConverter
 from planning.spliner import SplinerParams, plan
 
@@ -36,6 +48,8 @@ class SplinerNode(Node):
         ego_topic = p('ego_topic', '/car_state/odom_frenet')
         obs_topic = p('obs_topic', '/perception/obstacles')
         out_topic = p('out_topic', '/planner/avoidance/otwpnts')
+        status_topic = p('status_topic', '/planner/avoidance/status')
+        self.max_input_age = float(p('max_input_age', 0.5))   # s since arrival
         marker_topic = p('marker_topic', '/planner/avoidance/markers')
         self.map_frame = p('map_frame', 'map')
         rate = float(p('rate', 20.0))
@@ -64,13 +78,17 @@ class SplinerNode(Node):
 
         self.ego_s = None
         self.ego_d = 0.0
+        self.ego_received = None
         self.obstacles = []
+        self.obstacles_received = None
+        self.last_stale = None
         self.side = None
         self.last_switch = self.get_clock().now()
         self.last_note = None
         self.warned_frame = False
 
         self.pub = self.create_publisher(OTWpntArray, out_topic, 10)
+        self.status_pub = self.create_publisher(PlannerStatus, status_topic, 10)
         self.marker_pub = self.create_publisher(Marker, marker_topic, 10)
         self.create_subscription(Odometry, ego_topic, self.ego_cb, 10)
         self.create_subscription(ObstacleArray, obs_topic, self.obs_cb, 10)
@@ -80,7 +98,11 @@ class SplinerNode(Node):
             f'spliner on {track_name} against the {self.reference}, lookahead '
             f'{self.params.lookahead:.1f} m, publishing {out_topic} at {rate:.0f} Hz')
 
+    def now(self):
+        return self.get_clock().now().nanoseconds * 1e-9
+
     def ego_cb(self, msg):
+        self.ego_received = self.now()
         self.ego_s = float(msg.pose.pose.position.x)
         self.ego_d = float(msg.pose.pose.position.y)
         expect = f'frenet/{self.reference}'
@@ -93,13 +115,32 @@ class SplinerNode(Node):
 
     def obs_cb(self, msg):
         self.obstacles = list(msg.obstacles)
+        self.obstacles_received = self.now()
+
+    def stale_inputs(self):
+        """Why the inputs cannot be planned on, or None. See STALE INPUTS."""
+        now = self.now()
+        for what, received in (('ego state', self.ego_received),
+                               ('obstacle array', self.obstacles_received)):
+            if received is None:
+                return f'no {what} yet'
+            if now - received > self.max_input_age:
+                return f'{what} {now - received:.2f} s old'
+        return None
 
     def tick(self):
-        if self.ego_s is None:
+        stale = self.stale_inputs()
+        if stale != self.last_stale:
+            if stale:
+                self.get_logger().error(f'not planning: {stale}')
+            elif self.last_stale is not None:
+                self.get_logger().info('inputs fresh again, planning')
+            self.last_stale = stale
+        if stale:
             return
 
-        s, d, v, side, note = plan(self.ego_s, self.ego_d, self.obstacles,
-                                   self.conv, self.params, self.side)
+        result = plan(self.ego_s, self.ego_d, self.obstacles, self.conv, self.params, self.side)
+        s, d, v, side, note = result.s, result.d, result.v, result.side, result.note
 
         switched = side is not None and self.side is not None and side != self.side
         if switched:
@@ -113,6 +154,9 @@ class SplinerNode(Node):
 
         msg = OTWpntArray()
         msg.header.stamp = self.get_clock().now().to_msg()
+        status = PlannerStatus(status=result.status, note=note)
+        status.header.stamp = msg.header.stamp
+        status.header.frame_id = self.map_frame
         msg.header.frame_id = self.map_frame
         msg.last_switch_time = self.last_switch.to_msg()
         msg.side_switch = switched
@@ -122,6 +166,7 @@ class SplinerNode(Node):
         # An empty array published every cycle is the planner saying "no overtake",
         # which a consumer must be able to tell from the planner having died.
         self.pub.publish(msg)
+        self.status_pub.publish(status)
         self._publish_marker(msg.wpnts)
 
     def _waypoints(self, s, d, v):
@@ -173,7 +218,7 @@ def main(args=None):
     node = SplinerNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

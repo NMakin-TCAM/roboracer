@@ -12,14 +12,28 @@ Everything works in arc length measured FORWARD FROM THE CAR, written u, with
 u = ds(ego_s, s). That sidesteps the start/finish line entirely: u is monotonic
 over the manoeuvre whether or not it crosses s = 0, and the wrap happens once at
 the end when u is converted back to s.
+
+STATUS. plan() returns a PlanResult whose status says which case it is, because
+an empty trajectory means two opposite things: "nothing in the way, follow the
+raceline" (CLEAR) and "something is in the way and I cannot get round it"
+(NO_ROOM, TOO_CLOSE). A consumer that read the empty list as "follow the
+raceline" would drive into an obstacle the planner had refused. Branch on
+status, never on len(s). collision_free is True only for CLEAR and EVADING.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.interpolate import CubicSpline
 
 LEFT, RIGHT = 'left', 'right'
+
+CLEAR = 'clear'          # nothing in the way: follow the raceline
+EVADING = 'evading'      # s, d, v is the way round
+NO_ROOM = 'no room'      # in the way, and neither side has room: do not drive on
+TOO_CLOSE = 'too close'  # in the way, and too close to spline round: do not drive on
+STATUSES = (CLEAR, EVADING, NO_ROOM, TOO_CLOSE)
+COLLISION_FREE = (CLEAR, EVADING)
 
 
 @dataclass
@@ -152,26 +166,43 @@ def build_evasion(ego_s, ego_d, obs, side_choice, conv, params):
     return s, d, v
 
 
+def _empty():
+    return np.array([])
+
+
+@dataclass
+class PlanResult:
+    """One planning cycle's answer. s, d, v are non-empty exactly when status is EVADING."""
+
+    status: str
+    note: str
+    side: str = None
+    obstacle: object = None          # the obstacle planned around or refused, None when CLEAR
+    s: np.ndarray = field(default_factory=_empty)
+    d: np.ndarray = field(default_factory=_empty)
+    v: np.ndarray = field(default_factory=_empty)
+
+    @property
+    def collision_free(self):
+        """True when driving on is fine: the raceline (CLEAR) or the evasion (EVADING)."""
+        return self.status in COLLISION_FREE
+
+
 def plan(ego_s, ego_d, obstacles, conv, params, current_side=None):
-    """One planning cycle. Returns (s, d, v, side, note).
-
-    side is None and the arrays are empty whenever we are not overtaking, which
-    the controller reads as 'track the global raceline'.
-    """
-    empty = (np.array([]), np.array([]), np.array([]))
-
+    """One planning cycle. Returns a PlanResult; see STATUS."""
     ahead = obstacles_ahead(obstacles, ego_s, conv, params)
     if not ahead:
-        return (*empty, None, 'clear')
+        return PlanResult(CLEAR, 'clear')
 
     obs = ahead[0]
     choice = choose_side(obs, conv, params, current_side)
     if choice.side is None:
-        return (*empty, None, f'trailing: {choice.reason}')
+        return PlanResult(NO_ROOM, f'trailing: {choice.reason}', obstacle=obs)
 
     built = build_evasion(ego_s, ego_d, obs, choice, conv, params)
     if built is None:
-        return (*empty, None, 'too close to plan an evasion')
+        return PlanResult(TOO_CLOSE, 'too close to plan an evasion', obstacle=obs)
 
     s, d, v = built
-    return s, d, v, choice.side, f'overtaking {choice.side} ({choice.reason})'
+    return PlanResult(EVADING, f'overtaking {choice.side} ({choice.reason})',
+                      side=choice.side, obstacle=obs, s=s, d=d, v=v)
