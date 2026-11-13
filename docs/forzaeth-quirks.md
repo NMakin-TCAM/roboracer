@@ -75,6 +75,8 @@ our results with published ones needs first. Sections 2 to 5 are the
 preserved quirks, ordered by how much they can change what the comparison
 is able to claim. Section 6 covers the stand-ins this repository puts where
 upstream's own publishers would be, so that the four ports can run at all.
+Section 7 covers our obstacle tracker, which decides the order in which the
+ports see obstacles, and so which car each of them follows.
 
 ## 1. Deviations from upstream (behaviour differs)
 
@@ -228,7 +230,8 @@ the dynamic obstacle whose `s_start` is nearest ahead of the ego (modulo
 the lap) and within 6 m, recorded at its `s_center`. But the loop resets its
 pick to None on every obstacle that is not a nearer dynamic one, so with a
 cone or a second car listed after the opponent, nothing is tracked. Nothing
-is learned while the opponent is behind or more than 6 m ahead. Pinned:
+is learned while the opponent is behind or more than 6 m ahead. See §7 for
+the order obstacle_tracker publishes in because of this. Pinned:
 `test_opponent_is_lost_unless_it_is_last_in_the_array`,
 `test_opponent_is_the_nearest_dynamic_obstacle_ahead_within_6_m`,
 `test_opponent_is_recorded_at_s_center_and_ranged_by_s_start`.
@@ -409,7 +412,8 @@ rather than the right one. Pinned:
 (upstream's own TODO). Note that this is a different rule from
 opponent_trajectory's "last in the array". With several obstacles, the two
 nodes can be tracking different cars. Pinned:
-`test_first_dynamic_obstacle_is_the_opponent`.
+`test_first_dynamic_obstacle_is_the_opponent`. obstacle_tracker orders its
+output so that they never do (§7).
 
 **collision_prediction: the ego lap is one waypoint short.** The last updated
 waypoint is dropped as a duplicate of the first, and the lap length is read
@@ -572,3 +576,63 @@ Predictive Spliner and FSDP and so is not shared code. Until a branch ports
 its own GP, neither node ever publishes. `test_shared_graph_launch.py` asserts
 both halves: the two nodes are silent without the GP, and once a synthetic
 `/opponent_trajectory` along the raceline stands in for it, both publish.
+
+## 7. Obstacle order: obstacle_tracker
+
+`obstacle_tracker_node` (`obstacle_tracker.py`) sits between a detector and
+the planners. It takes detections with a position and nothing else, and adds
+ids, velocities, variances and `is_static`. It is our code, not a port, so it
+is free to choose the order of `/perception/obstacles`, and that order
+decides which car each port follows:
+
+- collision_prediction takes the **first** obstacle that is not static (§4).
+- opponent_trajectory takes the **last** obstacle, only if it is dynamic and
+  no nearer-ahead dynamic obstacle comes before it. Distance is
+  `(s_start - ego_s) % lap`. Any obstacle after it, static or not, resets its
+  pick (§2).
+
+With two or more dynamic obstacles **no order makes both take the same one**.
+The first rule needs the target before every other dynamic obstacle; the
+second needs it after them.
+
+**The order chosen.** Static obstacles first, by s. Then dynamic obstacles by
+`(s_start - ego_s) % lap`, ascending, so the nearest ahead comes first. A car
+behind the ego sorts to the end.
+
+- **No dynamic obstacle:** neither port has an opponent, as before.
+- **One dynamic obstacle, any number of static ones:** both ports take it.
+  Statics have to come first for this: one listed after the car would reset
+  opponent_trajectory's pick.
+- **Two or more dynamic obstacles:** collision_prediction takes the nearest
+  one ahead. opponent_trajectory takes none, because the last obstacle is
+  farther ahead than its first pick. The two ports never follow different
+  cars, but while a second car is tracked the GP gets no new points. That
+  includes a car behind the ego, if the detector sees astern, and a coasted
+  track during its `max_misses` cycles.
+
+**Why this order, not the reverse.** Dynamic obstacles nearest-ahead last
+would give opponent_trajectory the nearest car and collision_prediction the
+farthest: the force-trailing and collision-region decisions would be made by
+rolling one car forward along a GP trajectory learned from another. A GP that
+pauses is a smaller error than a GP of the wrong car. The order that serves
+collision_prediction also serves the obstacle that matters most for safety,
+the nearest one ahead.
+
+Without an ego position (no `/car_state/odom_frenet` yet) dynamic obstacles
+are ordered by id. The spliner sorts obstacles itself and does not depend on
+the order.
+
+Pinned (against the ports' own selection functions, `first_dynamic` and
+`find_nearest_dyn_obstacle`):
+`test_statics_first_then_dynamic_nearest_ahead_first`,
+`test_one_opponent_among_cones_is_taken_by_both_consumers`,
+`test_two_opponents_never_split_the_consumers`,
+`test_a_car_behind_does_not_split_the_consumers`,
+`test_without_an_ego_position_dynamic_obstacles_are_ordered_by_id`.
+
+**Coasted tracks are published with `is_visible` False.** A confirmed track
+survives `max_misses` cycles (10, 0.25 s at 40 Hz) without a detection, at its
+constant-velocity prediction with growing variances. opponent_trajectory does
+not check `is_visible` (§2), so the GP receives up to that many predicted
+points per occlusion. `max_misses` bounds this. Pinned (the coasting):
+`test_a_track_survives_a_dropout_shorter_than_max_misses`.

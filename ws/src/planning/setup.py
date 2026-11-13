@@ -35,6 +35,7 @@ setup(
             'state_machine_stub_node = planning.state_machine_stub_node:main',
             'spliner_node = planning.spliner_node:main',
             'local_path_node = planning.local_path_node:main',
+            'obstacle_tracker_node = planning.obstacle_tracker_node:main',
         ],
     },
 )
