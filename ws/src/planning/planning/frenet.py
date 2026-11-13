@@ -14,15 +14,62 @@ The reference is treated as a closed loop: s wraps at `length`, and the segment 
 point back to the first is a real segment. Raceline CSVs from the TUM optimizer repeat the
 first point as the last row; `from_raceline` drops that duplicate.
 
+HEADING CONVENTION. Internally `psi` is ROS yaw: 0 along +x, counter-clockwise positive.
+raceline.csv stores TUM's heading instead, 0 along +y, so yaw = psi_rad + pi/2 (raceline.py).
+`from_raceline` converts, after checking the file against its own geometry (yaw_from_csv_psi).
+Until this was fixed it used psi_rad as yaw unconverted, which put every heading a quarter turn
+off: velocity_to_frenet reported a car driving 3 m/s along the raceline as vs 0, vd 3, and
+to_cartesian offset d along the line instead of across it. centerline.csv has no heading
+column; `from_centerline` derives yaw from the points, which was and is correct.
+
 Nearest-point lookup is a KD-tree query followed by an exact projection onto the two segments
 either side of the hit, so the result is exact rather than snapped to the nearest sample.
 """
+
+import warnings
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 # raceline.csv columns: s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
 _S, _X, _Y, _PSI, _KAPPA, _VX = 0, 1, 2, 3, 4, 5
+
+
+# Median heading disagreement allowed when deciding which convention a raceline.csv uses.
+PSI_CONVENTION_TOLERANCE = 0.2   # rad
+
+
+def wrap_to_pi(a):
+    return (np.asarray(a, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
+
+
+def geometric_yaw(xy):
+    """ROS yaw at each point of a closed polyline (no repeated last point), from its neighbours."""
+    t = np.roll(xy, -1, axis=0) - np.roll(xy, 1, axis=0)
+    return np.arctan2(t[:, 1], t[:, 0])
+
+
+def yaw_from_csv_psi(psi, xy):
+    """(ROS yaw, warning or None) from raceline.csv's psi_rad column, checked against xy.
+
+    xy is the closed line without its repeated last point, psi its matching column. build_raceline
+    writes TUM's psi = yaw - pi/2. A hand-made file may hold ROS yaw instead; that is accepted
+    with a warning. Anything else is an error, because a heading that matches neither is a file
+    nobody understands.
+    """
+    psi = np.asarray(psi, dtype=float)
+    yaw = geometric_yaw(np.asarray(xy, dtype=float))
+    tum_err = float(np.median(np.abs(wrap_to_pi(psi + np.pi / 2 - yaw))))
+    ros_err = float(np.median(np.abs(wrap_to_pi(psi - yaw))))
+    if tum_err < PSI_CONVENTION_TOLERANCE:
+        return wrap_to_pi(psi + np.pi / 2), None
+    if ros_err < PSI_CONVENTION_TOLERANCE:
+        return wrap_to_pi(psi), ('raceline.csv psi_rad is already ROS yaw (0 = +x), not TUM\'s '
+                                 'yaw - pi/2 as build_raceline writes it; used as is. This '
+                                 'file was not made by build_raceline.')
+    raise ValueError(
+        f'raceline.csv psi_rad matches the path direction in neither convention (median '
+        f'error {tum_err:.2f} rad as TUM yaw - pi/2, {ros_err:.2f} rad as ROS yaw)')
 
 
 def _shape(flat, shape):
@@ -77,9 +124,18 @@ class FrenetConverter:
 
     @classmethod
     def from_raceline(cls, path):
-        """Build from a raceline.csv written by build_raceline (TUM output format)."""
+        """Build from a raceline.csv written by build_raceline (TUM output format).
+
+        psi_rad is TUM's heading and is converted to ROS yaw (see HEADING CONVENTION). A file
+        already in ROS yaw is accepted with a UserWarning; one matching neither raises.
+        """
         t = np.loadtxt(path, comments='#', delimiter=';', ndmin=2)
-        return cls(t[:, [_X, _Y]], s=t[:, _S], psi=t[:, _PSI], kappa=t[:, _KAPPA], vx=t[:, _VX])
+        if len(t) > 1 and np.allclose(t[0, [_X, _Y]], t[-1, [_X, _Y]]):
+            t = t[:-1]                  # the closing row; the constructor would drop it anyway
+        yaw, warning = yaw_from_csv_psi(t[:, _PSI], t[:, [_X, _Y]])
+        if warning:
+            warnings.warn(f'{path}: {warning}', stacklevel=2)
+        return cls(t[:, [_X, _Y]], s=t[:, _S], psi=yaw, kappa=t[:, _KAPPA], vx=t[:, _VX])
 
     @classmethod
     def from_centerline(cls, path):

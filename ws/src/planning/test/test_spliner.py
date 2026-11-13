@@ -32,9 +32,10 @@ def track(tmp_path_factory):
     np.savetxt(d / 'centerline.csv',
                np.column_stack((xy, np.full(n, W_RIGHT), np.full(n, W_LEFT))),
                delimiter=',', header='x_m,y_m,w_tr_right_m,w_tr_left_m')
+    # psi_rad in TUM convention (yaw - pi/2), as build_raceline writes it; yaw here is th + pi/2
     np.savetxt(d / 'raceline.csv',
                np.column_stack((np.arange(n) * (2 * np.pi * R / n), xy[:, 0], xy[:, 1],
-                                th + np.pi / 2, np.full(n, 1 / R), np.full(n, 5.0),
+                                th, np.full(n, 1 / R), np.full(n, 5.0),
                                 np.zeros(n))),
                delimiter=';', header='s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2')
     return FrenetConverter.from_track(str(d))

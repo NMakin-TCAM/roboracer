@@ -19,9 +19,10 @@ def tracks(tmp_path_factory):
     xy = np.column_stack((R * np.cos(th), R * np.sin(th)))
     np.savetxt(d / 'centerline.csv', np.column_stack((xy, np.full(N, 1.0), np.full(N, 1.0))),
                delimiter=',', header='x_m,y_m,w_tr_right_m,w_tr_left_m')
+    # psi_rad in TUM convention (yaw - pi/2), as build_raceline writes it; yaw here is th + pi/2
     np.savetxt(d / 'raceline.csv',
                np.column_stack((np.arange(N) * (2 * np.pi * R / N), xy[:, 0], xy[:, 1],
-                                th + np.pi / 2, np.full(N, 1 / R), np.full(N, 3.0), np.zeros(N))),
+                                th, np.full(N, 1 / R), np.full(N, 3.0), np.zeros(N))),
                delimiter=';', header='s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2')
     return root
 

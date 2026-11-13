@@ -264,9 +264,12 @@ def test_graph_comes_up_and_only_the_gp_is_missing(graph):
                                           f'{log_path.read_text()[-4000:]}')
         print('first message, s after harness start:',
               {t: round(v, 1) for t, v in sorted(h.first.items(), key=lambda kv: kv[1])})
+        # The ego drives along the raceline (heading from its psi_rad, i.e. the geometry) at
+        # SPEED. Before frenet.py converted TUM psi this read vs 0.00, vd 3.00.
         tw = h.last['/car_state/odom_frenet'].twist.twist.linear
-        print(f'ego at {SPEED} m/s along the raceline -> odom_frenet vs {tw.x:.2f}, vd {tw.y:.2f} '
-              f'(see the strict xfail in test_global_waypoints_publisher.py)')
+        print(f'ego at {SPEED} m/s along the raceline -> odom_frenet vs {tw.x:.3f}, vd {tw.y:.3f}')
+        assert tw.x == pytest.approx(SPEED, abs=0.1)
+        assert tw.y == pytest.approx(0.0, abs=0.25)
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

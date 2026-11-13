@@ -244,15 +244,15 @@ def test_the_gated_states_are_the_ones_the_ports_compare_against():
     assert not tr.overtake
 
 
-# ------------------------------------------------------------------ known bug, pinned
+# ------------------------------------------------------------------ converter agrees
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'FrenetConverter.from_raceline takes raceline.csv psi_rad (TUM: yaw - pi/2) as the ROS '
-    'yaw, so on a build_raceline file heading_at, to_cartesian offsets and '
-    'velocity_to_frenet are a quarter turn off. Not fixed here: shared math, out of scope.'))
-def test_known_bug_frenet_converter_heading_on_a_build_raceline_file(tmp_path):
+def test_frenet_converter_and_waypoints_agree_on_heading(tmp_path):
+    """FrenetConverter.from_track used to read TUM psi as ROS yaw (a quarter turn off); this
+    was the strict xfail that pinned it. Both now convert with frenet.yaw_from_csv_psi."""
     traj = write_track(tmp_path, psi='tum')
     conv = FrenetConverter.from_track(str(tmp_path))
     err = wrap(conv.heading_at(traj[:-1, 0]) - yaw_of(traj[:-1, 1:3]))
     assert np.max(np.abs(err)) < 0.05
+    g = load_global_waypoints(str(tmp_path))
+    assert np.max(np.abs(wrap(conv.heading_at(column(g, 's_m')) - column(g, 'psi_rad')))) < 1e-6

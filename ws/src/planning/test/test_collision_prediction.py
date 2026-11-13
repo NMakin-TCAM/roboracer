@@ -256,9 +256,10 @@ def circle(tmp_path_factory):
     np.savetxt(d / 'centerline.csv',
                np.column_stack((xy, np.full(N, 1.5), np.full(N, 1.5))),
                delimiter=',', header='x_m,y_m,w_tr_right_m,w_tr_left_m')
+    # psi_rad in TUM convention (yaw - pi/2), as build_raceline writes it; yaw here is th + pi/2
     np.savetxt(d / 'raceline.csv',
                np.column_stack((np.arange(N) * (2 * np.pi * R / N), xy[:, 0], xy[:, 1],
-                                th + np.pi / 2, np.full(N, 1 / R), np.full(N, 5.0),
+                                th, np.full(N, 1 / R), np.full(N, 5.0),
                                 np.zeros(N))),
                delimiter=';', header='s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2')
     return FrenetConverter.from_track(str(d))

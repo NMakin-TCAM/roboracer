@@ -100,8 +100,9 @@ def track(tmp_path_factory):
                np.column_stack((xy, np.full(len(th), W_RIGHT), np.full(len(th), W_LEFT))),
                delimiter=',', header='x_m,y_m,w_tr_right_m,w_tr_left_m')
     s_col = np.arange(len(th)) * (2 * np.pi * R_T / len(th))
+    # psi_rad in TUM convention (yaw - pi/2), as build_raceline writes it; yaw here is th + pi/2
     np.savetxt(d / 'raceline.csv',
-               np.column_stack((s_col, xy[:, 0], xy[:, 1], th + np.pi / 2,
+               np.column_stack((s_col, xy[:, 0], xy[:, 1], th,
                                 np.full(len(th), 1 / R_T), np.full(len(th), 5.0),
                                 np.zeros(len(th)))),
                delimiter=';', header='s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2')
@@ -133,6 +134,64 @@ def test_velocity_tangential_and_lateral(track):
     assert (s_dot, d_dot) == pytest.approx((4.0, 0.0), abs=1e-6)
     s_dot, d_dot = track.velocity_to_frenet(10.0, 0.0, -2 * np.sin(psi), 2 * np.cos(psi))
     assert (s_dot, d_dot) == pytest.approx((0.0, 2.0), abs=1e-6)
+
+
+def _true_tangent(s):
+    """The fixture circle's tangent at arc length s, from geometry alone (anticlockwise)."""
+    th = s / R_T
+    return np.array([-np.sin(th), np.cos(th)])
+
+
+def test_heading_is_ros_yaw_of_the_geometry(track):
+    """Not self-referential: compared with the circle, not with heading_at. The fixture holds
+    TUM psi = th; ROS yaw is th + pi/2. Before the fix this was off by a quarter turn."""
+    s = np.linspace(0, track.length, 50, endpoint=False)
+    expect = s / R_T + np.pi / 2
+    assert np.max(np.abs(np.angle(np.exp(1j * (track.heading_at(s) - expect))))) < 1e-2
+
+
+@pytest.mark.parametrize('s', [0.0, 3.0, 10.0, 21.0])
+def test_driving_along_the_line_is_all_vs_and_across_it_all_vd(track, s):
+    """A car at 3 m/s along the true tangent reports vs 3, vd 0; across it (left), the reverse.
+    Before the fix the first read vs 0, vd 3."""
+    t = _true_tangent(s)
+    left = np.array([-t[1], t[0]])
+    assert track.velocity_to_frenet(s, 0.0, *(3.0 * t)) == pytest.approx((3.0, 0.0), abs=0.02)
+    assert track.velocity_to_frenet(s, 0.0, *(3.0 * left)) == pytest.approx((0.0, 3.0), abs=0.02)
+
+
+def test_to_cartesian_offsets_across_the_line(track):
+    """d is lateral: (s, d) lands d metres from the centre's radius, not along the line."""
+    s = np.linspace(0, track.length, 30, endpoint=False)
+    for d in (0.5, -0.5):
+        x, y = track.to_cartesian(s, d)
+        assert np.hypot(x, y) == pytest.approx(R_T - d, abs=0.01)   # anticlockwise: left is inside
+        s2, d2 = track.to_frenet(x, y)
+        assert d2 == pytest.approx(d, abs=0.01)
+        assert np.abs(track.ds(s, s2)) == pytest.approx(0.0, abs=0.01)
+
+
+def _write_circle_raceline(path, psi):
+    th = np.linspace(0, 2 * np.pi, 200, endpoint=False)
+    np.savetxt(path, np.column_stack((th * R_T, R_T * np.cos(th), R_T * np.sin(th), psi(th),
+                                      np.full(200, 1 / R_T), np.full(200, 5.0), np.zeros(200))),
+               delimiter=';', header='s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2')
+
+
+def test_ros_yaw_raceline_is_accepted_with_a_warning(tmp_path):
+    """Hand-made files (tracks/circle) hold ROS yaw; they keep working, but say so."""
+    path = tmp_path / 'raceline.csv'
+    _write_circle_raceline(path, lambda th: th + np.pi / 2)
+    with pytest.warns(UserWarning, match='already ROS yaw'):
+        conv = FrenetConverter.from_raceline(str(path))
+    assert conv.heading_at(0.0) == pytest.approx(np.pi / 2, abs=1e-2)
+
+
+def test_raceline_heading_in_neither_convention_is_refused(tmp_path):
+    path = tmp_path / 'raceline.csv'
+    _write_circle_raceline(path, lambda th: th + 1.3)
+    with pytest.raises(ValueError, match='neither convention'):
+        FrenetConverter.from_raceline(str(path))
 
 
 def test_progress_rate_is_corrected_for_curvature(track):

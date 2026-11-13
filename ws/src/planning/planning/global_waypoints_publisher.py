@@ -26,7 +26,8 @@ WHERE EACH Wpnt FIELD COMES FROM (Wpnt.msg, in order):
                   raceline. raceline.csv has no widths of its own.
     psi_rad       ROS yaw: 0 = +x, counter-clockwise. raceline.csv holds TUM's
                   convention, yaw - pi/2 (raceline.py), so pi/2 is added back. The
-                  file's convention is checked against the geometry before use.
+                  file's convention is checked against the geometry before use, by
+                  frenet.yaw_from_csv_psi, the check FrenetConverter.from_raceline uses.
                   ForzaETH's global planner converts TUM headings the same way
                   before publishing. None of the four ports reads psi_rad today.
     kappa_radpm   raceline.csv. Recomputed from the geometry (raceline.path_traj's
@@ -49,7 +50,7 @@ import os
 
 import numpy as np
 
-from planning.frenet import FrenetConverter
+from planning.frenet import FrenetConverter, yaw_from_csv_psi
 from planning.raceline import path_traj, read_provenance, read_raceline
 
 # raceline.csv columns: s_m; x_m; y_m; psi_rad; kappa_radpm; vx_mps; ax_mps2
@@ -59,10 +60,6 @@ _S, _X, _Y, _PSI, _KAPPA, _VX, _AX = range(7)
 # this against Wpnt.msg itself, so the two cannot drift apart.
 WPNT_FIELDS = ('id', 's_m', 'd_m', 'x_m', 'y_m', 'd_right', 'd_left',
                'psi_rad', 'kappa_radpm', 'vx_mps', 'ax_mps2')
-
-# Median heading disagreement allowed when deciding which psi convention a file uses.
-PSI_CONVENTION_TOLERANCE = 0.2   # rad
-
 
 @dataclasses.dataclass(frozen=True)
 class Waypoint:
@@ -88,37 +85,6 @@ class GlobalWaypoints:
     @property
     def lap_length(self):
         return self.waypoints[-1].s_m
-
-
-def wrap_to_pi(a):
-    return (np.asarray(a, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi
-
-
-def geometric_yaw(xy):
-    """ROS yaw at each point of an open closed-loop polyline, from its neighbours."""
-    t = np.roll(xy, -1, axis=0) - np.roll(xy, 1, axis=0)
-    return np.arctan2(t[:, 1], t[:, 0])
-
-
-def yaw_from_csv_psi(psi, xy):
-    """(ROS yaw, warning or None) from raceline.csv's psi_rad column, checked against xy.
-
-    build_raceline writes TUM's psi = yaw - pi/2. A hand-made file may hold ROS yaw
-    instead; that is accepted with a warning. Anything else is an error, because a
-    heading that matches neither is a file nobody understands.
-    """
-    yaw = geometric_yaw(xy)
-    tum_err = float(np.median(np.abs(wrap_to_pi(psi + np.pi / 2 - yaw))))
-    ros_err = float(np.median(np.abs(wrap_to_pi(psi - yaw))))
-    if tum_err < PSI_CONVENTION_TOLERANCE:
-        return wrap_to_pi(psi + np.pi / 2), None
-    if ros_err < PSI_CONVENTION_TOLERANCE:
-        return wrap_to_pi(psi), ('raceline.csv psi_rad is already ROS yaw (0 = +x), not TUM\'s '
-                                 'yaw - pi/2 as build_raceline writes it; used as is. This '
-                                 'file was not made by build_raceline.')
-    raise ValueError(
-        f'raceline.csv psi_rad matches the path direction in neither convention (median '
-        f'error {tum_err:.2f} rad as TUM yaw - pi/2, {ros_err:.2f} rad as ROS yaw)')
 
 
 def load_global_waypoints(track_dir):
