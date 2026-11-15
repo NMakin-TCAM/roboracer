@@ -229,6 +229,39 @@ def test_region_expires_after_max_expire_counter_cycles():
     assert c.expire_counter == 3
 
 
+def test_region_lingers_until_it_expires():
+    """LIVENESS: the cycles upstream was silent in report the last region instead."""
+    c = predictor(max_expire_counter=3)
+    c.set_ego(0.0, EGO_V)
+    c.set_obstacles([FakeObs(5.01)])
+    hit = c.step()
+    assert hit.lingering is None
+    c.set_obstacles([])
+    quiet = c.step()
+    assert quiet.region is None and not quiet.delete and quiet.lingering is hit.region
+    gone = c.step()
+    assert gone.delete and gone.lingering is None
+    assert c.step().lingering is None        # expired regions do not come back
+
+
+def test_a_new_region_replaces_the_lingering_one():
+    c = predictor(max_expire_counter=5)
+    c.set_ego(0.0, EGO_V)
+    c.set_obstacles([FakeObs(5.01)])
+    first = c.step().region
+    c.set_obstacles([])
+    c.step()
+    c.set_obstacles([FakeObs(6.01)])
+    second = c.step().region
+    c.set_obstacles([])
+    assert c.step().lingering is second and second is not first
+
+
+def test_nothing_lingers_before_the_first_region():
+    c = predictor(max_expire_counter=3)
+    assert c.step().lingering is None
+
+
 def test_region_published_and_deleted_in_one_cycle_when_counter_is_one():
     c = predictor(max_expire_counter=1)
     c.set_ego(0.0, EGO_V)

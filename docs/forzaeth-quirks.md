@@ -246,6 +246,26 @@ set. The expire counter counts cycles, so a region now lingers
 lingered for however long 10 unthrottled cycles took. Not pinned (node
 only).
 
+**collision_prediction: one obstacle array every cycle (liveness).** Upstream
+publishes `/collision_prediction/obstacles` only when it finds a region and,
+once it has expired, an empty array every cycle. In between, for up to
+`max_expire_counter / rate` (1 s) after the last region found, and before the
+first expiry, it is silent. A ROS 1 consumer keeps the last message, so to it
+the region just persists until the empty array arrives. Our spliner_node treats
+an obstacle array older than 0.5 s as a dead input and stops planning, and
+local_path_node then invalidates the path, so that silence stopped the car for
+up to 0.45 s at a time (8.9 s of 112 s on porto). The port now publishes in
+every cycle what a ROS 1 consumer would have held: the region when found, the
+last region (freshly stamped, no new markers) while it lingers, otherwise the
+empty array. The alternative, a staleness budget over 1 s, would also hide a
+dead collision_prediction for over a second. An empty array in the linger
+cycles would cancel upstream's expire hysteresis, so the region would vanish a
+second early, and a committed evasion would be released as "gone". Region
+contents and expiry timing are unchanged. Pinned:
+`test_region_lingers_until_it_expires`,
+`test_a_new_region_replaces_the_lingering_one`,
+`test_nothing_lingers_before_the_first_region`.
+
 **collision_prediction: in-process Frenet conversion.**
 `convert_frenet2globarr_service` became `FrenetConverter.to_cartesian`. The
 service was only used for marker positions. Pinned:
@@ -538,7 +558,8 @@ predicted s and spans d from -10 to 10. Pinned:
 
 **collision_prediction: expiry counts cycles.** A region is deleted
 `max_expire_counter` cycles after the last one was found. After that, the
-empty array and marker deletes go out every cycle. Pinned:
+empty array and marker deletes go out every cycle. (Until then the port
+republishes the last region every cycle where upstream was silent: §1.) Pinned:
 `test_region_expires_after_max_expire_counter_cycles`,
 `test_region_published_and_deleted_in_one_cycle_when_counter_is_one`,
 `test_no_opponent_publishes_nothing_but_counts_down`.
@@ -879,13 +900,33 @@ synthetic 3 m wide oval (35.2 m lap).
   evading (left 484, right 489), 405 "too close" (regions starting within
   about 1.5 m), 63 releases (24 "gone", as the recomputed region moves more
   than match_tolerance; 39 "off line", an artefact of the ego not following).
-- **On both tracks, walls read as "clear".** The spliner ranges obstacles by
+- **On both tracks, walls read as "clear".** The spliner ranged obstacles by
   `s_center`, which for a wall lies beyond its 10 m lookahead even when
-  `s_start` does not.
-- **On both tracks, it stops on stale inputs.** collision_prediction publishes
-  nothing for up to 1 s after a region vanishes (the expire counter, §4), so
-  the spliner stops on its 0.5 s staleness check: 162 times on porto, 7.9 to
-  8.9 s of 110 s silent.
+  `s_start` does not. Fixed since: it ranges on `s_start` (`spliner.py`
+  `obstacles_ahead`, `test_a_wall_region_that_starts_close_is_not_clear`).
+- **On both tracks, it stopped on stale inputs.** collision_prediction
+  published nothing for up to 1 s after a region vanished, so the spliner
+  stopped on its 0.5 s staleness check: 162 times on porto, 7.9 to 8.9 s of
+  110 s silent. Fixed since by the liveness deviation (§1).
+- **With both fixes, porto again (same run):** still no evasion. Now 0.0 s
+  silent, and 161 cycles of walls starting within the lookahead are "no room",
+  where they had been "clear". Only 19% of ended regions leave the room the
+  spliner needs, so on porto the limit is geometric. The closed-loop sweep of
+  the spliner's clearance on porto is in
+  `docs/reports/clearance_sweep/README.md`.
+- **The car cannot start cold.** With the spliner on
+  `/collision_prediction/obstacles`, local_path_node needs the spliner, the
+  spliner needs an obstacle array, collision_prediction publishes none until
+  the GP has published, and the GP needs the car following the opponent for
+  half a lap. The sweep places the car by hand until then.
+- **GB_TRACK teaches collision_prediction the ego's past speed.** With the
+  stand-in state machine fixed at GB_TRACK, update_waypoints (§4) overwrites
+  `/global_waypoints_updated` speeds with the ego's measured speed. After a
+  lap of trailing at the opponent's speed, collision_prediction rolls the ego
+  forward at that same speed, predicts no catch and publishes empty arrays,
+  while pure pursuit drives the raceline speed. In one closed-loop GB_TRACK
+  run the car touched the opponent with no region published. Upstream's real
+  state machine would leave GB_TRACK while trailing; the stub does not (§6).
 
 Not pinned (one-off run; the launch test checks only that the GP and
 collision_prediction publish).

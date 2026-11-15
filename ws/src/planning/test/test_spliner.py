@@ -67,6 +67,38 @@ def test_obstacles_off_the_line_are_ignored(track, params):
     assert obstacles_ahead([FakeObs(5.0, d_center=2.0)], 0.0, track, params) == []
 
 
+def long_obs(s_start, s_end, d_right=-0.3, d_left=0.3):
+    """A region long in s, like collision_prediction's: s_center far beyond s_start."""
+    o = FakeObs((s_start + s_end) / 2)
+    o.s_start, o.s_end = s_start, s_end
+    o.d_right, o.d_left = d_right, d_left
+    o.d_center = (d_right + d_left) / 2
+    return o
+
+
+def test_a_long_obstacle_that_starts_close_is_in_our_way(track, params):
+    """Its near edge is 2 m ahead; its centre (11 m) is past the 10 m lookahead."""
+    obs = long_obs(2.0, 20.0)
+    assert obstacles_ahead([obs], 0.0, track, params) == [obs]
+
+
+def test_a_wall_region_that_starts_close_is_not_clear(track, params):
+    """collision_prediction's region with no end: d -10..10, s_center past the lookahead."""
+    wall = long_obs(3.0, 21.0, d_right=-10.0, d_left=10.0)
+    r = plan(0.0, 0.0, [wall], track, params)
+    assert r.status == NO_ROOM and not r.collision_free
+
+
+def test_an_obstacle_whose_near_edge_is_past_the_lookahead_is_ignored(track, params):
+    assert obstacles_ahead([long_obs(10.5, 12.0)], 0.0, track, params) == []
+
+
+def test_obstacles_are_ordered_by_their_near_edge(track, params):
+    """A long region starting at 2 m comes before a short obstacle centred at 4 m."""
+    long_one, short = long_obs(2.0, 14.0), FakeObs(4.0)
+    assert obstacles_ahead([short, long_one], 0.0, track, params) == [long_one, short]
+
+
 def test_nearest_obstacle_comes_first(track, params):
     a, b, c = FakeObs(8.0), FakeObs(2.0), FakeObs(5.0)
     assert [o.s_center for o in obstacles_ahead([a, b, c], 0.0, track, params)] == [2.0, 5.0, 8.0]

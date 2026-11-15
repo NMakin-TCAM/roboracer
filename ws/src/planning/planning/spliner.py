@@ -105,14 +105,17 @@ class SideChoice:
 def obstacles_ahead(obstacles, ego_s, conv, params):
     """Obstacles in our way, nearest first.
 
-    'In our way' means ahead of us, inside the lookahead, and laterally close
-    enough to the reference line to matter. Comparison uses signed lap distance,
-    never subtraction, so a car just past the start line is correctly seen as
-    ahead rather than a lap behind.
+    'In our way' means its near edge (s_start) is ahead of us and inside the
+    lookahead, and it is laterally close enough to the reference line to matter.
+    Nearest means nearest near edge. Ranging on s_start, not s_center, matters for
+    obstacles long in s: a collision_prediction region can run 10 m or more, so
+    its centre can lie past the lookahead while its start is right in front of
+    the car. Comparison uses signed lap distance, never subtraction, so a car
+    just past the start line is correctly seen as ahead rather than a lap behind.
     """
     out = []
     for o in obstacles:
-        gap = conv.ds(ego_s, o.s_center)
+        gap = conv.ds(ego_s, o.s_start)
         if not (0.0 < gap < params.lookahead):
             continue
         if abs(o.d_center) > params.on_line_threshold:

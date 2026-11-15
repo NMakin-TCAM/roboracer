@@ -40,6 +40,15 @@ would make both branches differ from the code they claim to port:
   * The expire counter counts loop cycles, not seconds. A region is deleted
     max_expire_counter cycles after the last one was found, and the empty
     array and marker deletes then go out every cycle.
+
+One deviation, for liveness (Step.lingering): upstream publishes nothing in the
+cycles between the last region found and its expiry, and nothing before the
+first expiry. A ROS 1 consumer keeps the last message, so to it the region
+simply persists until the empty array arrives. Our consumers (spliner_node, and
+local_path_node behind it) treat silence as a dead input and stop. So step()
+also reports the last region as lingering in those cycles, and the node
+republishes it (freshly stamped) and otherwise publishes an empty array: one
+ObstacleArray every cycle, carrying what a ROS 1 consumer would have held.
   * Upstream reads speed_offset from the max_expire_counter parameter, but
     never uses speed_offset, so it is left out here.
   * The ego state defaults to s = 0, v = 0 until odometry arrives; upstream
@@ -98,6 +107,7 @@ class Step:
     force_trailing: object = None      # bool or None
     region: object = None              # Region or None
     delete: bool = False               # publish the empty array and marker deletes
+    lingering: object = None           # the last Region, not found again and not yet expired
 
 
 def first_dynamic(obstacles):
@@ -184,6 +194,7 @@ class CollisionPredictor:
         self.ego_s = 0.0
         self.ego_v = 0.0
         self.expire_counter = 0
+        self.last_region = None
 
     def set_opponent_trajectory(self, oppwpnts, lap_count):
         if not oppwpnts:
@@ -228,11 +239,15 @@ class CollisionPredictor:
                                         self.params)
             if out.region is not None:
                 self.expire_counter = 0
+                self.last_region = out.region
 
         self.expire_counter += 1
         if self.expire_counter >= self.params.max_expire_counter:
             self.expire_counter = self.params.max_expire_counter
             out.delete = True
+            self.last_region = None
+        elif out.region is None:
+            out.lingering = self.last_region
         return out
 
     def marker_positions(self, region, conv):

@@ -41,6 +41,14 @@ ROS 1 to ROS 2 differences:
     integer literals (vs = 0, d = +/-10) are floats here.
   * Upstream stamped its two markers once at startup and published that stamp
     forever. They are stamped at publish time here.
+  * LIVENESS. /collision_prediction/obstacles carries one ObstacleArray every
+    cycle. Upstream was silent between the last region found and its expiry
+    (up to max_expire_counter / rate = 1 s), and before the first expiry. Here
+    those cycles republish the last region (step.lingering, freshly stamped,
+    no new markers) or, with none, an empty array: what a ROS 1 consumer,
+    which keeps the last message, would have held. spliner_node treats an
+    obstacle array older than 0.5 s as a dead input and stops planning, so
+    upstream's silence stopped the car for up to 0.45 s at a time.
 """
 
 import os
@@ -181,19 +189,28 @@ class CollisionPredictionNode(Node):
 
         if step.region is not None:
             r = step.region
-            obs = Obstacle(id=0, d_left=r.d_left, d_right=r.d_right, d_center=r.d_center,
-                           vs=0.0, vd=0.0, is_actually_a_gap=False, is_static=False)
-            obs.s_start, obs.s_end, obs.s_center = r.s_start, r.s_end, r.s_center
-            arr = ObstacleArray(obstacles=[obs])
-            arr.header.stamp, arr.header.frame_id = now, self.map_frame
-            self.pub_obs.publish(arr)
+            self.pub_obs.publish(self._region_array(r, now))
 
             (bx, by), (ex, ey) = self.predictor.marker_positions(r, self.conv)
             self.pub_begin.publish(self._marker(0, bx, by, now))
             self.pub_end.publish(self._marker(1, ex, ey, now))
+        elif step.lingering is not None:
+            self.pub_obs.publish(self._region_array(step.lingering, now))   # LIVENESS
 
         if step.delete:
             self._delete_all(now)
+        elif step.region is None and step.lingering is None:
+            arr = ObstacleArray()                                            # LIVENESS
+            arr.header.stamp, arr.header.frame_id = now, self.map_frame
+            self.pub_obs.publish(arr)
+
+    def _region_array(self, r, now):
+        obs = Obstacle(id=0, d_left=r.d_left, d_right=r.d_right, d_center=r.d_center,
+                       vs=0.0, vd=0.0, is_actually_a_gap=False, is_static=False)
+        obs.s_start, obs.s_end, obs.s_center = r.s_start, r.s_end, r.s_center
+        arr = ObstacleArray(obstacles=[obs])
+        arr.header.stamp, arr.header.frame_id = now, self.map_frame
+        return arr
 
     def _marker(self, mid, x, y, now):
         m = Marker()
