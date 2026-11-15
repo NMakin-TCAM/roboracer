@@ -17,6 +17,11 @@ and asserts that both of them then leave their wait loops and publish.
 collision_prediction publishes force_trailing only when it has taken a dynamic
 obstacle as the opponent, so that message is the evidence it sees the tracked one.
 
+A second test launches the same graph with gp:=dense, Predictive Spliner's GP,
+and nothing synthetic: the GP must publish from the tracked opponent's half laps,
+reach a whole lap with every waypoint observed at about the opponent's speed, and
+collision_prediction must publish force_trailing from it.
+
 This exercises transport, QoS and launch wiring only. It says nothing about
 whether an overtake would work.
 """
@@ -49,6 +54,7 @@ EGO_GAP = 3.0                    # m behind the opponent; opponent_trajectory lo
 SPEED = 3.0                      # m/s, opponent and ego
 PHASE1_TIMEOUT = 40.0            # s, includes node startup and half a lap of tracking
 PHASE2_TIMEOUT = 60.0            # s, the predictor needs a full opponent lap first
+DENSE_TIMEOUT = 90.0             # s, the dense GP's whole lap needs over a lap of tracking
 
 # topic -> (type, qos); qos None is depth 10 VOLATILE
 WATCH = {
@@ -105,6 +111,15 @@ def write_oval(track_dir):
 
 @pytest.fixture
 def graph(tmp_path):
+    yield from start_graph(tmp_path)
+
+
+@pytest.fixture
+def dense_graph(tmp_path):
+    yield from start_graph(tmp_path, 'gp:=dense')
+
+
+def start_graph(tmp_path, *extra):
     if shutil.which('ros2') is None:
         pytest.skip('ros2 CLI not on PATH')
     try:
@@ -123,7 +138,8 @@ def graph(tmp_path):
     proc = subprocess.Popen(
         ['ros2', 'launch', 'planning', 'shared_graph.launch.py', 'track:=oval',
          'localizer:=external', 'use_sim_time:=false', 'opponent_mode:=weaving',
-         f'opponent_speed:={SPEED}', 'opponent_s0:=4.0', 'opponent_max_range:=100.0'],
+         f'opponent_speed:={SPEED}', 'opponent_s0:=4.0', 'opponent_max_range:=100.0',
+         *extra],
         env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     try:
         yield proc, load_global_waypoints(str(tracks / 'oval')), log_path
@@ -298,6 +314,38 @@ def test_graph_comes_up_and_only_the_gp_is_missing(graph):
         print(f'ego at {SPEED} m/s along the raceline -> odom_frenet vs {tw.x:.3f}, vd {tw.y:.3f}')
         assert tw.x == pytest.approx(SPEED, abs=0.1)
         assert tw.y == pytest.approx(0.0, abs=0.25)
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_dense_gp_unblocks_the_graph_with_nothing_synthetic(dense_graph):
+    proc, waypoints, log_path = dense_graph
+    rclpy.init(domain_id=DOMAIN)
+    node = rclpy.create_node('shared_graph_test_harness')
+    try:
+        h = Harness(node, waypoints)
+        gp = []
+        node.create_subscription(OpponentTrajectory, '/opponent_trajectory', gp.append, 10)
+        h.spin_until(NEEDS_GP, DENSE_TIMEOUT, proc, log_path)
+        assert not missing(h, NEEDS_GP), (f'silent with gp:=dense: {missing(h, NEEDS_GP)}\n'
+                                          f'{log_path.read_text()[-4000:]}')
+        deadline = time.monotonic() + DENSE_TIMEOUT
+        whole = lambda m: m.lap_count >= 1 and all(w.proj_vs_mps != 100 for w in m.oppwpnts)
+        while time.monotonic() < deadline and not any(whole(m) for m in gp):
+            rclpy.spin_once(node, timeout_sec=0.05)
+            assert proc.poll() is None, 'launch exited:\n' + log_path.read_text()[-4000:]
+        laps = [m.lap_count for m in gp]
+        print('dense GP lap_counts:', laps)
+        assert gp and gp[0].lap_count == 0.5, laps
+        # One waypoint per global waypoint but the duplicated last; unobserved ones at 100.
+        assert len(gp[0].oppwpnts) == len(waypoints.waypoints) - 1
+        assert any(w.proj_vs_mps == 100 for w in gp[0].oppwpnts)
+        full = next((m for m in gp if whole(m)), None)
+        assert full is not None, f'no whole-lap trajectory within {DENSE_TIMEOUT:.0f} s: {laps}'
+        vs = np.array([w.proj_vs_mps for w in full.oppwpnts])
+        assert np.median(vs) == pytest.approx(SPEED, abs=0.3)
+        assert 'dense_gp_opp_traj' in log_path.read_text()
     finally:
         node.destroy_node()
         rclpy.try_shutdown()

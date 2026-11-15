@@ -13,7 +13,13 @@ same-named file in the two repositories differs (`gaussian_process_opp_traj.py`,
 | `opponent_trajectory.py` | `opponent_trajectory.py`, `opponent_trajectory_node.py` | `test_opponent_trajectory.py` |
 | `predictor_opponent_trajectory.py` | `predictor_opponent_trajectory.py`, `predictor_opponent_trajectory_node.py` | `test_predictor_opponent_trajectory.py` |
 
-All four ports keep upstream's defects, and for the same main reason: if
+Predictive Spliner's own main GP, `gaussian_process_opp_traj.py` (the dense
+sklearn GP), is ported too, as `dense_gp_opp_traj.py` and
+`dense_gp_opp_traj_node.py`, tested by `test_dense_gp_opp_traj.py`. It is not
+shared code: FSDP's file of the same name is a different, sparse GP. It is
+started only by `shared_graph.launch.py gp:=dense` (§6), and §8 covers it.
+
+All five ports keep upstream's defects, and for the same main reason: if
 the shared code is "fixed", both branches stop running the code they claim
 to port, and our numbers can no longer be compared with ForzaETH's or ZJU's
 published results. Wherever a quirk had another reason as well, its entry
@@ -35,16 +41,28 @@ different md5 from the one ported fails.
     FORZAETH_SPLINER_SRC=~/predictive-spliner/src \
         python3 -m pytest src/planning/test/test_upstream_differential.py -q
 
-It covers `opponent_trajectory` and `predictor_opponent_trajectory`:
+It covers `opponent_trajectory`, `predictor_opponent_trajectory` and the dense
+GP:
 
 - **opponent_trajectory:** 300 scenarios by default (`DIFFERENTIAL_SCENARIOS`),
   about 13 s.
 - **predictor:** 100 by default (`DIFFERENTIAL_PREDICTOR_SCENARIOS`), about
   22 s, because every prediction is a GP fit run twice. It also needs
   scikit-learn 1.1 or later and skips otherwise (see §1).
+- **dense GP:** 40 by default (`DIFFERENTIAL_GP_SCENARIOS`), about 25 s. Same
+  sklearn requirement. Upstream is given our `FrenetConverter` behind
+  ForzaETH's `get_cartesian`/`get_frenet` interface, and the vendored ccma as
+  `ccma`, so both sides do the same CCMA round trip through x, y. Scenarios are
+  closed tracks at 0.1 to 0.3 m spacing with half laps shaped like
+  opponent_trajectory's, plus off-trajectory, empty, NaN and waypoint-change
+  messages, and two planted boundary inputs (a first detection exactly on a
+  global s, one not wrapped into the lap). The port's crash guards must fire
+  on exactly the frame upstream dies on, and output up to and including that
+  frame must match.
 
-Both ports were accepted at 3,000 scenarios on `DIFFERENTIAL_SEED` 1 and 2.
-For the predictor that run was sharded with `DIFFERENTIAL_START`. Use
+Those three ports were accepted at 3,000 scenarios on `DIFFERENTIAL_SEED` 1
+and 2. For the predictor and the dense GP that run was sharded with
+`DIFFERENTIAL_START`. Use
 `OMP_NUM_THREADS=1` when running shards in parallel. collision_prediction's
 3,000-scenario check was run once, during its port, and is not in the
 repository.
@@ -62,10 +80,22 @@ Quirks that no unit test pins, and that the differential now covers:
   `ValueError` and `ZeroDivisionError` crashes are counted, though not
   asserted: on seed 1, 33 and 37 in 3,000 scenarios. The 33 `ValueError`
   crashes equal the port's 33 skipped empty spans.
+- Every dense-GP quirk in §8 except the zero top speed, by branch counters
+  asserted on the default run: first, later and whole-lap fits, the double
+  publish at lapcount 1, start-line crossings in half-lap mode, thinning,
+  start-line copies. The non-finite guard (§1) is asserted frame for frame:
+  224 of upstream's `ValueError` crashes on seed 1, 206 on seed 2.
+- The dense GP's mutation check: 16 single-line mutants of the port (one per
+  quirk: window ends, thinning, the double count, sigma alignment, CCMA mode,
+  the republish, normalize_y, ...) all fail the default 40-scenario run on seed
+  7. Two survived the first version of the scenarios, and the two planted
+  boundary inputs exist because of them.
 
 Still covered by nothing:
 
 - The exactly-half-lap backwards step. Random floats never land on it.
+- The dense GP's empty half-lap window guard (§1), unreachable with lapcount
+  0.5 then 1.0, and its zero-top-speed markers (pinned by a unit test).
 - The clock constraint.
 - The loop-timing deviations. The differential compares per cycle, so it
   says nothing about cycle times.
@@ -138,6 +168,59 @@ only worked because both were anonymous. The port is
 `predictor_opponent_trajectory`. Upstream's `header.seq = lap_count` is
 dropped: ROS 2 headers have no seq, and rospy overwrote seq on publish
 anyway. Not pinned.
+
+**dense GP: depends on the sklearn version,** as the predictor does. Before
+1.1 the half-lap d mean reaches ForzaETH's `get_cartesian` as (n, 1) and
+upstream raises on every half lap. The port flattens both means. Pinned: not by
+a unit test. Differential: skips below 1.1.
+
+**dense GP: no crash on non-finite input.** A non-finite s, d or vs among the
+points about to be fitted makes sklearn's `fit` (or, in whole-lap mode,
+ForzaETH's `get_frenet`) raise, and the node dies. opponent_trajectory's NaN
+poisoning (§2) produces exactly that, from its stale flush. In whole-lap mode,
+thinning may drop the bad point before the fit, and upstream then carries on;
+so does the port, because the guard sits at the fit, not on arrival. Where
+upstream would raise, the port publishes nothing for that message, removes
+the non-finite detections from the accumulated list, and wraps a half lap's s
+back into the lap as upstream would have after publishing. A NaN vd alone
+crashes neither. Pinned:
+`test_half_lap_with_a_nan_speed_publishes_nothing_and_drops_the_point`,
+`test_nan_at_lap_one_publishes_nothing`, `test_a_nan_vd_does_not_stop_anything`.
+Differential: `port_survived_nonfinite` on the same frame as every
+`upstream_crash_ValueError`.
+
+**dense GP: no crash on an empty half-lap window,** an IndexError upstream.
+The port publishes nothing for that half lap. It needs a third half lap with
+lapcount at or below 1, which opponent_trajectory does not produce. Not
+pinned.
+
+**dense GP: no crash on a zero top speed.** Upstream divides marker heights by
+the top /global_waypoints speed: ZeroDivisionError while any waypoint still
+has its initial integer 100, inf once all are numpy floats. The port draws
+height 0. Pinned: `test_marker_height_is_zero_without_a_top_speed`. Not in the
+differential.
+
+**dense GP: no messages dropped while busy, node name, header.** As for the
+predictor: upstream's per-pass `wait_for_message` became a depth-10
+subscription, the node is `dense_gp_opp_traj` (upstream's anonymous
+`gaussian_process_opp_traj` is also FSDP's name), and `header.seq = lap_count`
+is dropped. Both publishes at lapcount 1 carry the first one's stamp, as
+upstream's republished message object did. Not pinned (node only).
+
+**dense GP: the Frenet converter sets published d.** As in the other ports the
+converter is `FrenetConverter.from_track`, not ForzaETH's, built from
+/global_waypoints. Here that is more than markers: whole-lap d is CCMA-smoothed
+in x, y and converted back, so the converter sets every published `d_m`.
+ForzaETH's `get_frenet` guesses s as "index of the nearest waypoint × 0.1 m"
+and corrects it by at most 5 cm, so it is only right at 0.1 m waypoint
+spacing; ours projects onto the polyline. Our tracks are at 0.1 m
+(porto_odom_trial: 270 waypoints, 0.1 m apart), where the two
+should agree to millimetres, but that was not measured. Not pinned.
+
+**dense GP: ccma is vendored,** byte for byte, from ForzaETH's fork at the
+commit race_stack pins (`planning/vendor/ccma/README.md` gives the reasons and
+the provenance). Pinned: `test_vendored_ccma_is_the_pinned_upstream_file`
+(sha256).
 
 **opponent_trajectory: no crash on predictions received only during OVERTAKE.**
 Upstream raises AttributeError and the node dies once lapcount ≥ 1 and
@@ -586,13 +669,15 @@ launch.** `opponent_trajectory_node` publishes a `MarkerArray` on
 `Marker` on the same topic. Two types on one topic break every subscriber.
 Not pinned.
 
-**Still missing: the main GP.** `predictor_opponent_trajectory` and
+**The main GP is a launch argument.** `predictor_opponent_trajectory` and
 `collision_prediction` both wait for an `/opponent_trajectory`. Upstream,
 that comes first from `gaussian_process_opp_traj.py`, which differs between
-Predictive Spliner and FSDP and so is not shared code. Until a branch ports
-its own GP, neither node ever publishes. `test_shared_graph_launch.py` asserts
-both halves: the two nodes are silent without the GP, and once a synthetic
-`/opponent_trajectory` along the raceline stands in for it, both publish.
+Predictive Spliner and FSDP and so is not shared code. `shared_graph.launch.py`
+therefore starts none by default (`gp:=none`), and neither node ever publishes.
+`gp:=dense` starts Predictive Spliner's dense GP (§8). FSDP's sparse GP is not
+ported. `test_shared_graph_launch.py` asserts all three cases: with no GP the two
+nodes are silent; a synthetic `/opponent_trajectory` along the raceline
+unblocks both; and with `gp:=dense` both publish with nothing synthetic.
 
 ## 7. Obstacle order: obstacle_tracker
 
@@ -658,3 +743,149 @@ obstacles" by default. Pinned:
 `test_coasted_tracks_are_not_published_by_default`,
 `test_a_track_survives_a_dropout_shorter_than_max_misses` (with
 `publish_coasted`).
+
+## 8. Predictive Spliner's dense GP: dense_gp_opp_traj
+
+`dense_gp_opp_traj_node` turns opponent_trajectory's half laps
+(`/proj_opponent_trajectory`, §2) into the `/opponent_trajectory` that
+collision_prediction rolls the opponent forward on (§4) and the predictor
+patches (§3). It is Predictive Spliner's alone, so everything here is part of
+what the comparison with FSDP measures, not shared noise. Deviations are in §1;
+these are preserved.
+
+**Unobserved waypoints run at 100 m/s.** The trajectory starts as the raceline
+(d = 0) with `proj_vs_mps` 100 on every waypoint, and every message carries the
+whole lap, filled in or not. After the first half lap the unfilled half is the
+one the opponent is about to enter, so collision_prediction rolls it away at
+100 m/s and predicts no collision there until the whole-lap fit. Pinned:
+`test_initial_trajectory_is_the_raceline_at_100_mps`,
+`test_first_half_lap_fills_its_window_and_leaves_the_rest_at_100`.
+
+**Half-lap mode (lapcount ≤ 1): two fixed windows.** The first half lap is fitted
+on the global s strictly between its first detection and half a lap on. The
+second is fitted on the complement, [end of the first, its start + lap], from
+its own detections wherever they are; the GP extrapolates to cover the
+difference. Global s past the lap are wrapped only if the half lap's detections
+crossed the start line; otherwise those waypoints are not written. Pinned:
+`test_first_window_is_strictly_inside_first_detection_to_half_a_lap_on`,
+`test_second_half_lap_window_is_the_complement_wherever_its_detections_are`,
+`test_half_lap_window_past_the_lap_is_dropped_without_a_start_line_crossing`.
+
+**Means fall back to 0 away from the data.** `normalize_y` is False, so where
+a half-lap window extends beyond its detections, predicted d and vs return to
+0, and the opponent is predicted to stop there. Pinned:
+`test_half_lap_means_fall_back_to_zero_away_from_the_detections`.
+
+**Variances are standard deviations, and whole-lap d has none.** In half-lap
+mode `d_var` and `vs_var` are the GPs' sigmas. In whole-lap mode d comes from
+CCMA, so `d_var` is 0 everywhere, and the predictor's and markers' widths fall
+to their minimum. Pinned: `test_half_lap_variances_are_standard_deviations`,
+`test_lap_one_publishes_twice_and_the_second_keeps_lap_one_and_the_stamp`.
+
+**Whole-lap `vs_var` is the sigma of the point about 3 m earlier.** The vs
+prediction runs over the lap with the 3 m either side of the start line
+copied across it. The mean is cut back to the lap, the sigma is not, so
+waypoint j gets the sigma of the j-th point of the longer list. Pinned:
+`test_whole_lap_vs_var_is_the_sigma_of_the_point_3_m_earlier`.
+
+**lapcount == 1 exactly publishes twice.** First the second half lap's
+trajectory, then the same message object again after the whole-lap fit edited
+its waypoints in place, so the second keeps lap_count 1 and the first one's
+stamp. Upstream compares with `== 1` and sets lapcount 1.1 internally for the
+whole-lap fit. Pinned:
+`test_lap_one_publishes_twice_and_the_second_keeps_lap_one_and_the_stamp`.
+
+**The last half lap counts twice from lapcount 1.** Its detections are
+appended once in half-lap mode and again for the whole-lap fit (the same
+objects), so until thinning removes them they weigh double in the vs GP and
+in CCMA. Pinned: `test_lap_one_counts_the_last_half_lap_twice`.
+
+**Whole-lap d is CCMA, not a GP.** The accumulated detections, plus one copied
+point at each end, go to x, y, through `CCMA(w_ma=5, w_cc=3)` in its default
+padding mode (endpoints repeated, not cyclic, so the single copied point is
+all the wrapping there is), back to Frenet, sorted by s, and interpolated onto
+every global s. Pinned: `test_whole_lap_d_is_ccma_smoothed_and_follows_the_opponent`.
+Differential mutant: `ccma_wrapping_mode`.
+
+**The vs GP wraps by copying 3 m.** Detections and prediction s within 3 m of
+either end of the lap are copied a lap the other way before fitting. Pinned:
+`test_whole_lap_copies_the_3_m_either_side_of_the_start_line`.
+
+**Detection s is edited in place.** In half-lap mode every detection from the
+first decrease in s onwards gets a lap added, and all accumulated s are
+wrapped back after publishing. In whole-lap mode every detection but the first
+is taken modulo the lap. Pinned:
+`test_half_lap_across_the_start_line_is_shifted_then_wrapped_back`,
+`test_whole_lap_wraps_every_detection_but_the_first`.
+
+**Thinning keeps the newest per bin and drops the top of the lap.** Once
+more than 200 detections are accumulated (from lapcount 1), they are binned
+every two waypoint spacings and only the newest in each bin is kept. The bins
+stop one to two bins below the highest s, so the detections just before the
+start line are dropped every time it runs. Pinned:
+`test_thinning_keeps_the_newest_per_bin_and_drops_the_top_bins`.
+
+**Kernels and fitting.** vs: C(0.5) · RBF(1.0) + C(0.2) · White(1.0). d (half
+lap only): C(0.5) · Matern(1.0, ν = 1.5) + C(0.2) · White(1.0). Only the
+constants are bounded, to [1e-6, 1e3]; one L-BFGS-B run, no restarts, so fits
+are deterministic. Pinned: `test_kernels_are_upstreams`.
+
+**Fixed from the first waypoints.** The global s list, the top speed and the
+initial trajectory come from the first `/global_waypoints`; the lap length
+follows the latest. Pinned:
+`test_waypoints_fixed_from_the_first_message_but_lap_length_follows`.
+
+**What it ignores.** Off-trajectory half laps (the predictor's job) and half
+laps without detections. Nothing happens before `/global_waypoints`. Pinned:
+`test_off_trajectory_and_empty_half_laps_are_ignored`,
+`test_nothing_before_waypoints`.
+
+**Cosmetic.** `OppWpnt.id` is never set (0). Markers are all yellow, as tall
+as speed over top speed and 5 × `d_var` wide, clamped to [0.07, 0.7]. Pinned:
+`test_initial_trajectory_is_the_raceline_at_100_mps`,
+`test_markers_follow_speed_and_d_var`.
+
+### In the graph: what collision_prediction and the spliner do with it
+
+Run once, 2026-11-15, not in CI: `shared_graph.launch.py gp:=dense` with
+`localizer:=external`, the tracker, and a weaving fake opponent (2 m/s, ±0.4 m,
+noise-free). A scripted localizer put the ego 5.5 m behind the opponent and
+closed at 1 m/s (odometry 3 m/s) to 0.5 m, then jumped back, for 120 s. The
+ego never drives an evasion: nothing here is a lap, a collision count or an
+overtake. Two tracks: porto_odom_trial (26.9 m lap, 1.07–2.49 m wide) and a
+synthetic 3 m wide oval (35.2 m lap).
+
+- **The GP.** First publish after the first half lap, with half the waypoints
+  observed. From lapcount 1 all are observed: vs 2.00 everywhere, d within
+  0.007 m rms of the true weave (0.044 m max).
+- **collision_prediction publishes, with nothing faked.** force_trailing goes
+  False at lapcount 1, as §4 says it must. It flicks True for about a second
+  once per opponent lap, at the start line, which is consistent with the
+  unwrapped-s lookup (§4).
+- **Its regions are sane where they end.** About 75% end within the
+  horizon. Their `s_start` ahead of the ego matches a constant-speed catch
+  estimate to a few centimetres at the median. They are 2.7–3.0 m long and
+  0.54–0.91 m wide, and the true opponent d at the catch lies inside
+  [d_right, d_left] every time. d_center is 0.12–0.14 m rms from it, since the
+  band spans the opponent's d at both ends.
+- **The rest are walls** (d −10 to 10), mostly when the catch is near the end
+  of the 4 s horizon. About 20–30% of region `s` values are at or past the
+  lap length (§4).
+- **The spliner on `/collision_prediction/obstacles` (porto):** no evasion in
+  120 s. 1,149 cycles were "no feasible side": only 19% of ended regions leave
+  the 0.65 m it needs (car_width + evasion_dist) on either side inside its
+  0.15 m margin. Where they did, it was "too close" (157) or "blocked" (103).
+- **The spliner on the wide oval:** it plans around ended regions. 973 cycles
+  evading (left 484, right 489), 405 "too close" (regions starting within
+  about 1.5 m), 63 releases (24 "gone", as the recomputed region moves more
+  than match_tolerance; 39 "off line", an artefact of the ego not following).
+- **On both tracks, walls read as "clear".** The spliner ranges obstacles by
+  `s_center`, which for a wall lies beyond its 10 m lookahead even when
+  `s_start` does not.
+- **On both tracks, it stops on stale inputs.** collision_prediction publishes
+  nothing for up to 1 s after a region vanishes (the expire counter, §4), so
+  the spliner stops on its 0.5 s staleness check: 162 times on porto, 7.9 to
+  8.9 s of 110 s silent.
+
+Not pinned (one-off run; the launch test checks only that the GP and
+collision_prediction publish).

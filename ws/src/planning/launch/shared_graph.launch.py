@@ -4,7 +4,7 @@
         [localizer:=cartographer|mcl|external] [state:=GB_TRACK|TRAILING|OVERTAKE]
         [use_sim_time:=true] [opponent_mode:=constant_speed] [opponent_speed:=2.0]
         [opponent_s0:=5.0] [opponent_d:=0.0] [opponent_seed:=0] [opponent_max_range:=10.0]
-        [tracker:=true|false]
+        [tracker:=true|false] [gp:=none|dense]
 
 Starts, in one launch:
 
@@ -20,6 +20,7 @@ Starts, in one launch:
                                     types on one topic breaks every subscriber)
     obstacle_tracker_node           /perception/detections -> /perception/obstacles
     opponent_trajectory_node        -> /proj_opponent_trajectory
+    dense_gp_opp_traj_node          -> /opponent_trajectory (gp:=dense only)
     predictor_opponent_trajectory_node -> /opponent_trajectory
     update_waypoints_node           -> /global_waypoints_updated
     collision_prediction_node       -> /collision_prediction/obstacles, .../force_trailing
@@ -41,6 +42,13 @@ is True, so the tracker's classification decides whether they see the opponent.
 Every field of the fake's own output except the position and footprint is
 ignored. tracker:=false wires fake_opponent_node straight to
 /perception/obstacles, as before, with its ground-truth vs, vd and is_static.
+
+THE MAIN GP (gp:=none, the default) is the one part that differs between the
+comparison branches, so this shared graph starts none by default, and then
+predictor_opponent_trajectory and collision_prediction wait forever for an
+/opponent_trajectory. gp:=dense starts Predictive Spliner's dense GP
+(dense_gp_opp_traj_node). It publishes after the opponent's first half lap, and
+collision_prediction's force_trailing clears only from its whole lap on.
 
 NOTHING HERE DRIVES. No node in this graph publishes /drive; the car stays where
 it is unless a controller is started separately (race.launch.py, with
@@ -71,6 +79,9 @@ def graph(context):
     if tracked not in ('true', 'false'):
         raise RuntimeError(f'tracker must be true or false, got {tracked!r}')
     tracked = tracked == 'true'
+    gp = LaunchConfiguration('gp').perform(context).lower()
+    if gp not in ('none', 'dense'):
+        raise RuntimeError(f'gp must be none or dense, got {gp!r}')
 
     def node(executable, extra=None):
         return Node(package='planning', executable=executable, output='screen',
@@ -99,6 +110,7 @@ def graph(context):
         node('fake_opponent_node', opponent),
         *(tracker if tracked else []),
         node('opponent_trajectory_node'),
+        *([node('dense_gp_opp_traj_node')] if gp == 'dense' else []),
         node('predictor_opponent_trajectory_node'),
         # update_waypoints takes no track: it works on the waypoints it receives.
         plain('update_waypoints_node', {}),
@@ -129,6 +141,9 @@ def generate_launch_description():
         DeclareLaunchArgument('tracker', default_value='true',
                               description='true: fake_opponent_node -> obstacle_tracker_node -> '
                                           'planners; false: the fake feeds the planners directly'),
+        DeclareLaunchArgument('gp', default_value='none',
+                              description='the main GP: none (wait for one) | dense '
+                                          '(Predictive Spliner\'s, dense_gp_opp_traj_node)'),
         SetParameter(name='use_sim_time',
                      value=ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool)),
         OpaqueFunction(function=localizer),

@@ -19,8 +19,10 @@
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-pil</exec_depend>
-  <!-- predictor_opponent_trajectory. Installed with pip (scikit-learn 1.3.2) in
-       docker/install_deps.sh: the apt package's 0.23.2 is too old (needs >= 1.1). -->
+  <!-- predictor_opponent_trajectory and dense_gp_opp_traj. Installed with pip
+       (scikit-learn 1.3.2) in docker/install_deps.sh: the apt package's 0.23.2 is
+       too old (needs >= 1.1). dense_gp_opp_traj's ccma is vendored in
+       planning/vendor/ccma (numpy and scipy only), so it has no entry here. -->
   <exec_depend>python3-sklearn</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>tf2_ros</exec_depend>   <!-- obstacle_spliner_node: lidar pose on the car -->

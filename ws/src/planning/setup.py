@@ -8,6 +8,8 @@ setup(
     name=package_name,
     version='0.0.0',
     packages=find_packages(exclude=['test']),
+    # Vendored third-party code keeps its license and provenance next to it.
+    package_data={'planning.vendor.ccma': ['LICENSE', 'README.md']},
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
@@ -31,6 +33,7 @@ setup(
             'collision_prediction_node = planning.collision_prediction_node:main',
             'opponent_trajectory_node = planning.opponent_trajectory_node:main',
             'predictor_opponent_trajectory_node = planning.predictor_opponent_trajectory_node:main',
+            'dense_gp_opp_traj_node = planning.dense_gp_opp_traj_node:main',
             'global_waypoints_publisher_node = planning.global_waypoints_publisher_node:main',
             'state_machine_stub_node = planning.state_machine_stub_node:main',
             'spliner_node = planning.spliner_node:main',

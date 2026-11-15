@@ -2,7 +2,9 @@
 
 The four shared files are byte-identical between ForzaETH's Predictive Spliner
 and ZJU's FSDP. These tests load upstream's file under stub ROS modules, feed it
-and the port the same random scenarios, and require identical output.
+and the port the same random scenarios, and require identical output. The same
+is done for Predictive Spliner's own dense GP, gaussian_process_opp_traj.py
+(FSDP's file of that name is a different program, and fails the md5 check).
 
 They need upstream's source, which is not in this repository. Point
 FORZAETH_SPLINER_SRC at a directory holding the upstream files, for example a
@@ -44,6 +46,8 @@ COVERAGE_MIN_SCENARIOS = 300
 PORTED_MD5 = {
     'opponent_trajectory.py': '6122505fb6ca6a0c6f62bc5cf7be03fc',
     'predictor_opponent_trajectory.py': 'abe61f939c29d991e9e3ec3d016089d5',
+    # Predictive Spliner's, not FSDP's: the two gaussian_process_opp_traj.py differ.
+    'gaussian_process_opp_traj.py': 'e33e66981c82773416dd8ac0c9e8a32b',
 }
 
 
@@ -742,4 +746,272 @@ def test_predictor_opponent_trajectory_matches_upstream():
     if PRED_SCENARIOS >= PRED_COVERAGE_MIN_SCENARIOS:
         for branch in ('predictions', 'unwrapped_detections', 'built_on_own_prediction',
                        'ignored_before_ready', 'ignored_on_trajectory_or_empty'):
+            assert counts[branch] > 0, f'the run never reached {branch}'
+
+
+# ================================================================== dense GP
+
+GP_SCENARIOS = int(os.environ.get('DIFFERENTIAL_GP_SCENARIOS', '40'))
+GP_COVERAGE_MIN_SCENARIOS = 40
+
+
+def gp_track(rng):
+    """A smooth closed track, resampled at one of upstream-like spacings.
+
+    Returns (xy without the closing point, global waypoints with it).
+    """
+    R = rng.uniform(2.0, 5.0)
+    a2, a3 = rng.uniform(0, 0.25), rng.uniform(0, 0.08)
+    p2, p3 = rng.uniform(0, 2 * math.pi), rng.uniform(0, 2 * math.pi)
+    stretch = rng.uniform(1.0, 1.6)
+    th = np.linspace(0, 2 * math.pi, 4000, endpoint=False)
+    r = R * (1 + a2 * np.cos(2 * th + p2) + a3 * np.cos(3 * th + p3))
+    dense = np.column_stack((stretch * r * np.cos(th), r * np.sin(th)))
+    closed = np.vstack((dense, dense[:1]))
+    cum = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(closed, axis=0), axis=1))))
+    n = int(cum[-1] / rng.choice([0.1, 0.1, 0.2, 0.3]))
+    t = np.arange(n) * cum[-1] / n
+    xy = np.column_stack((np.interp(t, cum, closed[:, 0]), np.interp(t, cum, closed[:, 1])))
+    seg = np.linalg.norm(np.roll(xy, -1, axis=0) - xy, axis=1)
+    s = np.concatenate(([0.0], np.cumsum(seg)))         # n + 1, the last is the lap
+    top = rng.uniform(3.0, 9.0)
+    wpnts = [Msg(s_m=float(s[i]), x_m=float(xy[i % n, 0]), y_m=float(xy[i % n, 1]),
+                 vx_mps=top * rng.uniform(0.5, 1.0)) for i in range(n + 1)]
+    return xy, wpnts
+
+
+def gp_scenario(rng):
+    """Global waypoints, then the ProjOppTraj sequence opponent_trajectory would publish.
+
+    About one detection per waypoint interval, half laps of half a lap of travel
+    sharing their end points, lapcount 0.5, 1.0, 1.5, ... and the variations its
+    quirks produce: a missed first half lap, a stale flush's off-grid lapcount,
+    off-trajectory and empty messages, a NaN, a change of waypoints. Two boundary
+    inputs are planted on purpose (a first detection exactly on a global s, and
+    one not wrapped into the lap), since nothing random reaches them. Top speed is
+    never 0: with numpy speeds upstream's markers then go inf rather than crash, so
+    that deviation is pinned by a unit test instead.
+    """
+    xy, wpnts = gp_track(rng)
+    L = wpnts[-1].s_m
+    spacing = L / (len(wpnts) - 1)
+    v0, dv = rng.uniform(1.5, 6.0), rng.uniform(0, 1.5)
+    amp, k, c = rng.uniform(0, 0.5), rng.randint(1, 4), rng.uniform(-0.3, 0.3)
+    ph1, ph2 = rng.uniform(0, 2 * math.pi), rng.uniform(0, 2 * math.pi)
+    d_true = lambda s: c + amp * math.sin(2 * math.pi * k * s / L + ph1)
+    v_true = lambda s: v0 + dv * math.sin(2 * math.pi * s / L + ph2)
+
+    s = rng.uniform(0, L) if rng.random() < 0.7 else L - rng.uniform(0, 2.0)
+    t = 0.0
+    lap = 0.5 if rng.random() > 0.1 else 1.0
+    flush = 0.0055 if rng.random() < 0.1 else 0.0
+    last = None
+    events = []
+    for _ in range(rng.randint(2, 6)):
+        dets = [] if last is None else [copy.deepcopy(last)]
+        travel = 0.0
+        while travel < L / 2:
+            step = spacing * rng.uniform(0.8, 1.6)
+            if rng.random() < 0.02:
+                step *= rng.uniform(2, 10)                  # a gap
+            s += step
+            travel += step
+            t += step / v_true(s)
+            dets.append(Msg(s=(s + rng.gauss(0, 0.01)) % L, d=d_true(s) + rng.gauss(0, 0.03),
+                            vs=v_true(s) + rng.gauss(0, 0.1), vd=rng.gauss(0, 0.1),
+                            is_static=False, is_visible=True, time=t, s_var=0.0, d_var=0.0,
+                            vs_var=0.0, vd_var=0.0))
+        last = dets[-1]
+        if rng.random() < 0.1:
+            # Exactly on a global s: the first window's open lower end (random floats
+            # never land there).
+            dets[0].s = wpnts[min(int(dets[0].s / spacing), len(wpnts) - 2)].s_m
+        if rng.random() < 0.05:
+            # Not wrapped, against ProjOppPoint's contract: whole-lap mode wraps every
+            # detection but the first.
+            dets[0] = copy.deepcopy(dets[0])
+            dets[0].s += L
+        msg = ProjOppTraj()
+        msg.lapcount = lap
+        msg.nrofpoints = float(len(dets))
+        msg.opp_is_on_trajectory = True
+        msg.detections = dets
+        if rng.random() < 0.02:
+            msg.detections[rng.randrange(len(dets))].vs = float('nan')
+        if rng.random() < 0.1:                              # the predictor's business
+            off = copy.deepcopy(msg)
+            off.opp_is_on_trajectory = False
+            off.detections = off.detections[:rng.randint(1, len(dets))]
+            events.append(('proj', off))
+        if rng.random() < 0.03:
+            empty = ProjOppTraj()
+            empty.lapcount, empty.opp_is_on_trajectory = lap, True
+            events.append(('proj', empty))
+        if rng.random() < 0.03:
+            scale = rng.uniform(0.98, 1.02)
+            events.append(('wpnts', [Msg(s_m=w.s_m * scale, x_m=w.x_m, y_m=w.y_m,
+                                         vx_mps=w.vx_mps) for w in wpnts]))
+        events.append(('proj', msg))
+        lap += 0.5 + (flush if lap >= 1 else 0.0)
+    return xy, wpnts, events
+
+
+def gp_stubs(world, xy):
+    """stub_modules, plus a real converter for upstream (CCMA goes through x, y) and ccma."""
+    from planning.frenet import FrenetConverter as Ours
+    from planning.vendor import ccma as vendored_ccma
+    stubs = stub_modules(world, PRED_TYPES)
+    conv = Ours(xy)
+
+    class FrenetConverter:
+        """ForzaETH's interface on our converter, which the port is handed too."""
+
+        def __init__(self, x, y):
+            pass
+
+        def get_cartesian(self, s, d):
+            return np.array(conv.to_cartesian(s, d))
+
+        def get_frenet(self, x, y):
+            return np.array(conv.to_frenet(x, y))
+
+    fcc = types.ModuleType('frenet_converter.frenet_converter')
+    fcc.FrenetConverter = FrenetConverter
+    stubs['frenet_converter.frenet_converter'] = fcc
+    stubs['frenet_converter'].frenet_converter = fcc
+    stubs['ccma'] = vendored_ccma
+    return stubs
+
+
+def gp_run_upstream(path, scen):
+    xy, wpnts, events = scen
+    world = PredWorld((wpnts, events))
+    mod = load_upstream(path, gp_stubs(world, xy), 'upstream_gaussian_process_opp_traj')
+    node = mod.GaussianProcessOppTraj()
+    crash = None
+    try:
+        node.get_gp_opp_traj()
+    except StopSim:
+        pass
+    except Exception as e:      # an upstream bug: only the events before it compare
+        crash = (world.frame, type(e).__name__)
+    trajs, marks = [], []
+    for frame, topic, msg in world.log:
+        if topic == '/opponent_trajectory':
+            trajs.append((frame, float(msg.lap_count), pred_wpnts(msg.oppwpnts)))
+        else:
+            marks.append((frame, tuple(pred_marker(m) for m in msg.markers)))
+    return trajs, marks, crash
+
+
+def gp_port_marker(rec):
+    return (rec.id, float(rec.x), float(rec.y), float(rec.height) / 2, float(rec.width),
+            float(rec.width), float(rec.height), 1.0, 1.0, 0.0, 1.0)
+
+
+def gp_run_port(scen, counts):
+    """Returns (trajs, marks, first frame the port deviates by design, or None)."""
+    from planning import dense_gp_opp_traj as dg
+    from planning.frenet import FrenetConverter
+    xy, wpnts, events = scen
+    conv = FrenetConverter(xy)
+    gp = dg.DenseOpponentGP(conv.to_cartesian, conv.to_frenet)
+    gp.set_global_waypoints(wpnts)
+
+    sort, wrap = dg.sort_detections, dg.wrap_training
+
+    def sort_spy(dets, sorted_list, lap_count, track_length, n_ego):
+        before = len(sorted_list) + len(dets)
+        out, around = sort(dets, sorted_list, lap_count, track_length, n_ego)
+        if before > dg.THIN_ABOVE and lap_count >= 1:
+            counts['thinned'] += 1
+        if around:
+            counts['half_lap_around_origin'] += 1
+        return out, around
+
+    def wrap_spy(opp_s, opp_d, opp_vs, opp_vd, ego_s_copy, track_length):
+        n = len(opp_s)
+        out = wrap(opp_s, opp_d, opp_vs, opp_vd, ego_s_copy, track_length)
+        if len(opp_s) > n:
+            counts['start_line_copies'] += 1
+        return out
+
+    fit, raised = dg.fit_and_write, []
+
+    def fit_spy(*args):
+        try:
+            fit(*args)
+        except dg.NonFiniteTraining:
+            raised.append(True)
+            raise
+
+    trajs, marks, deviated = [], [], None
+    dg.sort_detections, dg.wrap_training, dg.fit_and_write = sort_spy, wrap_spy, fit_spy
+    try:
+        for i, (kind, payload) in enumerate(events):
+            if kind == 'wpnts':
+                gp.set_global_waypoints(payload)
+                continue
+            dets = copy.deepcopy(payload.detections)
+            acting = payload.opp_is_on_trajectory and len(dets) > 0
+            half_lap = payload.lapcount <= 1
+            if not acting:
+                counts['ignored_off_trajectory_or_empty'] += 1
+            elif half_lap:
+                counts['first_half_lap' if gp.first_half_lap else 'later_half_lap'] += 1
+            else:
+                counts['whole_lap'] += 1
+            del raised[:]
+            pubs = gp.on_proj_trajectory(payload.lapcount, payload.opp_is_on_trajectory, dets)
+            if raised:
+                counts['port_survived_nonfinite'] += 1
+            elif acting and half_lap and not pubs:
+                counts['port_survived_empty_window'] += 1
+            if (raised or (acting and half_lap and not pubs)) and deviated is None:
+                deviated = i
+            if len(pubs) == 2:
+                counts['republished_at_lap_one'] += 1
+            for pub in pubs:
+                counts['published'] += 1
+                trajs.append((i, float(pub.lap_count), pred_wpnts(pub.oppwpnts)))
+                marks.append((i, tuple(gp_port_marker(m) for m in pub.markers)))
+    finally:
+        dg.sort_detections, dg.wrap_training, dg.fit_and_write = sort, wrap, fit
+    return trajs, marks, deviated
+
+
+def test_dense_gp_matches_upstream():
+    sklearn = pytest.importorskip('sklearn')
+    if tuple(int(x) for x in sklearn.__version__.split('.')[:2]) < (1, 1):
+        pytest.skip(f'sklearn {sklearn.__version__}: before 1.1 upstream raises in '
+                    'get_cartesian on every half lap, so there is nothing to compare')
+    import warnings
+    path = upstream_file('gaussian_process_opp_traj.py')
+    counts, differing = Counter(), []
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')      # sklearn ConvergenceWarning, the same on both sides
+        for i in range(START, START + GP_SCENARIOS):
+            scen = gp_scenario(random.Random(SEED * 1_000_003 + i))
+            up_t, up_m, crash = gp_run_upstream(path, scen)
+            po_t, po_m, deviated = gp_run_port(scen, counts)
+            if crash is not None:
+                counts['upstream_crash_' + crash[1]] += 1
+            # The port's guards sit exactly where upstream dies: same frame, or neither.
+            if (crash and crash[0]) != deviated:
+                differing.append(i)
+                continue
+            if crash is not None:       # the frame's output before the crash still compares
+                keep = lambda xs: [x for x in xs if x[0] <= crash[0]]
+                up_t, up_m, po_t, po_m = keep(up_t), keep(up_m), keep(po_t), keep(po_m)
+            counts['upstream_published'] += len(up_t)
+            if not (same(tuple(up_t), tuple(po_t)) and same(tuple(up_m), tuple(po_m))):
+                differing.append(i)
+    print(f'\ndense GP: scenarios {START}..{START + GP_SCENARIOS - 1}, seed {SEED}: '
+          f'{dict(counts)}')
+    assert differing == [], f'scenarios {differing[:10]} differ from upstream'
+
+    if GP_SCENARIOS >= GP_COVERAGE_MIN_SCENARIOS:
+        for branch in ('first_half_lap', 'later_half_lap', 'whole_lap',
+                       'republished_at_lap_one', 'half_lap_around_origin', 'thinned',
+                       'start_line_copies', 'ignored_off_trajectory_or_empty'):
             assert counts[branch] > 0, f'the run never reached {branch}'
