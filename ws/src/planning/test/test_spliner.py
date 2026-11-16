@@ -656,25 +656,54 @@ def _committed_on_region(track, params, rid=0):
     return sp, region, side
 
 
-def test_a_region_moving_beyond_tolerance_before_the_car_reaches_it_is_gone(track, params):
-    """Not held before alongside, by id or otherwise (see NOT HELD BEFORE ALONGSIDE)."""
+def test_a_region_moving_beyond_tolerance_is_re_planned_on_the_same_side(track, params):
+    """Run 4's 77 'gone' drops: same id, moved 1 m. Re-planned round where it is now."""
     sp, region, side = _committed_on_region(track, params)
+    first_side = sp.committed.side
     moved = long_obs(8.0, 9.5, d_right=-0.3, d_left=0.3)        # s_center moved 1 m
     moved.id = 0
     assert not sp._matches(moved)
-    r = sp.step(2.0, _d_on(sp, 2.0), [moved])
-    assert r.released == 'gone'
+    ego_d = _d_on(sp, 2.0)
+    r = sp.step(2.0, ego_d, [moved])
+    assert r.replanned and r.committed and r.released is None
+    assert r.status == EVADING and r.side == first_side and r.obstacle is moved
+    assert r.d[0] == pytest.approx(ego_d) and track.ds(2.0, r.s[0]) == pytest.approx(0.0)
+    assert path_clear(r.s, r.d, [moved], track, params)
+    # Full clearance at the apex, round the region as it is now, not where it was.
+    apex = r.d[np.argmax(np.abs(r.d))]
+    assert abs(apex) == pytest.approx(0.3 + params.car_width / 2 + params.evasion_dist)
 
 
-def test_a_region_moving_onto_the_path_before_the_car_reaches_it_still_blocks(track, params):
-    """Same id, now across the committed path, nose not there: the opponent will be on the
-    path. Holding this planned through the opponent in the closed-loop test."""
+def test_a_region_moving_onto_the_path_is_re_planned_round_it_on_the_same_side(track, params):
+    """Run 4's 42 'blocked' drops: same id, now across the committed path. Holding planned
+    through the opponent; the re-plan goes round where it is now, on the same side."""
     sp, region, side = _committed_on_region(track, params)
+    first_side = sp.committed.side
     onto = long_obs(7.5, 9.0, d_right=-0.3 + 0.4 * side, d_left=0.3 + 0.4 * side)
     onto.id = 0
     assert not path_clear(sp.committed.s, sp.committed.d, [onto], track, params)
     r = sp.step(2.0, _d_on(sp, 2.0), [onto])
-    assert r.released == 'blocked'
+    assert r.replanned and r.side == first_side and r.released is None
+    assert path_clear(r.s, r.d, [onto], track, params)
+
+
+def test_no_room_on_the_committed_side_releases(track, params):
+    """The region moved over to the committed side, against the wall: release, plan afresh."""
+    sp, region, side = _committed_on_region(track, params)
+    wall_side = long_obs(7.5, 9.0, d_right=-0.3 + 1.1 * side, d_left=0.3 + 1.1 * side)
+    wall_side.id = 0
+    r = sp.step(2.0, _d_on(sp, 2.0), [wall_side])
+    assert r.released == 'no room on the committed side' and not r.replanned
+
+
+def test_a_region_that_has_not_moved_keeps_its_path(track, params):
+    sp, region, side = _committed_on_region(track, params)
+    first = sp.committed.s.copy(), sp.committed.d.copy()
+    same = long_obs(7.05, 8.55, d_right=-0.3, d_left=0.3)
+    same.id = 0
+    r = sp.step(2.0, _d_on(sp, 2.0), [same])
+    assert r.committed and not r.replanned and r.released is None
+    assert np.array_equal(sp.committed.s, first[0]) and np.array_equal(sp.committed.d, first[1])
 
 
 def test_a_region_that_disappears_before_the_car_reaches_it_is_gone(track, params):

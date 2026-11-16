@@ -188,6 +188,8 @@ class SplinerNode(Node):
         s, d, v, side, note = result.s, result.d, result.v, result.side, result.note
         if result.released:
             self.get_logger().warn(f'evasion released: {result.released}; now {result.status}')
+        if result.replanned:
+            self.get_logger().info(f'evasion re-planned on the {result.side}: the region moved')
 
         switched = side is not None and self.side is not None and side != self.side
         if switched:

@@ -42,9 +42,13 @@ reports what is left of it from the car on. It releases the commitment, and plan
 afresh, on exactly these conditions (Spliner.release_reason, checked in order):
 
   passed        the car is past the end of the committed path
-  gone          no obstacle in the current array matches the committed one (within
-                match_tolerance), while it is still ahead of the car's nose (once
-                alongside, a forward sensor loses it; that is held until 'passed')
+  gone          the committed obstacle is no longer in the array, while it is still
+                ahead of the car's nose (once alongside, a forward sensor loses it;
+                that is held until 'passed'). For obstacles without an id: no
+                obstacle matches it within match_tolerance.
+  no room on the committed side, too close
+                the committed obstacle moved and the re-plan on the committed side
+                failed (RE-PLAN ON THE COMMITTED SIDE)
   blocked       the rest of the committed path is no longer collision-free
                 against the current obstacles (path_clear). Once the car's nose
                 has reached the committed obstacle, the committed obstacle
@@ -59,18 +63,24 @@ span: on porto the recomputed region slid 1.3 m in 0.7 s, clear of its old span.
 Releasing alongside was the clearance violation (the replan steered back into the
 opponent), so alongside the committed obstacle neither goes nor blocks.
 
-NOT HELD BEFORE ALONGSIDE (tried 2026-11-16; docs/reports/autodrive_predictive).
-In AutoDRIVE run 4 every evasion was dropped before the car reached the region: 77
-'gone' (the recomputed region moved more than match_tolerance) and 42 'blocked'
-(it moved onto the path). Holding the commitment by id from the start was tried
-both ways on the stand-in, and neither is kept:
-  - holding 'blocked': a region moving onto the path says the opponent will be on
-    it. The held path planned through the opponent (closed-loop test: 70 cycles,
-    -0.170 m at evasion_dist 0.15) and touched it (2.1 s in a 600 s run).
-  - holding only 'gone': the same evasions were dropped as 'blocked' a little
-    later instead (78 against 81 + 39), no more passes, and a held path is only
-    re-checked at evasion_dist / 2 (path_clear), so its margin to the moving
-    region eroded; the closed-loop test then touched the opponent at 0.25.
+RE-PLAN ON THE COMMITTED SIDE (Spliner._replan). A collision_prediction region is
+recomputed every cycle and moves. In AutoDRIVE run 4 every evasion was dropped
+before the car reached it: 77 'gone' (moved more than match_tolerance) and 42
+'blocked' (moved onto the path). Holding the stale path instead was tried and is
+not kept: it planned through the opponent (a region moving onto the path says the
+opponent will be on it), and a held path is only re-checked at evasion_dist / 2.
+
+So before the car's nose reaches it, when the committed obstacle (same id) has
+moved beyond match_tolerance, or the rest of the committed path no longer clears
+it, the evasion is re-planned: build_evasion from the car's current s and d,
+round the CURRENT obstacle, on the committed side only (choose_side force_side),
+at full evasion_dist, and checked against every obstacle. What carries across the
+update is the side, not the geometry, so the plan always respects the current
+prediction. If the committed side has no room, the car is too close for the lead
+in, or the new path is blocked, the commitment is released with that reason and
+the cycle plans afresh. Obstacles without an id are never re-planned (they are
+not identifiable across updates): they keep 'gone' by match_tolerance and
+'blocked' by the committed path.
 
 REJOIN (Spliner, build_rejoin). When an evasion ends (passed or released) with the
 car still more than rejoin_threshold off the raceline, a "clear" plan would snap the
@@ -178,12 +188,13 @@ def obstacles_ahead(obstacles, ego_s, conv, params):
     return [o for _, o in out]
 
 
-def choose_side(obs, conv, params, current_side=None):
+def choose_side(obs, conv, params, current_side=None, force_side=None):
     """Which way round. Returns a SideChoice; side is None when neither fits.
 
     Space is measured against the real track bounds at the obstacle, not against
     a fixed corridor, so the planner refuses to squeeze through a gap that only
-    exists on a wide part of the track.
+    exists on a wide part of the track. force_side (LEFT or RIGHT) considers only
+    that side (RE-PLAN ON THE COMMITTED SIDE).
     """
     d_left_track, d_right_track = conv.width_at(obs.s_center)
     d_left_track = float(d_left_track) - params.bound_margin
@@ -195,6 +206,11 @@ def choose_side(obs, conv, params, current_side=None):
 
     left_ok = space_left >= needed
     right_ok = space_right >= needed
+    if force_side is not None:
+        left_ok, right_ok = left_ok and force_side == LEFT, right_ok and force_side == RIGHT
+        if not (left_ok or right_ok):
+            return SideChoice(None, 0.0, space_left, space_right,
+                              f'no room on the committed side ({force_side})')
 
     if not left_ok and not right_ok:
         return SideChoice(None, 0.0, space_left, space_right, 'no feasible side')
@@ -330,6 +346,7 @@ class PlanResult:
     v: np.ndarray = field(default_factory=_empty)
     committed: bool = False          # Spliner: continuing an evasion started earlier
     released: str = None             # Spliner: the release condition met this cycle, if any
+    replanned: bool = False          # Spliner: the committed evasion was re-planned this cycle
 
     @property
     def collision_free(self):
@@ -474,6 +491,7 @@ class Spliner:
         self.committed = None
         self.side = None            # last side taken, for choose_side's hysteresis
         self.rejoining = False      # an evasion ended off the raceline (REJOIN)
+        self._current = None        # the committed obstacle as last seen, for _replan
 
     def _remaining(self, ego_s):
         """Index of the first committed sample at or ahead of the car, or None past the end."""
@@ -499,13 +517,19 @@ class Spliner:
         return (self._matches(o) or (self.conv.ds(c.s_start, o.s_end) > 0
                                      and self.conv.ds(o.s_start, c.s_end) > 0))
 
+    def _same_id(self, o):
+        cid = getattr(self.committed.obstacle, 'id', None)
+        return cid is not None and getattr(o, 'id', None) == cid
+
     def release_reason(self, ego_s, ego_d, obstacles):
-        """Why the commitment must go now, or None to keep it. See COMMITMENT."""
+        """Why the commitment must go now, 'replan', or None to keep it. See COMMITMENT."""
         c = self.committed
         i = self._remaining(ego_s)
         if i is None:
             return 'passed'
         nose_reached_it = self.conv.ds(ego_s + self.params.car_front, c.obstacle.s_start) <= 0
+        if not nose_reached_it and getattr(c.obstacle, 'id', None) is not None:
+            return self._region_reason(ego_s, ego_d, obstacles, i)
         if not nose_reached_it and not any(self._matches(o) for o in obstacles):
             # Only while it is still ahead of the nose: a forward sensor loses an obstacle
             # once it is beside or behind the car, and releasing then would steer the car
@@ -523,10 +547,57 @@ class Spliner:
             return 'off line'
         return None
 
+    def _off_line(self, ego_s, ego_d):
+        c = self.committed
+        u = arc(c.s, self.conv.length)
+        d_here = float(np.interp(max(self.conv.ds(c.s[0], ego_s), 0.0), u, c.d))
+        return abs(ego_d - d_here) > self.params.max_commit_offset
+
+    def _region_reason(self, ego_s, ego_d, obstacles, i):
+        """Before alongside, for an obstacle with an id: gone, blocked by another, off
+        line, 'replan' when it moved (RE-PLAN ON THE COMMITTED SIDE), or None."""
+        c = self.committed
+        current = next((o for o in obstacles if self._same_id(o)), None)
+        if current is None:
+            return 'gone'
+        others = [o for o in obstacles if not self._same_id(o)]
+        if not path_clear(c.s[i:], c.d[i:], others, self.conv, self.params):
+            return 'blocked'
+        if self._off_line(ego_s, ego_d):
+            return 'off line'
+        moved = (not self._matches(current)
+                 or not path_clear(c.s[i:], c.d[i:], [current], self.conv, self.params))
+        if moved:
+            self._current = current
+            return 'replan'
+        return None
+
+    def _replan(self, ego_s, ego_d, obstacles):
+        """RE-PLAN ON THE COMMITTED SIDE. Returns a PlanResult, or the release reason."""
+        c, obs = self.committed, self._current
+        choice = choose_side(obs, self.conv, self.params, force_side=c.side)
+        if choice.side is None:
+            return 'no room on the committed side'
+        built = build_evasion(ego_s, ego_d, obs, choice, self.conv, self.params)
+        if built is None:
+            return 'too close'
+        s, d, v = built
+        if not path_clear(s, d, obstacles, self.conv, self.params):
+            return 'blocked'
+        note = f'overtaking {c.side} (re-planned: the region moved)'
+        self.committed = Commitment(s, d, v, c.side, obs, note)
+        return PlanResult(EVADING, note, side=c.side, obstacle=obs, s=s, d=d, v=v,
+                          committed=True, replanned=True)
+
     def step(self, ego_s, ego_d, obstacles):
         released = None
         if self.committed is not None:
             released = self.release_reason(ego_s, ego_d, obstacles)
+            if released == 'replan':
+                replanned = self._replan(ego_s, ego_d, obstacles)
+                if isinstance(replanned, PlanResult):
+                    return replanned
+                released = replanned
             if released is None:
                 c = self.committed
                 i = self._remaining(ego_s)

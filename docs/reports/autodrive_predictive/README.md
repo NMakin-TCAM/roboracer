@@ -263,6 +263,75 @@ the car and the plan within 1 s of a status switch (`step_analyze.py`):
 AutoDRIVE's run 4 showed 36.2 cm at p95 and 48.4 cm at worst. Steady tracking is
 unchanged (p95 about 8–9 cm).
 
+## Follow-up: re-planning on the committed side, and why nothing starts at speed
+
+**The change** (`spliner.py`, RE-PLAN ON THE COMMITTED SIDE). This applies
+before the car reaches the committed obstacle, and only to obstacles with an
+id. When that obstacle has moved beyond match_tolerance, or the rest of the
+committed path no longer clears it:
+- the evasion is re-planned from the car's current s and d;
+- round the obstacle as it is now;
+- on the committed side only;
+- at full evasion_dist;
+- and checked against every obstacle.
+
+The side carries over; the geometry does not. These still release:
+- gone (the id is no longer published);
+- another obstacle on the path;
+- off line;
+- passed;
+- and now "no room on the committed side", "too close" and "blocked", when the
+  re-plan fails.
+
+**Gate:** the closed-loop clearance test passes at 0.25 (planned +0.207,
+achieved +0.123 m) and at 0.15 (+0.178 / +0.108 m).
+
+**Measurements** (stand-in, bound_margin 0.30, evasion_dist 0.25):
+
+| | drops | re-plans | laps | passes | closest planned | closest achieved | contact |
+|---|---|---|---|---|---|---|---|
+| half speed (run-4-like), before | 116 (80 gone, 36 blocked) | – | 19 | 0 | +1.649 m | +1.618 m | 0 |
+| half speed, side re-plan | 34 (blocked, then no room) | 111 | 19 | 0 | +1.660 m | +1.646 m | 0 |
+| full speed (opponent 2 m/s), before | 0 | – | 23 | 0 | +1.846 m | +1.563 m | 0 |
+| full speed, side re-plan | 0 | 0 | 23 | 0 | +1.843 m | +1.580 m | 0 |
+
+At half speed the re-plan does what it should. "Gone" disappears (80 to 0),
+and evasions follow the moving region (111 re-plans) without ever planning
+through it (0 planned-through cycles). But each one still ends before the car
+gets alongside: the re-plan on the committed side finds the region has moved
+into a part of the track where the path would hit it ("blocked", 34). No passes.
+
+At full speed no evasion ever starts, before or after. The re-plan cannot
+change that, since there is never a commitment to re-plan.
+
+**Why nothing starts at speed: the track.** `speed_diag.py` and
+`where_regions.py`, on the before/after records:
+
+- **The refusals are geometric.** 1,505 cycles of "no feasible side" and 262
+  of "the way left is blocked by another obstacle". Only 12.8% of predicted
+  regions leave car_width + evasion_dist (0.55 m) on either side.
+- **Most of porto is too narrow.** With 0.30 off each wall, the usable width
+  is 0.55–0.92 m on about 70% of the lap: s 4–14 m and 18–26 m. A region's d
+  band (0.5–0.8 m) plus 0.55 m does not fit there at any speed. It fits only
+  around s 0–4 and 14–18 m, about 8 m of the 26.9 m lap.
+- **Speed makes it worse in two ways.**
+  - At 2 m/s the weaving opponent's d changes about 2.5× faster than at
+    0.8 m/s, so over a region it moves further, and the region's band is
+    wider: median 0.64 m against 0.53 m.
+  - Fewer catches happen in the wide stretches (s 16–18 m: 3.5% of regions
+    against 9.3%). So the share of regions that fit at all falls from 32% to
+    16%.
+- **The "blocked by another obstacle" refusals name the region itself.**
+  choose_side measures room only at the region's centre; the path, which holds
+  its offset along the whole region and its lead-in, is clamped by the wall
+  margin where the track narrows and then fails against the same region. Those
+  refusals are right. Their message is wrong (it is not another obstacle), and
+  the room check is optimistic.
+
+So nothing in the planner stops an evasion starting at speed; porto's width
+at a 0.30 margin does. With the side re-plan, porto still never passes safely,
+at either speed, in 42 laps. The track is the remaining blocker.
+
 ## Not done
 
 - No physical obstacle. The fork's `obstacle <x> <y>` puts one in the world
