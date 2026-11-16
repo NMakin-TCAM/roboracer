@@ -1,6 +1,7 @@
 """The planner never plans a path through the opponent: a closed-loop test, from cold.
 
-The full predictive chain on porto_odom_trial's geometry (test/fixtures/porto_odom_trial:
+The full predictive chain, started by planning predictive_race.launch.py, on
+porto_odom_trial's geometry (test/fixtures/porto_odom_trial:
 a copy of its raceline.csv and centerline.csv, 26.9 m lap, 1.07 to 2.49 m wide), where
 the clearance violation was found (a synthetic 1.6 m oval did not reproduce it):
 shared_graph.launch.py gp:=dense (Predictive Spliner's GP, collision_prediction, the
@@ -137,7 +138,7 @@ def stop(proc):
 def chain(tmp_path, request):
     if shutil.which('ros2') is None:
         pytest.skip('ros2 CLI not on PATH')
-    for pkg, f in (('planning', 'shared_graph.launch.py'), ('control', 'pure_pursuit.launch.py')):
+    for pkg, f in (('planning', 'predictive_race.launch.py'), ('control', 'pure_pursuit.launch.py')):
         try:
             share = get_package_share_directory(pkg)
         except PackageNotFoundError:
@@ -147,21 +148,15 @@ def chain(tmp_path, request):
     tracks = tmp_path / 'tracks'
     shutil.copytree(FIXTURE, tracks / TRACK)
     env = dict(os.environ, ROS_DOMAIN_ID=str(DOMAIN), TRACKS_DIR=str(tracks))
-    tp = ['-p', f'tracks_dir:={tracks}', '-p', f'track_name:={TRACK}']
+    # The whole chain through its launch (predictive_race.launch.py), so its wiring is
+    # tested too; this test is the localizer and the car.
     procs = [
-        start(['ros2', 'launch', 'planning', 'shared_graph.launch.py', f'track:={TRACK}',
-               'localizer:=external', 'use_sim_time:=false', 'gp:=dense', 'state:=TRAILING',
-               'opponent_mode:=weaving', f'opponent_speed:={OPP_V}', 'opponent_s0:=6.0',
-               'opponent_truth_topic:=/fake_opponent/truth'], tmp_path / 'graph.log', env),
-        start(['ros2', 'run', 'planning', 'spliner_node', '--ros-args', *tp,
-               '-p', 'obs_topic:=/collision_prediction/obstacles',
-               '-p', 'trail_obs_topic:=/perception/obstacles',
-               '-p', f'evasion_dist:={request.param}'], tmp_path / 'spliner.log', env),
-        start(['ros2', 'run', 'planning', 'local_path_node', '--ros-args', *tp],
-              tmp_path / 'local_path.log', env),
-        start(['ros2', 'launch', 'control', 'pure_pursuit.launch.py', f'track:={TRACK}',
-               'avoid:=true', 'pose_topic:=/localized_pose', 'speed_scale:=1.0',
-               'max_speed:=4.0', 'use_sim_time:=false'], tmp_path / 'pure_pursuit.log', env),
+        start(['ros2', 'launch', 'planning', 'predictive_race.launch.py', f'track:={TRACK}',
+               'localizer:=external', 'use_sim_time:=false', 'state:=TRAILING',
+               f'evasion_dist:={request.param}', 'opponent_mode:=weaving',
+               f'opponent_speed:={OPP_V}', 'opponent_s0:=6.0',
+               'opponent_truth_topic:=/fake_opponent/truth', 'speed_scale:=1.0',
+               'max_speed:=4.0'], tmp_path / 'graph.log', env),
     ]
     try:
         yield procs, FrenetConverter.from_track(str(tracks / TRACK)), tmp_path
@@ -314,6 +309,6 @@ def test_the_plan_never_overlaps_the_opponent(chain):
     bad = [x for x in planned if x[1] < 0]
     assert not bad, (f'{len(bad)} cycles planned through the opponent; worst '
                      f'{worst_plan[1]:+.3f} m at t {worst_plan[0]:.1f} while {worst_plan[2]}\n'
-                     + (logs / 'spliner.log').read_text()[-3000:])
+                     + (logs / 'graph.log').read_text()[-3000:])
     assert worst[2] > 0, f'contact: {worst[2]:+.3f} m at t {worst[0]:.1f}'
     assert n_pass >= 1, f'never got past the opponent in {DURATION:.0f} s ({evading} evading)'
