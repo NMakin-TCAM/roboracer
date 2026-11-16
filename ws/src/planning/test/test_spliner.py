@@ -433,3 +433,120 @@ def test_a_commitment_is_not_kept_after_release(track, params, committed):
     assert sp.committed is None
     r = sp.step(2.05, 0.0, [])
     assert r.status == CLEAR and not r.committed and r.released is None
+
+
+# ------------------------------------------------------------------ trailing (cold start)
+
+from planning.spliner import (REGIONS, TRAIL_COLD, TRAIL_FORCED, PlanResult,  # noqa: E402
+                              plan_inputs, trail, trailing_mode)
+
+AGE = 0.5
+
+
+def moving(s_center, d_center=0.0):
+    o = FakeObs(s_center, d_center)
+    o.is_static = False
+    return o
+
+
+def test_trail_before_collision_prediction_has_spoken():
+    assert trailing_mode(False, None) == TRAIL_COLD
+    assert trailing_mode(False, False) == TRAIL_COLD
+
+
+def test_trail_while_collision_prediction_forces_it():
+    assert trailing_mode(True, True) == TRAIL_FORCED
+
+
+def test_regions_when_not_forced_or_no_opponent():
+    assert trailing_mode(True, False) == REGIONS
+    assert trailing_mode(True, None) == REGIONS
+
+
+def test_without_trailing_the_old_staleness_rule_holds():
+    assert plan_inputs(10.0, AGE, 9.9, None) == (REGIONS, 'no obstacle array yet')
+    assert plan_inputs(10.0, AGE, 9.9, 9.0)[1] == 'obstacle array 1.00 s old'
+    assert plan_inputs(10.0, AGE, 9.9, 9.9) == (REGIONS, None)
+    assert plan_inputs(10.0, AGE, None, 9.9)[1] == 'no ego state yet'
+
+
+def test_cold_start_plans_on_fresh_perceived_obstacles():
+    assert plan_inputs(10.0, AGE, 9.9, None, True, 9.9) == (TRAIL_COLD, None)
+
+
+def test_cold_start_without_perception_does_not_plan():
+    assert plan_inputs(10.0, AGE, 9.9, None, True, None)[1] == 'no perceived obstacles yet'
+    assert plan_inputs(10.0, AGE, 9.9, None, True, 9.0)[1] == 'perceived obstacles 1.00 s old'
+
+
+def test_once_collision_prediction_has_spoken_its_silence_stops_planning():
+    """No fallback to perception after the first region array: a dead node stops the car."""
+    mode, why = plan_inputs(10.0, AGE, 9.9, 9.0, True, 9.9)
+    assert mode == REGIONS and why == 'obstacle array 1.00 s old'
+
+
+def test_forced_trailing_needs_both_inputs_fresh():
+    assert plan_inputs(10.0, AGE, 9.9, 9.9, True, 9.9, True, 9.9) == (TRAIL_FORCED, None)
+    assert plan_inputs(10.0, AGE, 9.9, 9.0, True, 9.9, True, 9.9)[1] == 'obstacle array 1.00 s old'
+    assert plan_inputs(10.0, AGE, 9.9, 9.9, True, 9.0, True, 9.9)[1] == \
+        'perceived obstacles 1.00 s old'
+
+
+def test_a_stale_force_trailing_is_no_reason_to_trail():
+    assert plan_inputs(10.0, AGE, 9.9, 9.9, True, 9.9, True, 9.0) == (REGIONS, None)
+
+
+def test_trailing_refuses_within_trail_gap_of_a_moving_obstacle(track, params):
+    opp = moving(2.5)                               # s_start 2.25, nose at 0.45: 1.8 m
+    r = trail(PlanResult(CLEAR, 'clear'), 0.0, [opp], track, params, 2.0, TRAIL_COLD)
+    assert r.status == NO_ROOM and not r.collision_free and r.obstacle is opp
+    assert 'no collision prediction yet' in r.note
+
+
+def test_trailing_drives_on_while_the_moving_obstacle_is_further(track, params):
+    clear = PlanResult(CLEAR, 'clear')
+    assert trail(clear, 0.0, [moving(6.0)], track, params, 2.0, TRAIL_COLD) is clear
+
+
+def test_trailing_never_passes_a_moving_obstacle(track, params):
+    """Approached from 9 m to alongside: CLEAR or NO_ROOM, never an evasion round it."""
+    sp = Spliner(track, params)
+    for ego_s in np.arange(0.0, 9.5, 0.1):
+        opp = moving(9.5)
+        r = trail(sp.step(ego_s, 0.0, []), ego_s, [opp], track, params, 2.0, TRAIL_COLD)
+        assert r.status in (CLEAR, NO_ROOM)
+        if track.ds(ego_s + params.car_front, opp.s_start) < 2.0:
+            assert r.status == NO_ROOM
+
+
+def test_trailing_refuses_alongside_a_moving_obstacle(track, params):
+    """Rear axle past its near edge, tail not past its far edge: still in the way."""
+    opp = moving(5.0)
+    r = trail(PlanResult(CLEAR, 'clear'), 5.1, [opp], track, params, 2.0, TRAIL_FORCED)
+    assert r.status == NO_ROOM and 'forces trailing' in r.note
+
+
+def test_trailing_lets_go_once_the_moving_obstacle_is_behind(track, params):
+    clear = PlanResult(CLEAR, 'clear')
+    assert trail(clear, 5.5, [moving(5.0)], track, params, 2.0, TRAIL_COLD) is clear
+
+
+def test_trailing_still_plans_round_a_static_obstacle(track, params):
+    cone = FakeObs(6.0, d_center=-0.5)
+    sp = Spliner(track, params)
+    r = trail(sp.step(0.0, 0.0, [cone]), 0.0, [cone], track, params, 2.0, TRAIL_COLD)
+    assert r.status == EVADING and r.side == LEFT
+
+
+def test_trailing_refuses_a_way_round_a_static_obstacle_that_crosses_a_moving_one(track, params):
+    cone, car = FakeObs(6.0, d_center=-0.5), moving(7.5, d_center=0.4)
+    sp = Spliner(track, params)
+    r = trail(sp.step(0.0, 0.0, [cone]), 0.0, [cone, car], track, params, 2.0, TRAIL_COLD)
+    assert r.status == NO_ROOM and 'on the way left' in r.note
+
+
+@pytest.mark.parametrize('refusal', [PlanResult(NO_ROOM, 'trailing: no feasible side'),
+                                     PlanResult(TOO_CLOSE, 'too close')])
+@pytest.mark.parametrize('others', [[], [moving(6.0)], [moving(1.0)]])
+def test_trailing_never_turns_a_refusal_into_driving_on(track, params, refusal, others):
+    assert not trail(refusal, 0.0, others, track, params, 2.0, TRAIL_COLD).collision_free

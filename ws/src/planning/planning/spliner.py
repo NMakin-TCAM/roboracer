@@ -49,6 +49,17 @@ afresh, on exactly these conditions (Spliner.release_reason, checked in order):
                 against the current obstacles (path_clear)
   off line      the car is more than max_commit_offset from the committed d
 
+TRAILING (trailing_mode, trail). Planning on collision_prediction's regions, as
+Predictive Spliner does, leaves a gap at the start: no region exists until the
+opponent GP has published, and until it has a whole lap (force_trailing True)
+the regions are not trustworthy, so "no region" does not mean "clear". In that
+mode the planner works from the tracked obstacles instead and never starts an
+evasion around a moving one: it plans around static obstacles as usual, and
+refuses (NO_ROOM) when a moving obstacle's near edge is within trail_gap of the
+car's nose, or when the way round a static one would cross a moving one. CLEAR
+there means the tracked obstacles show nothing moving within trail_gap and
+nothing static in the way: what perception currently sees, not a guess.
+
 STATUS. plan() returns a PlanResult whose status says which case it is, because
 an empty trajectory means two opposite things: "nothing in the way, follow the
 raceline" (CLEAR) and "something is in the way and I cannot get round it"
@@ -293,6 +304,90 @@ def plan(ego_s, ego_d, obstacles, conv, params, current_side=None):
                                    f'obstacle', obstacle=obs)
     return PlanResult(EVADING, f'overtaking {choice.side} ({choice.reason})',
                       side=choice.side, obstacle=obs, s=s, d=d, v=v)
+
+
+REGIONS = 'regions'                               # plan on collision regions
+TRAIL_COLD = 'no collision prediction yet'         # trailing reasons
+TRAIL_FORCED = 'collision_prediction forces trailing'
+
+
+def trailing_mode(regions_seen, force_trailing):
+    """REGIONS, or why to trail. force_trailing is the latest fresh value, or None.
+
+    Before collision_prediction has delivered anything there is nothing to plan on but
+    what perception sees. Afterwards its own force_trailing (fewer than one opponent lap
+    learned, or the opponent off its predicted line) says when its regions cannot be
+    trusted. A stale or absent force_trailing is no reason to trail: collision_prediction
+    publishes it only while it has an opponent.
+    """
+    if not regions_seen:
+        return TRAIL_COLD
+    if force_trailing:
+        return TRAIL_FORCED
+    return REGIONS
+
+
+def _age_problem(what, received, now, max_age):
+    if received is None:
+        return f'no {what} yet'
+    if now - received > max_age:
+        return f'{what} {now - received:.2f} s old'
+    return None
+
+
+def plan_inputs(now, max_age, ego_received, regions_received, trailing=False,
+                perceived_received=None, force_trailing=None, force_received=None):
+    """(mode, why not planning or None) for one cycle. Times are arrival times, or None.
+
+    Without trailing this is the old rule: the ego state and the obstacle array must
+    both be fresh. With it, the mode comes from trailing_mode, and every mode still needs
+    fresh inputs: REGIONS the regions, TRAIL_COLD the perceived obstacles, TRAIL_FORCED
+    both (collision_prediction must still be alive). Once collision_prediction has
+    delivered, its going stale stops planning; nothing falls back to perception then.
+    """
+    problem = _age_problem('ego state', ego_received, now, max_age)
+    if problem:
+        return None, problem
+    if not trailing:
+        return REGIONS, _age_problem('obstacle array', regions_received, now, max_age)
+    fresh_force = (force_trailing if force_received is not None
+                   and now - force_received <= max_age else None)
+    mode = trailing_mode(regions_received is not None, fresh_force)
+    needs = {REGIONS: ('obstacle array',), TRAIL_COLD: ('perceived obstacles',),
+             TRAIL_FORCED: ('obstacle array', 'perceived obstacles')}[mode]
+    times = {'obstacle array': regions_received, 'perceived obstacles': perceived_received}
+    for what in needs:
+        problem = _age_problem(what, times[what], now, max_age)
+        if problem:
+            return mode, problem
+    return mode, None
+
+
+def trail(result, ego_s, perceived, conv, params, trail_gap, reason):
+    """Trailing's verdict on result, a plan made on the static perceived obstacles only.
+
+    Returns result unchanged unless a moving obstacle is in the way: within trail_gap of
+    the nose (NO_ROOM, trailing), or on the way round a static obstacle (NO_ROOM).
+    """
+    # Unlike obstacles_ahead, a moving obstacle counts until it is wholly behind the
+    # car's tail: one alongside is still in the way.
+    tail = ego_s - params.car_rear
+    moving = sorted((o for o in perceived
+                     if not o.is_static and abs(o.d_center) <= params.on_line_threshold
+                     and conv.ds(tail, o.s_end) > 0
+                     and conv.ds(ego_s, o.s_start) < params.lookahead),
+                    key=lambda o: float(conv.ds(ego_s, o.s_start)))
+    if not moving:
+        return result
+    nearest = moving[0]
+    gap = float(conv.ds(ego_s + params.car_front, nearest.s_start))
+    if gap < trail_gap:
+        return PlanResult(NO_ROOM, f'trailing: {reason}; moving obstacle {gap:.1f} m ahead',
+                          obstacle=nearest)
+    if result.status == EVADING and not path_clear(result.s, result.d, moving, conv, params):
+        return PlanResult(NO_ROOM, f'trailing: {reason}; a moving obstacle is on the way '
+                                   f'{result.side}', obstacle=nearest)
+    return result
 
 
 @dataclass

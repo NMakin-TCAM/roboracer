@@ -32,7 +32,7 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from visualization_msgs.msg import Marker
 
-from f1t_msgs.msg import ObstacleArray, OpponentTrajectory, PlannerStatus
+from f1t_msgs.msg import ObstacleArray, OpponentTrajectory, OTWpntArray, PlannerStatus
 from planning.global_waypoints_publisher import load_global_waypoints
 
 TRACK, EV, DURATION, OUT = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
@@ -45,6 +45,10 @@ WARMUP_GAP = 3.0
 # ego at raceline speed, what pure pursuit drives (GB_TRACK teaches it the ego's own past
 # speed, 2 m/s after the warm-up, and it then predicts no catch at all).
 STATE = os.environ.get('CL_STATE', 'TRAILING')
+# COLD: no warm-up. The car stands at the raceline's start, the opponent 6 m ahead, and
+# spliner_node trails on the tracked obstacles until collision_prediction can be planned on.
+COLD = os.environ.get('CL_COLD', '') == '1'
+TRAIL = ['-p', 'trail_obs_topic:=/perception/obstacles'] if COLD else []
 os.makedirs(OUT, exist_ok=True)
 tracks = os.environ['TRACKS_DIR']
 tp = ['-p', f'tracks_dir:={tracks}', '-p', f'track_name:={TRACK}']
@@ -107,7 +111,8 @@ procs = [
             f'opponent_speed:={OPP_V}', 'opponent_s0:=6.0', 'opponent_max_range:=10.0',
             'gp:=dense', f'state:={STATE}'], 'graph.log'),
     launch(['ros2', 'run', 'planning', 'spliner_node', '--ros-args', *tp,
-            '-p', 'obs_topic:=/collision_prediction/obstacles', '-p', f'evasion_dist:={EV}'],
+            '-p', 'obs_topic:=/collision_prediction/obstacles', '-p', f'evasion_dist:={EV}',
+            *TRAIL],
            'spliner.log'),
     launch(['ros2', 'run', 'planning', 'local_path_node', '--ros-args', *tp], 'local_path.log'),
     launch(['ros2', 'launch', 'control', 'pure_pursuit.launch.py', f'track:={TRACK}',
@@ -115,16 +120,20 @@ procs = [
             f'max_speed:={MAX_SPEED}', 'use_sim_time:=false'], 'pure_pursuit.log'),
 ]
 
-rec = {k: [] for k in ('ego', 'opp', 'gap', 'regions', 'status', 'gp')}
+rec = {k: [] for k in ('ego', 'opp', 'gap', 'regions', 'status', 'gp', 'plan', 'opp_true')}
 rclpy.init()
 node = rclpy.create_node('closed_loop_car')
 t0 = time.monotonic()
 now = lambda: time.monotonic() - t0
+# Node clock (wall time, use_sim_time false) minus harness time, to place message stamps.
+CLOCK = node.get_clock().now().nanoseconds * 1e-9 - now()
+rec['clock_offset'] = CLOCK
+stamp_t = lambda st: st.sec + st.nanosec * 1e-9 - CLOCK
 car = dict(x=x0, y=y0, yaw=yaw0, v=0.0, steer=0.0, cmd_v=0.0, cmd_steer=0.0, cmd_t=None)
 opp = {'pose': None, 't': -1.0}
-warm = {'on': True, 'opp_s': None, 'opp_seen': -1.0, 'lap1': False, 'arrays': -1.0,
+warm = {'on': not COLD, 'opp_s': None, 'opp_seen': -1.0, 'lap1': False, 'arrays': -1.0,
         'handover': None}
-rec['handover'] = None
+rec['handover'] = 0.0 if COLD else None
 
 
 def on_tracked(m):
@@ -152,6 +161,9 @@ def on_marker(m):
     if m.action == Marker.ADD:
         yaw = 2 * math.atan2(m.pose.orientation.z, m.pose.orientation.w)
         opp['pose'], opp['t'] = (m.pose.position.x, m.pose.position.y, yaw), now()
+        # The fake is noise-free with no latency: this is its true pose at the stamp.
+        rec['opp_true'].append((stamp_t(m.header.stamp), m.pose.position.x, m.pose.position.y,
+                                yaw))
     else:
         opp['pose'] = None
 
@@ -160,8 +172,14 @@ node.create_subscription(AckermannDriveStamped, '/drive', on_drive, 10)
 node.create_subscription(Marker, '/fake_opponent/marker', on_marker, 10)
 node.create_subscription(ObstacleArray, '/collision_prediction/obstacles', on_regions, 10)
 node.create_subscription(ObstacleArray, '/perception/obstacles', on_tracked, 10)
-node.create_subscription(PlannerStatus, '/planner/avoidance/status',
-                         lambda m: rec['status'].append((now(), m.status, m.note)), 10)
+node.create_subscription(
+    PlannerStatus, '/planner/avoidance/status',
+    lambda m: rec['status'].append((now(), m.status, m.note, stamp_t(m.header.stamp))), 10)
+node.create_subscription(
+    OTWpntArray, '/planner/avoidance/otwpnts',
+    lambda m: rec['plan'].append((now(), stamp_t(m.header.stamp), m.ot_side,
+                                  np.array([[w.s_m, w.d_m] for w in m.wpnts]).reshape(-1, 2))),
+    10)
 node.create_subscription(OpponentTrajectory, '/opponent_trajectory', on_gp, 10)
 pose_pub = node.create_publisher(PoseStamped, '/localized_pose', 10)
 odom_pub = node.create_publisher(Odometry, '/odom', 10)
@@ -240,7 +258,7 @@ try:
 finally:
     for p in procs:
         stop(p)
-    rec['meta'] = dict(handover=rec['handover'], state=STATE, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
+    rec['meta'] = dict(handover=rec['handover'], state=STATE, cold=COLD, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
                        max_speed=MAX_SPEED, opp_v=OPP_V, duration=DURATION)
     with open(os.path.join(OUT, 'record.pkl'), 'wb') as f:
         pickle.dump(rec, f)

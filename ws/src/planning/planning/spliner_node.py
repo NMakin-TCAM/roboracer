@@ -18,6 +18,18 @@ STALE INPUTS. Nothing is published while the ego state or the obstacle array
 is older than max_input_age (time since arrival, node clock), so a dead
 perception or localizer stack makes the planner output go stale downstream
 rather than keep reporting the last obstacles, or "clear", forever.
+
+TRAILING (trail_obs_topic set; off by default). For obs_topic =
+/collision_prediction/obstacles. Until collision_prediction first publishes, and
+while its force_trailing (force_trailing_topic) is fresh and True, the node
+plans on the tracked obstacles from trail_obs_topic instead, and never starts an
+evasion around a moving one (spliner.trail). The car can then start from
+standing: it trails the opponent, which lets the opponent GP learn, which lets
+collision_prediction publish. local_path_node is unchanged, and so is what
+stops the car: NO_ROOM and TOO_CLOSE still mean stop, and every mode needs
+fresh inputs (spliner.plan_inputs). An evasion committed on the regions is
+kept to its end if force_trailing flickers on mid-way; it is still released by
+the usual conditions against the regions.
 """
 
 import os
@@ -30,9 +42,11 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from visualization_msgs.msg import Marker
 
+from std_msgs.msg import Bool
+
 from f1t_msgs.msg import ObstacleArray, OTWpntArray, PlannerStatus, Wpnt
 from planning.frenet import FrenetConverter
-from planning.spliner import Spliner, SplinerParams
+from planning.spliner import REGIONS, Spliner, SplinerParams, plan_inputs, trail
 
 
 class SplinerNode(Node):
@@ -53,6 +67,10 @@ class SplinerNode(Node):
         marker_topic = p('marker_topic', '/planner/avoidance/markers')
         self.map_frame = p('map_frame', 'map')
         rate = float(p('rate', 20.0))
+        trail_topic = p('trail_obs_topic', '')         # '' = no trailing mode (old behaviour)
+        force_topic = p('force_trailing_topic', '/collision_prediction/force_trailing')
+        self.trail_gap = float(p('trail_gap', 2.0))    # m, nose to a moving obstacle's s_start
+        self.trailing = bool(trail_topic)
 
         if not track_name:
             raise RuntimeError('spliner_node needs the track_name parameter')
@@ -86,6 +104,12 @@ class SplinerNode(Node):
         self.ego_received = None
         self.obstacles = []
         self.obstacles_received = None
+        self.perceived = []
+        self.perceived_received = None
+        self.force = None
+        self.force_received = None
+        self.last_mode = None
+        self.committed_on_regions = False
         self.last_stale = None
         self.planner = Spliner(self.conv, self.params)   # commits to an evasion once begun
         self.side = None
@@ -98,6 +122,9 @@ class SplinerNode(Node):
         self.marker_pub = self.create_publisher(Marker, marker_topic, 10)
         self.create_subscription(Odometry, ego_topic, self.ego_cb, 10)
         self.create_subscription(ObstacleArray, obs_topic, self.obs_cb, 10)
+        if self.trailing:
+            self.create_subscription(ObstacleArray, trail_topic, self.perceived_cb, 10)
+            self.create_subscription(Bool, force_topic, self.force_cb, 10)
         self.create_timer(1.0 / rate, self.tick)
 
         self.get_logger().info(
@@ -123,19 +150,18 @@ class SplinerNode(Node):
         self.obstacles = list(msg.obstacles)
         self.obstacles_received = self.now()
 
-    def stale_inputs(self):
-        """Why the inputs cannot be planned on, or None. See STALE INPUTS."""
-        now = self.now()
-        for what, received in (('ego state', self.ego_received),
-                               ('obstacle array', self.obstacles_received)):
-            if received is None:
-                return f'no {what} yet'
-            if now - received > self.max_input_age:
-                return f'{what} {now - received:.2f} s old'
-        return None
+    def perceived_cb(self, msg):
+        self.perceived = list(msg.obstacles)
+        self.perceived_received = self.now()
+
+    def force_cb(self, msg):
+        self.force = bool(msg.data)
+        self.force_received = self.now()
 
     def tick(self):
-        stale = self.stale_inputs()
+        mode, stale = plan_inputs(self.now(), self.max_input_age, self.ego_received,
+                                  self.obstacles_received, self.trailing,
+                                  self.perceived_received, self.force, self.force_received)
         if stale != self.last_stale:
             if stale:
                 self.get_logger().error(f'not planning: {stale}')
@@ -145,7 +171,19 @@ class SplinerNode(Node):
         if stale:
             return
 
-        result = self.planner.step(self.ego_s, self.ego_d, self.obstacles)
+        if self.trailing and mode != self.last_mode:
+            what = ('the collision regions' if mode == REGIONS
+                    else f'the tracked obstacles, trailing ({mode})')
+            self.get_logger().warn(f'planning on {what}')
+            self.last_mode = mode
+        if mode == REGIONS or (self.planner.committed is not None and self.committed_on_regions):
+            result = self.planner.step(self.ego_s, self.ego_d, self.obstacles)
+            self.committed_on_regions = self.planner.committed is not None
+        else:
+            statics = [o for o in self.perceived if o.is_static]
+            result = trail(self.planner.step(self.ego_s, self.ego_d, statics), self.ego_s,
+                           self.perceived, self.conv, self.params, self.trail_gap, mode)
+            self.committed_on_regions = False
         s, d, v, side, note = result.s, result.d, result.v, result.side, result.note
         if result.released:
             self.get_logger().warn(f'evasion released: {result.released}; now {result.status}')

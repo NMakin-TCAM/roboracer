@@ -87,6 +87,83 @@ At 0.35 m the car never got past the opponent. It trailed at the
 opponent's speed, stopping and going (2.00 m/s mean), and never got closer
 than 2.1 m.
 
+## Why there is contact from 0.15 m down
+
+The hypothesis was pure pursuit tracking error. It is not that.
+
+Three new instrumented runs (0.15, 0.05, 0.25) record each planner output
+(`/planner/avoidance/otwpnts`, paired with its status by stamp). They also
+record the opponent's true pose from its marker stamps, fitted to the motion
+model (median residual 0.1 cm, worst 1.6 cm). `diag_analyze.py` compares, for
+every 20 ms sample:
+- **achieved:** the car as driven, against the true opponent;
+- **plan:** the car put exactly on the plan at its own s (the evasion's d
+  while evading, the raceline otherwise), against the true opponent;
+- **region:** the car on the plan, against the region it was planned around.
+
+**Tracking error is small.** While alongside and evading, |car d − plan d|:
+
+| clearance | median | 95th pct | worst plan − achieved |
+|---|---|---|---|
+| 0.15 | 2.4 cm | 8.8 cm | 6.8 cm |
+| 0.05 | 2.8 cm | 11.4 cm | 9.8 cm |
+| 0.25 | 3.7 cm | 10.7 cm | 12.3 cm |
+
+That is real margin to budget for, around 10 cm, but no contact came from it.
+
+**Every contact happens while the plan itself overlaps the opponent:**
+
+| clearance | contact | achieved (m) | plan (m) | region (m) | status at worst | the second before |
+|---|---|---|---|---|---|---|
+| 0.15 | 43.6 s, 0.06 s long | −0.019 | −0.022 | −0.160 | clear (raceline) | evading → too close → clear |
+| 0.15 | 124.6 s, 0.22 s long | −0.104 | −0.091 | −0.294 | clear (raceline) | evading → too close → clear |
+| 0.05 | 16.6 s, 0.68 s long | −0.259 | −0.179 | −0.443 | too close / clear / no room, alternating at 0.8 m/s | evading → too close ⇄ clear |
+
+The mechanism, all three times:
+1. collision_prediction recomputes the region every cycle, and it moves.
+2. The committed evasion is released mid-pass. At 0.15: 17 "gone" (moved
+   more than match_tolerance) and 14 "blocked" (moved onto the path).
+3. The stateless replan then looks for obstacles whose near edge is ahead of
+   the rear axle. The region the car is already inside has its `s_start`
+   behind it, so it is not seen, and the answer is "clear".
+4. The car steers back onto the raceline beside the opponent. Or, at 0.05, it
+   flaps between "too close" and "clear" while half-alongside.
+
+The planner violates its own constraint. At 0.25 there was no contact
+(minimum +0.072 m), but the committed path still overlapped the true opponent
+by up to 0.10 m, and the region by 0.21 m, in the cycles before a "blocked"
+release caught it. So 0.25 means "planned 0.25 from a region that can move
+onto the plan", not a guaranteed 0.25. Not fixed here.
+
+## Cold start, 0.25 m clearance
+
+The car stands at the raceline's start with the opponent 6 m ahead; there is
+no warm-up and no hand placement (`CL_COLD=1`). spliner_node runs with
+`trail_obs_topic:=/perception/obstacles` and `evasion_dist:=0.25`; the stub
+state machine is in TRAILING. Times are seconds from launch.
+
+- **0.4 s:** it plans on the tracked obstacles (trailing, "no collision
+  prediction yet"). It says clear and the car moves at 0.5 s.
+- **Lap 1 (12.1 s, 2.23 m/s mean):** stop-and-go behind the opponent. "No
+  room" whenever the opponent's near edge comes within 2 m of the nose
+  (closest 1.5 m), then clear again: 3 stops, 1.2 s stopped. The gap behind
+  was 2.4 / 3.3 / 6.4 m (p10 / p50 / p90).
+- **7.3 s:** the GP's first half lap. collision_prediction speaks with
+  force_trailing True, so the planner keeps trailing ("forces trailing").
+- **14.3 s:** the GP's whole lap. force_trailing goes False, the planner
+  switches to the regions, and it starts an evasion at once.
+- **Lap 2 (8.8 s, 3.05 m/s mean):** the evasion is released once ("blocked",
+  0.3 s of no room) and re-planned. The car passes the opponent at 17.3 s,
+  minimum gap +0.156 m, and is clear after.
+- **Laps 3–12:** a regular cycle. The car pulls away (100% clear), catches up
+  (trailing on "no room", 3–4 short stops), then passes, once every three
+  laps (laps 5, 8, 11). Minimum gap per passing lap: +0.137, +0.060,
+  +0.134 m. No contact in 12 laps. force_trailing flickers True for about a
+  second at the start line on every lap (`docs/forzaeth-quirks.md` §4), switching the planner to
+  trailing briefly.
+
+Run `cold_analyze.py` on the record for the full timeline.
+
 ## Reproduce
 
 Run this in the container, on a private ROS_DOMAIN_ID, with the planning

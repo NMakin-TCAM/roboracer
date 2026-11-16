@@ -53,7 +53,7 @@ for run in sys.argv[2:]:
     passable = sum(choose_side(o, conv, p).side is not None for o in regs)
     ended = [o for o in regs if o.d_left < 10]
     passable_ended = sum(choose_side(o, conv, p).side is not None for o in ended)
-    st = [(t, s) for t, s, _ in rec['status'] if t > h]
+    st = [(x[0], x[1]) for x in rec['status'] if x[0] > h]
     blocked = [s for _, s in st if s != 'clear']
     evading = sum(s == 'evading' for s in blocked)
     starts = sum(1 for (_, a), (_, b) in zip(st, st[1:]) if a != 'evading' and b == 'evading')

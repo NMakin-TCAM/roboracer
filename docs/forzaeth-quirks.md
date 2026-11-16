@@ -914,11 +914,27 @@ synthetic 3 m wide oval (35.2 m lap).
   spliner needs, so on porto the limit is geometric. The closed-loop sweep of
   the spliner's clearance on porto is in
   `docs/reports/clearance_sweep/README.md`.
-- **The car cannot start cold.** With the spliner on
+- **The car could not start cold.** With the spliner on
   `/collision_prediction/obstacles`, local_path_node needs the spliner, the
-  spliner needs an obstacle array, collision_prediction publishes none until
+  spliner needed an obstacle array, collision_prediction publishes none until
   the GP has published, and the GP needs the car following the opponent for
-  half a lap. The sweep places the car by hand until then.
+  half a lap. Fixed in spliner_node, not local_path_node: with
+  `trail_obs_topic:=/perception/obstacles` it trails on the tracked obstacles
+  until collision_prediction first publishes, and while its
+  `force_trailing` is True (fewer than one opponent lap learned). It never
+  starts an evasion round a moving obstacle there, and refuses (NO_ROOM) within
+  `trail_gap` (2 m) of one (`spliner.py` TRAILING). Off by default, so
+  avoid_graph is unchanged. From standing at 0.25 m clearance the car trailed
+  for its first lap, switched to the regions at the GP's whole lap (14.3 s), and
+  passed on its second; 12 laps, no contact
+  (`docs/reports/clearance_sweep/README.md`).
+- **Contacts at small clearances are planning, not tracking.** The planner
+  releases a committed evasion mid-pass ("gone" or "blocked": the
+  recomputed region moves), and the stateless replan then ignores the
+  region the car is already inside, because the region's near edge is behind
+  the rear axle. That says "clear" and steers back to the raceline into the
+  opponent, or flaps between "too close" and "clear". Not fixed. See the
+  report for the per-cycle measurement.
 - **GB_TRACK teaches collision_prediction the ego's past speed.** With the
   stand-in state machine fixed at GB_TRACK, update_waypoints (§4) overwrites
   `/global_waypoints_updated` speeds with the ego's measured speed. After a
