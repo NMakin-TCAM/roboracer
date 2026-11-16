@@ -550,3 +550,89 @@ def test_trailing_refuses_a_way_round_a_static_obstacle_that_crosses_a_moving_on
 @pytest.mark.parametrize('others', [[], [moving(6.0)], [moving(1.0)]])
 def test_trailing_never_turns_a_refusal_into_driving_on(track, params, refusal, others):
     assert not trail(refusal, 0.0, others, track, params, 2.0, TRAIL_COLD).collision_free
+
+
+# ------------------------------------------------------------------ the clearance violation
+
+def test_an_obstacle_the_car_is_inside_is_still_in_the_way(track, params):
+    """Near edge behind the rear axle, far edge ahead: not passed, so not ignored."""
+    region = long_obs(-1.0 % track.length, 2.0)
+    assert obstacles_ahead([region], 0.0, track, params) == [region]
+
+
+def test_an_obstacle_fully_passed_is_ignored(track, params):
+    assert obstacles_ahead([long_obs(track.length - 3.0, track.length - 0.5)], 0.0,
+                           track, params) == []
+
+
+def test_inside_a_region_the_replan_refuses_instead_of_clearing(track, params):
+    """The violation: released mid-pass, the replan said CLEAR beside the opponent."""
+    region = long_obs(track.length - 0.5, 2.5, d_right=-0.4, d_left=0.2)
+    r = plan(0.0, 0.0, [region], track, params)
+    assert r.status == TOO_CLOSE and not r.collision_free and r.obstacle is region
+
+
+def test_an_obstacle_the_car_is_inside_comes_first(track, params):
+    inside, ahead = long_obs(track.length - 0.5, 1.5), FakeObs(3.0)
+    assert obstacles_ahead([ahead, inside], 0.0, track, params) == [inside, ahead]
+
+
+def test_the_committed_region_moving_onto_the_path_alongside_is_held(track, params):
+    """collision_prediction's region, recomputed while the car is beside it, shifts 1 m on
+    and onto the rest of the path. Releasing was the violation; it is held until passed."""
+    sp = Spliner(track, params)
+    region = long_obs(6.0, 9.0, d_right=-0.3, d_left=0.3)
+    assert sp.step(0.0, 0.0, [region]).status == EVADING
+    side = 1.0 if sp.committed.side == LEFT else -1.0
+    beside = region.s_start - 0.3                 # nose 0.15 m into the region
+    moved = long_obs(7.0, 10.0, d_right=-0.3 + 0.4 * side, d_left=0.3 + 0.4 * side)
+    assert sp._is_committed_one(moved)
+    assert not path_clear(sp.committed.s, sp.committed.d, [moved], track, params)
+    r = sp.step(beside, _d_on(sp, beside), [moved])
+    assert r.status == EVADING and r.committed and r.released is None
+    assert sp.step(sp.committed.s[-1] + 0.2, 0.0, [moved]).released == 'passed'
+
+
+def test_a_new_obstacle_on_the_path_alongside_still_releases(track, params, committed):
+    """Holding is for the committed obstacle only; a different one must still block."""
+    sp, obs = committed
+    beside = obs.s_start - 0.3
+    u_end = sp.committed.s[-1]
+    new_s = obs.s_end + 0.6 + (u_end - obs.s_end - 0.6) / 2      # on the rejoin, clear of it
+    newcomer = FakeObs(new_s, d_center=_d_on(sp, new_s))
+    assert not sp._is_committed_one(newcomer)
+    r = sp.step(beside, _d_on(sp, beside), [obs, newcomer])
+    assert r.released == 'blocked'
+
+
+def test_before_the_nose_reaches_it_a_moved_committed_obstacle_still_blocks(track, params,
+                                                                            committed):
+    sp, obs = committed
+    side = 1.0 if sp.committed.side == LEFT else -1.0
+    moved = FakeObs(obs.s_center, d_center=obs.d_center + 0.4 * side)   # within tolerance
+    assert sp._matches(moved)
+    r = sp.step(2.0, _d_on(sp, 2.0), [moved])
+    assert r.released == 'blocked'
+
+
+def test_a_region_that_slid_clear_of_its_old_span_is_still_the_committed_one(track, params):
+    """Same id: the porto case, where the recomputed region slid 1.3 m in 0.7 s."""
+    sp = Spliner(track, params)
+    region = long_obs(6.0, 7.5, d_right=-0.3, d_left=0.3)
+    region.id = 0
+    assert sp.step(0.0, 0.0, [region]).status == EVADING
+    side = 1.0 if sp.committed.side == LEFT else -1.0
+    slid = long_obs(7.8, 9.3, d_right=-0.3 + 0.4 * side, d_left=0.3 + 0.4 * side)
+    slid.id = 0
+    beside = region.s_start - 0.3
+    assert sp._is_committed_one(slid)
+    r = sp.step(beside, _d_on(sp, beside), [slid])
+    assert r.released is None and r.committed
+
+
+def test_an_obstacle_with_another_id_is_not_the_committed_one(track, params, committed):
+    sp, obs = committed
+    obs.id = 3
+    other = FakeObs(obs.s_center, obs.d_center)
+    other.id = 4
+    assert not sp._is_committed_one(other)

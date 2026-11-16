@@ -928,13 +928,19 @@ synthetic 3 m wide oval (35.2 m lap).
   for its first lap, switched to the regions at the GP's whole lap (14.3 s), and
   passed on its second; 12 laps, no contact
   (`docs/reports/clearance_sweep/README.md`).
-- **Contacts at small clearances are planning, not tracking.** The planner
-  releases a committed evasion mid-pass ("gone" or "blocked": the
-  recomputed region moves), and the stateless replan then ignores the
-  region the car is already inside, because the region's near edge is behind
-  the rear axle. That says "clear" and steers back to the raceline into the
-  opponent, or flaps between "too close" and "clear". Not fixed. See the
-  report for the per-cycle measurement.
+- **Contacts at small clearances were planning, not tracking.** The planner
+  released a committed evasion mid-pass ("gone" or "blocked": the
+  recomputed region moves), and the stateless replan ignored the region the car
+  was inside (its near edge behind the rear axle), said "clear" and steered
+  back into the opponent. Fixed: `obstacles_ahead` ranges on the far edge, and
+  "blocked" by the committed obstacle (same id) is held alongside until
+  "passed" (`spliner.py` COMMITMENT). Pinned closed-loop by
+  `test_closed_loop_clearance.py`: the planned gap against the opponent's true
+  pose must never be negative. That test failed on the old planner (34 cycles,
+  −0.184 m at 0.25). With the fix, the closest approaches are tracking error
+  on the rejoin, and the cut-back after the region's far edge (upstream's
+  `save_distance_back` 0.4 m, about 5 cm along the track for our footprints).
+  `docs/reports/clearance_sweep/README.md` has the re-sweep.
 - **GB_TRACK teaches collision_prediction the ego's past speed.** With the
   stand-in state machine fixed at GB_TRACK, update_waypoints (§4) overwrites
   `/global_waypoints_updated` speeds with the ego's measured speed. After a

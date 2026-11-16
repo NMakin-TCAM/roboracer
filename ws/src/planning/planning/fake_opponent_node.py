@@ -21,6 +21,12 @@ Every sensor parameter defaults to the ideal, which makes the opponent a
 perfect oracle out of the box. That default is for bring-up only. A planner
 validated against a noiseless, never-dropping, zero-latency opponent has not
 been validated, and a GP given clean data is not being exercised at all.
+
+TRUTH (truth_topic, off by default). For evaluation only: the opponent's true pose
+(geometry_msgs/PoseStamped, map frame, heading along the reference line) every tick,
+whether or not the sensor model sees it, so a test can measure clearances while the
+car is alongside, where a forward sensor has lost it. Nothing that drives may
+subscribe to it (AGENTS.md: ground truth is for evaluation, never for decisions).
 """
 
 import dataclasses
@@ -29,6 +35,7 @@ import os
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -54,6 +61,7 @@ class FakeOpponentNode(Node):
         marker_topic = p('marker_topic', '/opponent_marker')
         self.map_frame = p('map_frame', 'map')
         rate = float(p('rate', 40.0))
+        truth_topic = p('truth_topic', '')     # '' = off; evaluation only, see TRUTH
 
         if not track_name:
             raise RuntimeError('fake_opponent_node needs the track_name parameter')
@@ -107,6 +115,8 @@ class FakeOpponentNode(Node):
 
         self.pub = self.create_publisher(ObstacleArray, out_topic, 10)
         self.marker_pub = self.create_publisher(Marker, marker_topic, 10)
+        self.truth_pub = (self.create_publisher(PoseStamped, truth_topic, 10)
+                          if truth_topic else None)
         self.create_subscription(Odometry, ego_topic, self.ego_cb, 10)
         self.create_timer(1.0 / rate, self.tick)
 
@@ -125,10 +135,12 @@ class FakeOpponentNode(Node):
                 f'pick the wrong side. Fix the reference parameter before trusting anything.')
 
     def tick(self):
+        t = (self.get_clock().now() - self.t0).nanoseconds * 1e-9
+        if self.truth_pub is not None:
+            self._publish_truth(self.motion.state_at(t))
         if self.ego_s is None:
             return   # no ego state yet, so visibility is undefined
 
-        t = (self.get_clock().now() - self.t0).nanoseconds * 1e-9
         obs = observe(self.motion, t, self.ego_s, self.lap, self.sensor, self.rng)
 
         if obs is None and self.motion.is_static and self.remember_static and self.last_obs:
@@ -157,6 +169,17 @@ class FakeOpponentNode(Node):
         m.is_static = bool(o.is_static)
         m.is_visible = bool(o.is_visible)
         return m
+
+    def _publish_truth(self, state):
+        m = PoseStamped()
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.header.frame_id = self.map_frame
+        s = state.s % self.lap
+        x, y = self.conv.to_cartesian(s, state.d)
+        yaw = float(self.conv.heading_at(s))
+        m.pose.position.x, m.pose.position.y = float(x), float(y)
+        m.pose.orientation.z, m.pose.orientation.w = math.sin(yaw / 2.0), math.cos(yaw / 2.0)
+        self.truth_pub.publish(m)
 
     def _publish_marker(self, o):
         m = Marker()

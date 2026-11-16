@@ -33,8 +33,10 @@ def opponent_truth(rec, v):
     The marker exists only while the opponent is in sensor range ahead, which loses it
     exactly when the ego is alongside; the model does not.
     """
-    t = np.array([o[0] for o in rec['opp']])
-    s = np.array([conv.to_frenet(o[1], o[2])[0] for o in rec['opp']])
+    # Prefer the marker's own stamps (opp_true, newer records): arrival times jitter.
+    src = rec.get('opp_true') or rec['opp']
+    t = np.array([o[0] for o in src])
+    s = np.array([conv.to_frenet(o[1], o[2])[0] for o in src])
     ph = np.angle(np.mean(np.exp(1j * 2 * np.pi * ((s - v * t) % L) / L))) * L / (2 * np.pi)
     resid = conv.ds(ph % L, (s - v * t) % L)
     return lambda tt: (ph + v * tt) % L, float(np.max(np.abs(resid)))

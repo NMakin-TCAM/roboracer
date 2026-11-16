@@ -55,7 +55,11 @@ the spliner's near-edge ranging and collision_prediction's liveness
   noisy. The region counts differ between runs because the regions depend on
   how the car drove.
 
-## Results
+## Results (with the clearance violation present)
+
+These numbers were measured before the planner fix (see "After the fix"). The
+passable shares, and especially the minimum gaps, at 0.25, 0.20 and 0.15 are
+superseded by the re-sweep there.
 
 | evasion_dist (m) | regions | walls | passable % (all / ended) | evading % of blocked cycles | evasion starts | passes | min gap (m) | time in contact (s) | 1st pct gap (m) | distance (m) | mean v (m/s) | stopped (s) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -103,13 +107,20 @@ every 20 ms sample:
 
 **Tracking error is small.** While alongside and evading, |car d − plan d|:
 
-| clearance | median | 95th pct | worst plan − achieved |
-|---|---|---|---|
-| 0.15 | 2.4 cm | 8.8 cm | 6.8 cm |
-| 0.05 | 2.8 cm | 11.4 cm | 9.8 cm |
-| 0.25 | 3.7 cm | 10.7 cm | 12.3 cm |
+| clearance | median | 95th pct | max | worst plan − achieved |
+|---|---|---|---|---|
+| 0.15 | 2.4 cm | 8.5 cm | 9.3 cm | 6.8 cm |
+| 0.05 | 2.7 cm | 9.2 cm | 10.0 cm | 9.8 cm |
+| 0.25 | 3.5 cm | 9.8 cm | 11.1 cm | 12.3 cm |
 
 That is real margin to budget for, around 10 cm, but no contact came from it.
+(A first version of this analysis, and the report that quoted it, gave worse
+maxima, and an overlap of an *evading* plan with the opponent at 0.25. That
+was a measurement artefact. The published remaining path starts at the first
+sample at or ahead of the car, up to 0.1 m in front of it. The analysis
+treated the car in that sliver as off the path, on the raceline. Fixed by
+holding the path's end values; no evading plan overlapped the opponent in any
+of the three runs: minimum planned gap while evading +0.17, +0.20, +0.23 m.)
 
 **Every contact happens while the plan itself overlaps the opponent:**
 
@@ -129,13 +140,10 @@ The mechanism, all three times:
 4. The car steers back onto the raceline beside the opponent. Or, at 0.05, it
    flaps between "too close" and "clear" while half-alongside.
 
-The planner violates its own constraint. At 0.25 there was no contact
-(minimum +0.072 m), but the committed path still overlapped the true opponent
-by up to 0.10 m, and the region by 0.21 m, in the cycles before a "blocked"
-release caught it. So 0.25 means "planned 0.25 from a region that can move
-onto the plan", not a guaranteed 0.25. Not fixed here.
+The planner violates its own constraint, and only through the replan after
+a release. At 0.25 that run had no contact (minimum +0.072 m).
 
-## Cold start, 0.25 m clearance
+## Cold start, 0.25 m clearance, before the fix
 
 The car stands at the raceline's start with the opponent 6 m ahead; there is
 no warm-up and no hand placement (`CL_COLD=1`). spliner_node runs with
@@ -163,6 +171,94 @@ state machine is in TRAILING. Times are seconds from launch.
   trailing briefly.
 
 Run `cold_analyze.py` on the record for the full timeline.
+
+## After the fix
+
+**What changed** (`planning/spliner.py`, COMMITMENT and `obstacles_ahead`):
+
+1. **`obstacles_ahead` ranges on the far edge.** An obstacle counts until the
+   car has fully passed it (`s_end` still ahead of the rear axle). The range
+   cap stays on the near edge (`s_start` within the lookahead). A replan
+   inside a region now refuses ("too close", the car stops) instead of saying
+   "clear".
+2. **"blocked" is held alongside, for the committed obstacle only.** Once the
+   car's nose reaches the committed obstacle, that obstacle can no longer
+   release the commitment as "blocked"; only "passed" ends it, as for "gone".
+   "The committed obstacle" means the same id. collision_prediction's region
+   is always id 0, and the tracker's ids are per object. On porto the
+   recomputed region slid 1.3 m forward in 0.7 s, clear of its old span, so
+   position alone misidentified it as new. Obstacles without an id fall back
+   to matching within match_tolerance or overlapping the old span. Any other
+   obstacle on the rest of the path still releases, alongside or not.
+
+**The permanent test.** `planning/test/test_closed_loop_clearance.py` is the
+full chain, from cold, on porto's geometry (`test/fixtures/porto_odom_trial`),
+130 s at each of 0.25 and 0.15. Every 20 ms it compares the planned gap and
+the achieved gap against the opponent's true pose, taken from
+fake_opponent_node's evaluation-only truth topic. It fails if the plan ever
+overlaps the opponent (while CLEAR or EVADING), on any contact, or if it never
+passes the opponent at all.
+
+| planner | 0.25 | 0.15 |
+|---|---|---|
+| before the fix | **failed**: 34 cycles planned through, worst −0.184 m, while "clear" | passed (+0.163 planned, +0.086 achieved) |
+| after the fix | passed: closest planned +0.115 m, achieved +0.052 m, 4 passes | passed: +0.165 / +0.085 m, 4 passes |
+
+So the violation is intermittent: in that pair of runs it showed at 0.25,
+where the diagnosis had found it at 0.15. That is why the test runs both.
+
+**Re-sweep, fixed planner.** Same protocol as the first sweep (warm-up,
+TRAILING, 150 s). Gaps are from the stamped truth.
+
+| evasion_dist (m) | regions | walls | passable % (all / ended) | evading % of blocked cycles | evasion starts | passes | closest planned (m) | planned-through cycles | closest achieved (m) | contact (s) | 1st pct gap (m) | mean v (m/s) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.25 | 733 | 35 | 40.4 / 42.4 | 59.2 | 8 | 5 | +0.043 | 0 | +0.037 | 0 | 0.108 | 2.96 |
+| 0.20 | 708 | 53 | 45.6 / 49.3 | 65.1 | 5 | 5 | +0.046 | 0 | +0.006 | 0 | 0.138 | 3.00 |
+| 0.15 | 696 | 33 | 57.9 / 60.8 | 66.2 | 9 | 5 | +0.082 | 0 | +0.007 | 0 | 0.145 | 3.00 |
+
+**Where the closest approaches are:**
+
+| clearance | status | planned (m) | tracking (m) | achieved (m) | where |
+|---|---|---|---|---|---|
+| 0.25 | clear | +0.043 | −0.007 | +0.037 | car 0.34 m ahead of the opponent: the cut-back after the pass |
+| 0.20 | evading | +0.083 | −0.076 | +0.006 | car 0.35 m ahead: the rejoin |
+| 0.15 | evading | +0.096 | −0.086 | +0.007 | car 0.35 m ahead: the rejoin |
+
+With the planner fixed, the closest approaches are what the tracking-error
+hypothesis predicted. At 0.20 and 0.15 the plan kept 8–10 cm, and pure
+pursuit's 8–9 cm error during the rejoin took nearly all of it. One run per
+value; treat the minima as single samples.
+
+**The cut-back is not covered by the clearance.** At 0.25 the closest approach
+is the cut-back to the raceline once the rear axle has passed the region's
+far edge. collision_prediction ends the region where the rear axle is 0.4 m
+(upstream's `save_distance_back`) past the opponent's centre. With
+car_rear 0.10 m and the opponent's half-length 0.25 m, that leaves about
+5 cm along the track. Clearance is only enforced laterally while the region
+lasts, so `evasion_dist` does not govern this approach.
+
+## Cold start after the fix, 0.25 m clearance
+
+Same setup as before (`CL_COLD=1`); 120 s, 12 car laps.
+
+- **First two laps.** The car moves at 1.6 s, trailing on the tracked
+  obstacles.
+  - The GP's half lap comes at 11.5 s and its whole lap at 18.4 s. This is
+    slower than before (7.3 and 14.3 s): the trailing gap often opened beyond
+    opponent_trajectory's 6 m (p90 8.1 m on lap 1), so it got fewer points.
+  - The car plans on the regions from 18.5 s. Its one evasion on lap 2
+    (22.9 s) was released as "gone" after 0.1 s, before the nose reached
+    the region.
+  - Lap 1: 12.3 s, 2.19 m/s, 3 stops. Lap 2: 13.8 s, 1.95 m/s, 6 stops, no
+    pass.
+- **Laps 3–12.** Passes on laps 3, 6 and 10, and the same pull away, catch
+  up, trail, pass cycle as before.
+- **No contact in 12 laps.**
+  - Closest planned gap: +0.084 m (evading, 98.3 s), with 0 planned-through
+    cycles.
+  - Closest achieved gap: +0.024 m at 98.2 s, evading on the rejoin, with
+    the car 0.38 m ahead of the opponent and 9.4 cm off its plan (tracking).
+  - Closest per passing lap: +0.060, +0.170, +0.024 m.
 
 ## Reproduce
 

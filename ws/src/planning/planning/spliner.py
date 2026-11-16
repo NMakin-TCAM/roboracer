@@ -46,7 +46,19 @@ afresh, on exactly these conditions (Spliner.release_reason, checked in order):
                 it is still ahead of the car's nose (once alongside, a forward
                 sensor loses it; that is held until 'passed')
   blocked       the rest of the committed path is no longer collision-free
-                against the current obstacles (path_clear)
+                against the current obstacles (path_clear). Once the car's nose
+                has reached the committed obstacle, the committed obstacle
+                itself is held until 'passed', as for 'gone': a
+                collision_prediction region is recomputed every cycle and moves
+                onto the path while the car is beside it, and releasing then
+                was the clearance violation (the replan steered back into the
+                opponent). Any other obstacle on the rest of the path still
+                releases, alongside or not. "The committed obstacle" means one
+                with its id (collision_prediction's region is always id 0, and
+                the tracker's ids are per object), or, for obstacles without
+                one, matching it within match_tolerance or overlapping its s
+                span. Position alone is not enough: on porto the recomputed
+                region slid 1.3 m forward in 0.7 s, clear of its old span.
   off line      the car is more than max_commit_offset from the committed d
 
 TRAILING (trailing_mode, trail). Planning on collision_prediction's regions, as
@@ -116,18 +128,25 @@ class SideChoice:
 def obstacles_ahead(obstacles, ego_s, conv, params):
     """Obstacles in our way, nearest first.
 
-    'In our way' means its near edge (s_start) is ahead of us and inside the
+    'In our way' means the car has not fully passed it (its far edge, s_end, is
+    still ahead of the rear axle), its near edge (s_start) is inside the
     lookahead, and it is laterally close enough to the reference line to matter.
-    Nearest means nearest near edge. Ranging on s_start, not s_center, matters for
-    obstacles long in s: a collision_prediction region can run 10 m or more, so
-    its centre can lie past the lookahead while its start is right in front of
-    the car. Comparison uses signed lap distance, never subtraction, so a car
-    just past the start line is correctly seen as ahead rather than a lap behind.
+    Nearest means nearest near edge, which is behind the car for one it is inside.
+
+    The far edge, because both centre and near edge were wrong. s_center missed a
+    long obstacle starting in front of the car (a collision_prediction region can
+    run 10 m or more). s_start missed one the car is inside: after an evasion was
+    released mid-pass, the replan declared "clear" beside the opponent and steered
+    back into it. An obstacle the car is inside now gets planned around, which
+    build_evasion refuses as too close: the car stops rather than drive into it.
+
+    Comparison uses signed lap distance, never subtraction, so a car just past the
+    start line is correctly seen as ahead rather than a lap behind.
     """
     out = []
     for o in obstacles:
         gap = conv.ds(ego_s, o.s_start)
-        if not (0.0 < gap < params.lookahead):
+        if not (conv.ds(ego_s, o.s_end) > 0.0 and gap < params.lookahead):
             continue
         if abs(o.d_center) > params.on_line_threshold:
             continue
@@ -431,6 +450,15 @@ class Spliner:
         return (abs(self.conv.ds(c.s_center, o.s_center)) <= tol
                 and abs(o.d_center - c.d_center) <= tol)
 
+    def _is_committed_one(self, o):
+        """The committed obstacle, as recomputed: its id, else matching it or overlapping it."""
+        c = self.committed.obstacle
+        cid, oid = getattr(c, 'id', None), getattr(o, 'id', None)
+        if cid is not None and oid is not None:
+            return cid == oid
+        return (self._matches(o) or (self.conv.ds(c.s_start, o.s_end) > 0
+                                     and self.conv.ds(o.s_start, c.s_end) > 0))
+
     def release_reason(self, ego_s, ego_d, obstacles):
         """Why the commitment must go now, or None to keep it. See COMMITMENT."""
         c = self.committed
@@ -443,7 +471,11 @@ class Spliner:
             # once it is beside or behind the car, and releasing then would steer the car
             # back into it. Alongside, its disappearance is held until 'passed'.
             return 'gone'
-        if not path_clear(c.s[i:], c.d[i:], obstacles, self.conv, self.params):
+        # Alongside, the committed obstacle itself cannot block (see COMMITMENT): the
+        # car is beside it on a path planned round it. Anything else still can.
+        check = ([o for o in obstacles if not self._is_committed_one(o)] if nose_reached_it
+                 else obstacles)
+        if not path_clear(c.s[i:], c.d[i:], check, self.conv, self.params):
             return 'blocked'
         u = arc(c.s, self.conv.length)
         d_here = float(np.interp(max(self.conv.ds(c.s[0], ego_s), 0.0), u, c.d))

@@ -4,7 +4,7 @@
         [localizer:=cartographer|mcl|external] [state:=GB_TRACK|TRAILING|OVERTAKE]
         [use_sim_time:=true] [opponent_mode:=constant_speed] [opponent_speed:=2.0]
         [opponent_s0:=5.0] [opponent_d:=0.0] [opponent_seed:=0] [opponent_max_range:=10.0]
-        [tracker:=true|false] [gp:=none|dense]
+        [tracker:=true|false] [gp:=none|dense] [opponent_truth_topic:=]
 
 Starts, in one launch:
 
@@ -99,6 +99,8 @@ def graph(context):
         'seed': ParameterValue(LaunchConfiguration('opponent_seed'), value_type=int),
         'max_range': ParameterValue(LaunchConfiguration('opponent_max_range'), value_type=float),
         'marker_topic': '/fake_opponent/marker',
+        # Evaluation only (fake_opponent_node TRUTH): empty, the default, publishes nothing.
+        'truth_topic': LaunchConfiguration('opponent_truth_topic'),
         'out_topic': '/perception/detections' if tracked else '/perception/obstacles',
     }
     tracker = [node('obstacle_tracker_node', {'in_topic': '/perception/detections',
@@ -141,6 +143,9 @@ def generate_launch_description():
         DeclareLaunchArgument('tracker', default_value='true',
                               description='true: fake_opponent_node -> obstacle_tracker_node -> '
                                           'planners; false: the fake feeds the planners directly'),
+        DeclareLaunchArgument('opponent_truth_topic', default_value='',
+                              description='evaluation only: publish the fake opponent\'s true '
+                                          'pose here (PoseStamped, map); empty = off'),
         DeclareLaunchArgument('gp', default_value='none',
                               description='the main GP: none (wait for one) | dense '
                                           '(Predictive Spliner\'s, dense_gp_opp_traj_node)'),

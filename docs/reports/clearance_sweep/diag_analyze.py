@@ -74,12 +74,12 @@ for run in sys.argv[2:]:
         s_car, d_car = float(s_car), float(d_car)
         if st == 'evading' and len(path) > 1:
             u = np.concatenate(([0.0], np.cumsum(np.diff(path[:, 0]) % L)))
+            # The path starts at the first sample at or ahead of the car (up to one sample
+            # in front of it); past its end it is back on the raceline. np.interp holds the
+            # end values for both.
             uc = float(conv.ds(path[0, 0], s_car))
-            if 0 <= uc <= u[-1]:
-                d_plan = float(np.interp(uc, u, path[:, 1]))
-                slope = float(np.interp(uc, u[1:], np.diff(path[:, 1]) / np.maximum(np.diff(u), 1e-6)))
-            else:
-                d_plan, slope = 0.0, 0.0
+            d_plan = float(np.interp(uc, u, path[:, 1]))
+            slope = float(np.interp(uc, u[1:], np.diff(path[:, 1]) / np.maximum(np.diff(u), 1e-6)))
         else:
             d_plan, slope = 0.0, 0.0
         os_, od = opp(t)
@@ -144,6 +144,18 @@ for run in sys.argv[2:]:
               f'p95 {np.percentile(np.abs(tr), 95):.3f} max {np.abs(tr).max():.3f}; '
               f'plan-achieved p50 {np.percentile(cost, 50):+.3f} max {cost.max():+.3f}; '
               f'plan gap min {gp.min():+.3f}; region gap min {gr.min() if len(gr) else math.nan:+.3f}')
+    planned = [r for r in rows if r['st'] in ('clear', 'evading')]
+    if planned:
+        w = min(planned, key=lambda r: r['g_plan'])
+        neg = sum(r['g_plan'] < 0 for r in planned)
+        a = min(rows, key=lambda r: r['g_act'])
+        print(f'  closest achieved at t {a["t"]:.1f}: {a["g_act"]:+.3f} m, status {a["st"]}, '
+              f'planned {a["g_plan"]:+.3f}, tracking {a["track"]:+.3f}, car '
+              f'{a["rel"]:+.2f} m ahead of the opponent, v {a["v"]:.2f}')
+        print(f'  SUMMARY closest planned {w["g_plan"]:+.3f} m (t {w["t"]:.1f}, {w["st"]}), '
+              f'{neg} planned-through cycles; closest achieved '
+              f'{min(r["g_act"] for r in rows):+.3f} m; contact '
+              f'{sum(r["g_act"] <= 0 for r in rows) * 0.02:.2f} s')
     allside = [r for r in rows if abs(r['rel']) < 1.5]
     c = Counter(r['st'] for r in allside)
     print(f'  alongside, any status: {dict(c)}; min achieved {min(r["g_act"] for r in allside):+.3f}')
