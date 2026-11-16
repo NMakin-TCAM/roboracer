@@ -1,0 +1,211 @@
+# The predictive chain in AutoDRIVE, porto, 2026-11-16
+
+The first runs of the moving-opponent chain against the simulator, not the
+kinematic stand-in: `planning predictive_race.launch.py` with AutoDRIVE's car
+through the bridge, Cartographer localization, and everything downstream.
+
+## Setup
+
+- **Simulator:** SIGRobotics' AutoDRIVE fork (Udog-ILLINOIS/AutoDRIVE,
+  `f1tenth_multitrack`) on macOS, track Porto, Autonomous mode, connected to
+  the bridge on 127.0.0.1:4567. It ran at 70–113 frames/s through the bridge.
+  The fork's control port (127.0.0.1:4580: `status`, `screenshot`, `click`,
+  `obstacle`, ...) and its `-track <name> -autoconnect` flags mean a future run
+  needs no GUI action.
+- **Graph** (`predictive_race.launch.py track:=porto_odom_trial`):
+  - the bridge, Cartographer and localization_gate;
+  - global waypoints, frenet_state_node, fake_opponent_node (weaving, ±0.4 m,
+    noise-free, 10 m forward range) and obstacle_tracker_node;
+  - the dense GP, the predictor and collision_prediction;
+  - spliner_node at evasion_dist 0.25 with trailing (trail_gap 2.0 m);
+  - local_path_node and pure pursuit at speed_scale 0.5, as avoid_graph was
+    validated.
+
+  The state stand-in is TRAILING and `use_sim_time` is true (the bridge
+  publishes `/clock`; it ran at exactly 1.000 × wall time).
+- **The opponent exists only in software.** The car drives round a car the
+  simulator does not have. The simulator's collisions below are with its own
+  walls.
+- **Measurement** (`sim_record.py`, passive: it subscribes and publishes
+  nothing; `sim_analyze.py`, `crash_detail.py`, `wall_clearance.py`):
+  - The car's truth is `/autodrive/roboracer_1/odom`, put in the map frame by
+    porto_odom_trial's map→world transform: rotation −92.693°, translation
+    (0.5065, −4.3836) m, verified by SIGRobotics to 4.3 cm at 7.4 m. This
+    differs slightly from `map_to_world.yaml` (−92.33°, (0.5037, −4.3818)),
+    which this work does not use.
+  - The opponent's truth is fake_opponent_node's evaluation-only truth topic.
+  - Truth is used only to measure. The sim odometry's reference point on the
+    car is undocumented; the localized pose sits a steady 2.7–4.3 cm behind
+    it along the car, taken as that offset.
+
+## Runs
+
+| run | duration | settings | outcome |
+|---|---|---|---|
+| 1 | 90 s | opponent 1.2 m/s, bound_margin 0.15 (spliner default) | 3.8 laps; 4 simulator collisions, one per lap from the first evasion |
+| 2 | 240 s | bound_margin 0.30 | 10.9 laps, no collisions, no passes |
+| 3 | 300 s | opponent 0.8 m/s | 8.5 laps, no collisions; the opponent drove through the standing car at start-up (setup bug, below) |
+| 4 | 600 s | opponent_s0 24.3 (5 m ahead of the car's real start), pure pursuit fix | 17.65 laps, no collisions, no passes, clean shutdown |
+
+## What came up, what blocked, what changed, in order
+
+1. **The simulator needed a GUI connect.** The headless `-autonomous` start in
+   the repo is for the patched Windows build only. You connected it; the fork's
+   control port and `-autoconnect` flag remove that step next time.
+2. **My run script: `set -u` breaks sourcing ROS's `setup.bash`** (it reads
+   unset variables). Removed.
+3. **Every evasion along the inner wall hit it** (run 1: collisions at 54.3,
+   65.6, 76.9, 88.2 s, 2 s after the first evasion and then once per lap at
+   the same two places, s ≈ 8 and 21 m). The simulator respawned the car each
+   time (truth jumps to a standstill at s 21.44 or 8.68, d −0.3) and
+   localization was lost for about 2.5 s. In the 2 s before each, the car's
+   footprint was −5.4, +0.4, −5.0 and +0.2 cm from the mapped track edge.
+
+   **Cause:** the spliner keeps the planned line, the car's *centre*,
+   `bound_margin` (0.15 m) inside the edge, and 0.15 m is the car's half
+   width. So an evasion against the wall puts the car's side on it; the
+   raceline itself already runs 0.21 m from the walls at the apexes (its
+   provenance header).
+
+   **Changed:** `predictive_race.launch.py` passes `bound_margin` 0.30 (the
+   half width plus the intended 0.15). avoid_graph keeps 0.15 and is
+   unchanged. What the parameter *means* is the open decision: as written it
+   lets avoid_graph's car touch walls too. Runs 2–4 had no collisions, and the
+   footprint never came closer than +5.6 cm to the edge (1st percentile).
+4. **Pure pursuit could not be stopped** (runs 1–3: still alive 30 s after
+   SIGINT, the launch waiting on it, no stop burst).
+
+   **Cause:** pure_pursuit_node opts out of rclpy's signal handler to send its
+   stop burst, and relies on Python's KeyboardInterrupt. A background job of a
+   non-interactive shell inherits SIGINT as *ignored*, and Python then
+   installs no handler. Its `/proc` mask showed it: `SigIgn 0000000081001006`,
+   bit 1. Every other node uses rclpy's handler and exited.
+
+   **Changed:** `main()` restores Python's SIGINT handler explicitly.
+   `test_shutdown_stops_when_started_with_sigint_ignored` failed on the old
+   node and passes now. Run 4: mask `...1004`, and the launch exited 1.0 s
+   after SIGINT.
+5. **The fake opponent's start is in raceline s, but the car does not start at
+   s = 0.** After the reset the car stands at raceline s = 19.3 m (where
+   mapping started), so `opponent_s0:=5.0` put the opponent 14 m behind it.
+   In run 3 (0.8 m/s) it caught up while the car waited 12 s for localization
+   and drove through it. The fake sensor only looks forward, so the planner
+   said "clear" for 14 cycles with the footprints overlapping by 0.245 m.
+
+   **Changed:** nothing in code; run 4 passes `opponent_s0:=24.3`. This is a
+   setup problem of the software opponent, not a planner failure, but any run
+   whose opponent starts behind the car will show it. Planner and opponent
+   should agree on where "ahead" starts.
+6. **The recorder heard no `/clock`** (QoS). It now subscribes best effort.
+
+## Measurements
+
+**Time to first plan, Cartographer against a perfect pose.** About 12 s from
+launch, all of it localization:
+
+| | run 1 | run 2 | run 3 | run 4 |
+|---|---|---|---|---|
+| first `/tracked_pose` | 1.12 | 0.47 | 0.64 | 0.36 |
+| localization_gate localized | 12.56 | 11.65 | 12.12 | 12.08 |
+| first plan (collision-free) | 12.63 | 11.69 | 12.19 | 12.14 |
+| car moves | 12.73 | 11.81 | 12.28 | 12.23 |
+| GP whole lap (lapcount 1) | 44.7 | 58.7 | 46.5 | 46.1 |
+| first evasion | 52.4 | 65.2 | 55.0 | 52.9 |
+
+With the stand-in, the first plan came 0.4 s after launch and the GP's whole
+lap came at 14–18 s. The planner answers within 70 ms of the gate localizing.
+The GP is slower because of the 12 s wait (the opponent is far ahead by then)
+and the slower car.
+
+**Rates with the simulator in the loop** (run 4, 632 s; arrival at the
+recorder):
+
+| topic | Hz | max gap |
+|---|---|---|
+| `/scan` | 40.0 | 356 ms |
+| `/odom`, IMU, sim odometry | 86.4 | 356 ms |
+| `/tracked_pose` | 99.7 | 362 ms |
+| `/localized_pose`, `/car_state/odom_frenet` | 99.7 | 70 ms |
+| `/perception/detections`, `/perception/obstacles` | 40.0 | 63 ms |
+| `/collision_prediction/obstacles` | 10.0 | 114 ms |
+| spliner status and otwpnts | 20.0 | 63 ms |
+| `/local_path`, `/local_path/valid` | 20.0 | 356 ms |
+| `/drive` | 99.7 | 76 ms |
+
+Every node held its nominal rate for 10 minutes, with no header-stamp
+reversals. The chain itself dropped nothing.
+
+The simulator did not keep its rate. Once in run 4, every bridge topic (scan,
+odometry, IMU, `/clock`) stopped for 355 ms at the same time: a simulator
+frame stall. Downstream, `/localized_pose` never paused for more than 70 ms
+through it, because Cartographer extrapolates fresh-stamped poses during a
+stall (AGENTS.md lists this). That is 0.36 s of driving on a pose nothing
+measured. run 1's 2.5 s pose gaps were the respawns.
+
+`/drive` had 66 duplicate stamps in run 4: pure pursuit's repeated stops,
+which share a stamp.
+
+**Localization against truth** (runs 2–4, consistent):
+- across the car: p5..p95 −6.6..+3.3 cm, worst 7.8 cm;
+- yaw: worst 3.2°;
+- along the car: a steady −2.7 to −4.3 cm, the truth reference offset.
+
+**Pure pursuit tracking on the simulator's dynamics** (truth, rear axle,
+minus the plan's d at the car's own s). While evading, at speed_scale 0.5
+(1.0–3.1 m/s):
+
+| run | samples | p50 | p95 | max |
+|---|---|---|---|---|
+| 2 | 683 | 2.7 cm | 4.3 cm | 4.6 cm |
+| 3 | 3,636 | 1.9 cm | 5.3 cm | 9.0 cm |
+| 4 | 7,519 | 1.8 cm | 5.5 cm | 9.8 cm |
+
+The stand-in's 8–9 cm was on the rejoin at 3–4 m/s, so these are not like
+for like: half the speed, and no rejoin past the opponent (no passes, below).
+Over all driving, "clear" included, run 4 gives p95 31.9 cm and max 48.4 cm.
+That is not tracking. Split by how long the plan had said "clear":
+
+| run 4, plan "clear" for | samples | p50 | p95 | max |
+|---|---|---|---|---|
+| ≥ 1 s (steady raceline following) | 351 | 1.0 cm | 5.6 cm | 8.9 cm |
+| < 1 s (just after a switch) | 13,336 | 7.3 cm | 36.2 cm | 48.4 cm |
+
+When an evasion is released, the reference jumps back to the raceline while
+the car is still 30–48 cm off it. The statuses switch so often in this
+stop-and-go trailing that most driving falls within a second of a switch.
+Steady tracking on the simulator's dynamics is about 5.5 cm at p95 and under
+10 cm at worst. Those lateral jumps of the planned line are a planner finding
+in their own right.
+
+**Closest gaps to the opponent** (run 4, 17.65 laps):
+- closest planned: +1.032 m, with 0 planned-through cycles;
+- closest achieved: +1.059 m;
+- no contact.
+
+**No passes in 37 laps across runs 2–4.** The car caught the opponent and
+trailed it, but never got by. Run 4 spent 1,834 cycles evading, and every
+evasion was released before the car's nose reached the region, where the
+alongside hold does not apply:
+
+| release | count |
+|---|---|
+| "gone" (the recomputed region moved more than 0.5 m), re-planned as a new evasion | 72 |
+| "gone", then no room or clear | 5 |
+| "blocked" (the region moved onto the path), then no room | 32 |
+| "blocked", re-planned as a new evasion | 10 |
+
+The replans then mostly refused: "no feasible side" 231 times, and "the way
+left is blocked by another obstacle" 70 times. That second message names the
+region itself: the 0.30 wall margin clips the apex back towards the region.
+
+So the gaps above are trailing distances, and nothing here tests clearance in
+a pass on the real dynamics. Getting passes on porto needs room the chain
+does not find at evasion_dist 0.25 with a 0.30 wall margin: either a wider
+track, a smaller margin, or evasions that survive the region moving.
+
+## Not done
+
+- No physical obstacle. The fork's `obstacle <x> <y>` puts one in the world
+  frame, with map→world as above; it was not used.
+- GB_TRACK is untested here (documented, not fixed: forzaeth-quirks §8).
+- One configuration of speed and opponent per run.

@@ -32,7 +32,7 @@ os.makedirs(OUT, exist_ok=True)
 stamp = lambda m: m.header.stamp.sec + m.header.stamp.nanosec * 1e-9  # noqa: E731
 pose = lambda p: (p.position.x, p.position.y, 2 * np.arctan2(p.orientation.z, p.orientation.w))  # noqa: E731
 TOPICS = {
-    '/clock': (Clock, 10, lambda m: m.clock.sec + m.clock.nanosec * 1e-9),
+    '/clock': (Clock, qos_profile_sensor_data, lambda m: m.clock.sec + m.clock.nanosec * 1e-9),
     '/scan': (LaserScan, qos_profile_sensor_data, lambda m: stamp(m)),
     '/odom': (Odometry, 10, lambda m: (stamp(m), m.twist.twist.linear.x)),
     '/sensors/imu/raw': (Imu, qos_profile_sensor_data, lambda m: stamp(m)),

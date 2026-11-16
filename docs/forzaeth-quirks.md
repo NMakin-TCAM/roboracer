@@ -949,6 +949,17 @@ synthetic 3 m wide oval (35.2 m lap).
   while pure pursuit drives the raceline speed. In one closed-loop GB_TRACK
   run the car touched the opponent with no region published. Upstream's real
   state machine would leave GB_TRACK while trailing; the stub does not (§6).
+- **In AutoDRIVE** (`predictive_race.launch.py`, porto, 2026-11-16;
+  `docs/reports/autodrive_predictive/README.md`):
+  - Evasions along the inner wall hit it until the spliner's `bound_margin`
+    was raised to 0.30. It bounds the car's centre, and 0.15 is the car's half
+    width; the launch passes 0.30, avoid_graph keeps 0.15.
+  - pure_pursuit_node could not be stopped when started from a script's
+    background job (SIGINT inherited as ignored). Fixed in its `main()`.
+  - First plan takes about 12 s, all of it Cartographer localizing.
+  - Every node held its rate.
+  - Tracking while evading: p95 5.5 cm at speed_scale 0.5.
+  - No passes in 37 laps on porto at evasion_dist 0.25 with that wall margin.
 
 Not pinned (one-off run; the launch test checks only that the GP and
 collision_prediction publish).

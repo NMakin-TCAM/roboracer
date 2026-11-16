@@ -62,6 +62,11 @@ OPP_V = 2.0                      # m/s
 # 0.25 is the clearance chosen for racing. 0.15 is a stress case: more evasions start and
 # more are released mid-pass, which is where the violation lived (2 in 135 s there).
 CLEARANCES = (0.25, 0.15)
+# NOT the deployed wall margin. predictive_race.launch.py defaults to 0.30 because 0.15
+# (the car's half width, measured from the planned line) put the AutoDRIVE car into porto's
+# walls. At 0.30 porto leaves no room to pass, in AutoDRIVE (37 laps) and here, and this
+# test is about clearance to the opponent during passes. The stand-in has no walls.
+BOUND_MARGIN = 0.15
 DURATION = 130.0                 # s of driving
 EGO_BOX = (0.45, 0.10, 0.30)     # front of rear axle, behind it, width
 OPP_BOX = (0.50, 0.30)           # length, width, centred
@@ -156,7 +161,7 @@ def chain(tmp_path, request):
                f'evasion_dist:={request.param}', 'opponent_mode:=weaving',
                f'opponent_speed:={OPP_V}', 'opponent_s0:=6.0',
                'opponent_truth_topic:=/fake_opponent/truth', 'speed_scale:=1.0',
-               'max_speed:=4.0'], tmp_path / 'graph.log', env),
+               'max_speed:=4.0', f'bound_margin:={BOUND_MARGIN}'], tmp_path / 'graph.log', env),
     ]
     try:
         yield procs, FrenetConverter.from_track(str(tracks / TRACK)), tmp_path

@@ -42,6 +42,7 @@ provenance is unknown (older or hand-made files). /raceline/provenance (latched 
 """
 import json
 import os
+import signal
 import time
 
 import numpy as np
@@ -289,6 +290,11 @@ def main():
     # Handle Ctrl+C ourselves (as wall_follow_node): rclpy's default handler shuts ROS down first, so
     # the stop could never be published and the car would keep its last command
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    # And make sure Ctrl+C reaches us. A process started as a background job of a
+    # non-interactive shell (a script's `ros2 launch ... &`) inherits SIGINT as IGNORED, and
+    # Python then installs no KeyboardInterrupt handler: the node never stopped, launch waited
+    # on it indefinitely, and the stop burst below was never sent (AutoDRIVE run, 2026-11-16).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     node = PurePursuit()
     try:
         while rclpy.ok():

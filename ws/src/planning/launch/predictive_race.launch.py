@@ -3,7 +3,8 @@ our spliner -> pure pursuit.
 
     ros2 launch planning predictive_race.launch.py track:=<name>
         [localizer:=cartographer|mcl|external] [state:=TRAILING|GB_TRACK|OVERTAKE]
-        [evasion_dist:=0.25] [trail_gap:=2.0] [speed_scale:=0.5] [max_speed:=0.0]
+        [evasion_dist:=0.25] [trail_gap:=2.0] [bound_margin:=0.30]
+        [speed_scale:=0.5] [max_speed:=0.0]
         [opponent_mode:=weaving] [opponent_speed:=2.0] [opponent_s0:=5.0] [opponent_d:=0.0]
         [opponent_seed:=0] [opponent_max_range:=10.0] [opponent_truth_topic:=]
         [use_sim_time:=true]
@@ -30,6 +31,13 @@ state defaults to TRAILING, not shared_graph's GB_TRACK. With the stand-in state
 fixed at GB_TRACK, update_waypoints teaches collision_prediction the ego's own past speed,
 so after trailing it predicts no catch while pure pursuit drives the raceline speed
 (docs/forzaeth-quirks.md section 8). That needs a real state machine; this only avoids it.
+
+bound_margin defaults to 0.30, not spliner_node's 0.15. The spliner keeps the planned
+line (the car's centre) bound_margin inside the track edge, so 0.15, the car's half
+width, lets its side touch the wall. In AutoDRIVE on porto that is what happened: every
+evasion along the inner wall ended in a simulator collision and respawn
+(docs/reports/autodrive_predictive). 0.30 is the half width plus the 0.15 that was
+meant. avoid_graph keeps 0.15; changing what the parameter means is a separate decision.
 
 The opponent exists only in software (fake_opponent_node), as the obstacle does in
 avoid_graph: a run shows whether the chain drives round a moving car the simulator does
@@ -72,6 +80,7 @@ def chain(context):
             'obs_topic': '/collision_prediction/obstacles',
             'trail_obs_topic': '/perception/obstacles',
             'evasion_dist': flt('evasion_dist'), 'trail_gap': flt('trail_gap'),
+            'bound_margin': flt('bound_margin'),
         }]),
         Node(package='planning', executable='local_path_node', output='screen',
              parameters=[params]),
@@ -97,6 +106,9 @@ def generate_launch_description():
                               description='spliner clearance, m (docs/reports/clearance_sweep)'),
         DeclareLaunchArgument('trail_gap', default_value='2.0',
                               description='m, nose to a moving obstacle before trailing stops'),
+        DeclareLaunchArgument('bound_margin', default_value='0.30',
+                              description='m, planned line (car centre) to the track edge; '
+                                          'see above'),
         DeclareLaunchArgument('speed_scale', default_value='0.5',
                               description='pure pursuit: drive speed = raceline vx * speed_scale'),
         DeclareLaunchArgument('max_speed', default_value='0.0',

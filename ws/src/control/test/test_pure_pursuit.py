@@ -90,12 +90,15 @@ def ros():
     rclpy.shutdown()
 
 
-def launch(tracks_dir, track, *args):
+def launch(tracks_dir, track, *args, ignore_sigint=False):
+    """ignore_sigint: start it as a script's background job would be, with SIGINT ignored."""
     env = dict(os.environ, TRACKS_DIR=tracks_dir, ROS_DOMAIN_ID=str(DOMAIN))
+    pre = (lambda: signal.signal(signal.SIGINT, signal.SIG_IGN)) if ignore_sigint else None
     return subprocess.Popen(
         ['ros2', 'launch', 'control', 'pure_pursuit.launch.py', 'use_sim_time:=false', f'track:={track}',
          f'speed_scale:={SPEED_SCALE}', *args],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+        preexec_fn=pre)
 
 
 def stop(proc):
@@ -172,8 +175,8 @@ class Driver:
 def run(ros, tracks_dir):
     procs, drivers = [], []
 
-    def start(track, *args):
-        proc = launch(tracks_dir, track, *args)
+    def start(track, *args, ignore_sigint=False):
+        proc = launch(tracks_dir, track, *args, ignore_sigint=ignore_sigint)
         driver = Driver(ros)
         procs.append(proc)
         drivers.append(driver)
@@ -385,6 +388,23 @@ def test_shutdown_stops(run):
         rclpy.spin_once(driver.node, timeout_sec=0.05)
     for _ in range(10):
         rclpy.spin_once(driver.node, timeout_sec=0.05)
+    assert len(driver.drives) >= 8 and all(m.drive.speed == 0.0 for m in driver.drives), driver.drives
+    assert 'Stopping: shutting down' in proc.stdout.read()
+
+
+def test_shutdown_stops_when_started_with_sigint_ignored(run):
+    """A background job of a non-interactive shell inherits SIGINT ignored. The node must
+    still stop on SIGINT, with its stop burst; it used to keep running, unstoppable."""
+    driver, proc = run('straight', ignore_sigint=True)
+    assert driver.drive(5.0, 0.0, 0.0).speed > 0.0
+    driver.drives.clear()
+    os.killpg(proc.pid, signal.SIGINT)
+    end = time.time() + 10.0
+    while proc.poll() is None and time.time() < end:
+        rclpy.spin_once(driver.node, timeout_sec=0.05)
+    for _ in range(10):
+        rclpy.spin_once(driver.node, timeout_sec=0.05)
+    assert proc.poll() is not None, 'still running 10 s after SIGINT'
     assert len(driver.drives) >= 8 and all(m.drive.speed == 0.0 for m in driver.drives), driver.drives
     assert 'Stopping: shutting down' in proc.stdout.read()
 

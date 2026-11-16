@@ -7,7 +7,7 @@
 # (ros2 launch autodrive_bridge autodrive_launch.py) and AutoDRIVE connected in Autonomous
 # mode. Set OVERLAY to source a planning overlay after ~/ws/install. Reads
 # $TRACKS_DIR/porto_odom_trial (map.pbstream for Cartographer) and writes nothing there.
-set -u
+# (no set -u: ROS setup.bash reads unset variables)
 OUT=${1:?usage: sim_run.sh OUT DURATION [launch args]}
 DURATION=${2:?}
 shift 2
@@ -31,15 +31,27 @@ fi
 
 reset_sim_car
 date +%s.%N > "$OUT/start_wall"
-python3 "$HERE/sim_record.py" "$DURATION" "$OUT" > "$OUT/recorder.log" 2>&1 &
+# The recorder outlives the launch by up to 30 s, so the shutdown (the controller's stop
+# burst, and whether every node exits) is recorded too.
+python3 "$HERE/sim_record.py" "$((DURATION + 32))" "$OUT" > "$OUT/recorder.log" 2>&1 &
 REC=$!
 setsid ros2 launch planning predictive_race.launch.py track:=porto_odom_trial \
     opponent_truth_topic:=/fake_opponent/truth "$@" > "$OUT/launch.log" 2>&1 &
 LAUNCH=$!
-wait $REC
+sleep "$DURATION"
+for pid in $(pgrep -f "lib/control/pure_pursuit_node"); do
+    echo "pure_pursuit_node $pid $(grep SigIgn /proc/$pid/status) (bit 1 = SIGINT ignored)" | tee -a "$OUT/shutdown.log"
+done
+date +%s.%N > "$OUT/sigint_wall"
 kill -INT -- -$LAUNCH 2>/dev/null
-for i in $(seq 1 30); do kill -0 -- -$LAUNCH 2>/dev/null || break; sleep 0.5; done
-kill -KILL -- -$LAUNCH 2>/dev/null
-sleep 1
+for i in $(seq 1 60); do kill -0 -- -$LAUNCH 2>/dev/null || break; sleep 0.5; done
+if kill -0 -- -$LAUNCH 2>/dev/null; then
+    echo "launch still alive 30 s after SIGINT:" | tee -a "$OUT/shutdown.log"
+    ps -o pid,args -g $LAUNCH | tee -a "$OUT/shutdown.log"
+    kill -KILL -- -$LAUNCH 2>/dev/null
+else
+    echo "launch exited $(python3 -c "import time;print(round(time.time()-float(open('$OUT/sigint_wall').read()),1))") s after SIGINT" | tee -a "$OUT/shutdown.log"
+fi
+wait $REC
 echo "leftover nodes:"; ros2 node list 2>/dev/null | grep -v -E 'fast_bridge|adapter|wheel_odom|autodrive' || true
 tail -1 "$OUT/recorder.log"
