@@ -38,9 +38,19 @@ def truth(rec, v):
     s = np.array([conv.to_frenet(o[1], o[2])[0] for o in rec['opp_true']])
     ph = np.angle(np.mean(np.exp(1j * 2 * np.pi * ((s - v * t) % L) / L))) * L / (2 * np.pi)
     res = np.abs(conv.ds(ph % L, (s - v * t) % L))
-    f = lambda tt: ((ph + v * tt) % L,
-                    0.4 * math.sin(2 * math.pi * ((ph + v * tt) % L) / LAM))
+    dm = opp_d_model(rec, conv, LAM)
+    f = lambda tt: ((ph + v * tt) % L, dm((ph + v * tt) % L))
     return f, float(res.max()), float(np.median(res))
+
+
+def opp_d_model(rec, conv, lam):
+    """The opponent's d as a function of its s: the weave, or (constant_speed) its
+    measured d, the median over its true marker positions."""
+    if rec['meta'].get('opp_mode', 'weaving') == 'constant_speed':
+        src = rec.get('opp_true') or rec['opp']
+        d0 = float(np.median([conv.to_frenet(o[1], o[2])[1] for o in src]))
+        return lambda s: d0
+    return lambda s: 0.4 * math.sin(2 * math.pi * s / lam)
 
 
 def frenet_box_gap(a, b):

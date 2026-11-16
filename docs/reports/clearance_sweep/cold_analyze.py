@@ -28,6 +28,17 @@ v_opp = rec['meta']['opp_v']
 ph = np.angle(np.mean(np.exp(1j * 2 * np.pi * ((s - v_opp * t) % L) / L))) * L / (2 * np.pi)
 opp = lambda tt: (ph + v_opp * tt) % L
 
+def opp_d_model(rec, conv, lam):
+    """The opponent's d as a function of its s: the weave, or (constant_speed) its
+    measured d, the median over its true marker positions."""
+    if rec['meta'].get('opp_mode', 'weaving') == 'constant_speed':
+        src = rec.get('opp_true') or rec['opp']
+        d0 = float(np.median([conv.to_frenet(o[1], o[2])[1] for o in src]))
+        return lambda s: d0
+    return lambda s: 0.4 * math.sin(2 * math.pi * s / lam)
+
+
+DM = opp_d_model(rec, conv, LAM)
 ego = rec['ego']
 dist = np.concatenate(([0.0], np.cumsum(np.hypot(np.diff([e[1] for e in ego]),
                                                 np.diff([e[2] for e in ego])))))
@@ -72,7 +83,7 @@ for k, lt in enumerate(lap_t, 1):
     g, rel = [], []
     for tt, x, y, yaw, v in sel:
         os_ = opp(tt)
-        od = 0.4 * math.sin(2 * math.pi * os_ / LAM)
+        od = DM(os_)
         ox, oy = conv.to_cartesian(os_, od)
         g.append(gap(box(x, y, yaw, 0.45, 0.10, 0.30),
                      box(float(ox), float(oy), float(conv.heading_at(os_)), 0.25, 0.25, 0.30)))

@@ -332,6 +332,70 @@ So nothing in the planner stops an evasion starting at speed; porto's width
 at a 0.30 margin does. With the side re-plan, porto still never passes safely,
 at either speed, in 42 laps. The track is the remaining blocker.
 
+## Follow-up: a non-weaving opponent
+
+**The question.** Does porto pass at the 0.30 wall margin if the opponent does
+not weave (fake_opponent_node `constant_speed`, d = 0)? This used the
+stand-in, from cold, with evasion_dist 0.25, at two speeds:
+- half speed: speed_scale 0.5, opponent 0.8 m/s, 600 s;
+- full speed: speed_scale 1.0 (max_speed 4.0), opponent 2.0 m/s, 300 s.
+
+**Region band and room** (`where_regions.py`, `speed_diag.py`):
+
+| | band p50 (p5..p95) | band + 0.55 fits the usable width | a side has 0.55 m |
+|---|---|---|---|
+| weaving, half speed | 0.53 m | 32% | 27% |
+| weaving, full speed | 0.64 m | 16% | 13–14% |
+| constant, half speed | 0.50 m (0.50..0.51) | 36% | 37% |
+| constant, full speed | 0.50 m (0.50..0.50) | 44% | 46% |
+
+0.50 m is the floor: the region's ±0.25 m margin round a single d.
+
+**A safety bug the weaving runs never reached.** The first constant-speed run
+at full speed made 4 passes in 28 laps, but with 79 cycles planned through the
+opponent (closest −0.300 m) and 2.1 s of contact.
+
+- **What happened.** An evasion was committed on a region at s 1.7–5.7 m; the
+  real catch came at s 8.1–9.2 m. Because the car's nose had passed the
+  *committed* region's start, it counted as "alongside". The hold kept the
+  old path, whose rejoin then steered back to the raceline into the opponent.
+- **Fixed** (`spliner.py` release_reason). "Alongside" is now judged against
+  the current region of the same id. A region that slid ahead of the car is
+  re-planned on the committed side, or released if that side has no room.
+  `test_a_region_that_slid_past_the_committed_one_is_re_planned_not_held`
+  pins it.
+- **Ruled out:** a re-plan every cycle (there were none in the 2 s before any
+  contact), and the speed model (with no speed cap it got worse: 181 cycles,
+  6.5 s of contact).
+- **The gate missed it.** The closed-loop test uses a weaving opponent at
+  bound_margin 0.15; it passes before and after (now: planned +0.232 /
+  +0.157 m, achieved +0.150 / +0.080 m).
+
+**With the fix:**
+
+| constant-speed opponent | laps | passes | closest planned | closest achieved | contact | drops |
+|---|---|---|---|---|---|---|
+| half speed | 20 | 0 | +0.908 m | +0.900 m | 0 | 33 (no room on the committed side) |
+| full speed | 25 | 0 | +0.370 m | +0.366 m | 0 | 31 blocked, 22 no room on the committed side |
+
+**Still no pass. The limiting numbers** (`room_needed.py`):
+- **Width:** an evasion needs band 0.50 + car 0.30 + clearance 0.25 = 1.05 m
+  usable through the region, i.e. 1.65 m wall to wall at the 0.30 margin.
+- **Length:** about 7.7 m in all. That is a 3.0 m lead-in, the region itself
+  (median 2.0 m, p90 3.6 m) at full width, a 0.25 m hold and a 2.4 m rejoin.
+- **What porto has:** usable width of at least 1.05 m on 27% of the lap, in
+  two stretches, 4.4 m (across the start line, from s 26.1) and 2.9 m (from
+  s 15.0). Its median usable width is 0.78 m, and its minimum 0.47 m.
+- **Why the evasions end.** They start, but the region slides as the car
+  closes, out of those stretches and into the narrow ones. There the re-plan
+  on the committed side finds no room, or the path hits the region.
+
+A track for this chain needs at least 1.65 m wall to wall over stretches of
+7–8 m where the car will catch the opponent. That is a lower bound; a weaving
+opponent needs more width.
+
+No simulator run: nothing passed on the stand-in.
+
 ## Not done
 
 - No physical obstacle. The fork's `obstacle <x> <y>` puts one in the world

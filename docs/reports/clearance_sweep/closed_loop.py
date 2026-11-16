@@ -41,6 +41,7 @@ SPEED_SCALE = os.environ.get('CL_SPEED_SCALE', '1.0')
 MAX_SPEED = os.environ.get('CL_MAX_SPEED', '4.0')
 OPP_V = float(os.environ.get('CL_OPP_V', '2.0'))
 BOUND = os.environ.get('CL_BOUND_MARGIN', '0.15')   # spliner_node's default
+OPP_MODE = os.environ.get('CL_OPP_MODE', 'weaving')   # or constant_speed (d = 0)
 WHEELBASE, MAX_STEER, STEER_RATE, ACC, DEC = 0.33, 0.524, 4.0, 4.0, 8.0
 EGO_BOX = (0.45, 0.10, 0.30)          # front of rear axle, behind it, width
 OPP_BOX = (0.50, 0.30)                # length, width, centred
@@ -111,7 +112,7 @@ x0, y0, yaw0 = WX[0], WY[0], WYAW[0]
 
 procs = [
     launch(['ros2', 'launch', 'planning', 'shared_graph.launch.py', f'track:={TRACK}',
-            'localizer:=external', 'use_sim_time:=false', 'opponent_mode:=weaving',
+            'localizer:=external', 'use_sim_time:=false', f'opponent_mode:={OPP_MODE}',
             f'opponent_speed:={OPP_V}', 'opponent_s0:=6.0', 'opponent_max_range:=10.0',
             'gp:=dense', f'state:={STATE}'], 'graph.log'),
     launch(['ros2', 'run', 'planning', 'spliner_node', '--ros-args', *tp,
@@ -262,7 +263,7 @@ try:
 finally:
     for p in procs:
         stop(p)
-    rec['meta'] = dict(handover=rec['handover'], state=STATE, cold=COLD, bound_margin=BOUND, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
+    rec['meta'] = dict(handover=rec['handover'], state=STATE, cold=COLD, bound_margin=BOUND, opp_mode=OPP_MODE, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
                        max_speed=MAX_SPEED, opp_v=OPP_V, duration=DURATION)
     with open(os.path.join(OUT, 'record.pkl'), 'wb') as f:
         pickle.dump(rec, f)

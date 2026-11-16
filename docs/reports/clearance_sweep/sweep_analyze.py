@@ -42,6 +42,16 @@ def opponent_truth(rec, v):
     return lambda tt: (ph + v * tt) % L, float(np.max(np.abs(resid)))
 
 
+def opp_d_model(rec, conv, lam):
+    """The opponent's d as a function of its s: the weave, or (constant_speed) its
+    measured d, the median over its true marker positions."""
+    if rec['meta'].get('opp_mode', 'weaving') == 'constant_speed':
+        src = rec.get('opp_true') or rec['opp']
+        d0 = float(np.median([conv.to_frenet(o[1], o[2])[1] for o in src]))
+        return lambda s: d0
+    return lambda s: 0.4 * math.sin(2 * math.pi * s / lam)
+
+
 rows = []
 for run in sys.argv[2:]:
     rec = pickle.load(open(os.path.join(run, 'record.pkl'), 'rb'))
@@ -64,7 +74,7 @@ for run in sys.argv[2:]:
     gaps, rel = [], []
     for t, x, y, yaw, _ in ego:
         os_ = opp_s(t)
-        od = 0.4 * math.sin(2 * math.pi * os_ / LAM)
+        od = opp_d_model(rec, conv, LAM)(os_)
         ox, oy = conv.to_cartesian(os_, od)
         oyaw = float(conv.heading_at(os_))
         gaps.append(gap(box(x, y, yaw, *EGO_BOX),

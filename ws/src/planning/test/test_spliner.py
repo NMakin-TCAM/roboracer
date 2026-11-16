@@ -620,18 +620,22 @@ def test_before_the_nose_reaches_it_a_moved_committed_obstacle_still_blocks(trac
 
 
 def test_a_region_that_slid_clear_of_its_old_span_is_still_the_committed_one(track, params):
-    """Same id: the porto case, where the recomputed region slid 1.3 m in 0.7 s."""
+    """Same id: the porto case, where the recomputed region slid 1.3 m in 0.7 s. It is the
+    same obstacle, and the car is not alongside it as it is now (its start is still ahead of
+    the nose), so it is re-planned on the committed side. Moved onto the committed side
+    with no room left there, that re-plan fails and the evasion is released: the car stops
+    rather than hold a path the region now crosses."""
     sp = Spliner(track, params)
     region = long_obs(6.0, 7.5, d_right=-0.3, d_left=0.3)
     region.id = 0
     assert sp.step(0.0, 0.0, [region]).status == EVADING
     side = 1.0 if sp.committed.side == LEFT else -1.0
-    slid = long_obs(7.8, 9.3, d_right=-0.3 + 0.4 * side, d_left=0.3 + 0.4 * side)
+    slid = long_obs(7.8, 9.3, d_right=-0.3 + 0.5 * side, d_left=0.3 + 0.5 * side)
     slid.id = 0
     beside = region.s_start - 0.3
     assert sp._is_committed_one(slid)
     r = sp.step(beside, _d_on(sp, beside), [slid])
-    assert r.released is None and r.committed
+    assert r.released == 'no room on the committed side' and not r.collision_free
 
 
 def test_an_obstacle_with_another_id_is_not_the_committed_one(track, params, committed):
@@ -694,6 +698,25 @@ def test_no_room_on_the_committed_side_releases(track, params):
     wall_side.id = 0
     r = sp.step(2.0, _d_on(sp, 2.0), [wall_side])
     assert r.released == 'no room on the committed side' and not r.replanned
+
+
+def test_a_region_that_slid_past_the_committed_one_is_re_planned_not_held(track, params):
+    """The porto failure: the nose passed the COMMITTED region's start, but the region (same
+    id) had slid ahead of the car. Holding as if alongside kept a path whose rejoin cut into
+    the opponent; the car is not alongside the region as it is now, so re-plan round it."""
+    sp, region, side = _committed_on_region(track, params)
+    first_side = sp.committed.side
+    ego_s = region.s_start - 0.3                       # nose 0.15 m past the committed start
+    ego_d = _d_on(sp, ego_s)
+    ahead = long_obs(11.0, 12.5, d_right=-0.3, d_left=0.3)
+    ahead.id = 0
+    r = sp.step(ego_s, ego_d, [ahead])
+    assert r.replanned and r.side == first_side and r.released is None
+    # Out wide across the region as it is now, not back on the raceline before it.
+    u = arc(r.s, track.length)
+    at = np.interp(track.ds(ego_s, 11.75), u, r.d)
+    assert abs(at) >= 0.3 + params.car_width / 2 + params.evasion_dist - 1e-6
+    assert path_clear(r.s, r.d, [ahead], track, params)
 
 
 def test_a_region_that_has_not_moved_keeps_its_path(track, params):

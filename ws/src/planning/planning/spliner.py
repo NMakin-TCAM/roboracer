@@ -527,7 +527,15 @@ class Spliner:
         i = self._remaining(ego_s)
         if i is None:
             return 'passed'
-        nose_reached_it = self.conv.ds(ego_s + self.params.car_front, c.obstacle.s_start) <= 0
+        # Alongside means the nose has reached the obstacle as it is NOW. For an obstacle
+        # with an id that is the current one of that id: a collision region can slide
+        # metres ahead after the commit (porto, constant-speed opponent at 2 m/s: committed
+        # on s 1.7..5.7, the catch came at s 8.1..9.2), and judging "alongside" by the
+        # committed copy held a path whose rejoin then steered into the opponent.
+        ref = c.obstacle
+        if getattr(c.obstacle, 'id', None) is not None:
+            ref = next((o for o in obstacles if self._same_id(o)), c.obstacle)
+        nose_reached_it = self.conv.ds(ego_s + self.params.car_front, ref.s_start) <= 0
         if not nose_reached_it and getattr(c.obstacle, 'id', None) is not None:
             return self._region_reason(ego_s, ego_d, obstacles, i)
         if not nose_reached_it and not any(self._matches(o) for o in obstacles):

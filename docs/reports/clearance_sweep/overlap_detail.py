@@ -26,7 +26,12 @@ t = np.array([o[0] for o in rec['opp_true']])
 s = np.array([conv.to_frenet(o[1], o[2])[0] for o in rec['opp_true']])
 v = rec['meta']['opp_v']
 ph = np.angle(np.mean(np.exp(1j * 2 * np.pi * ((s - v * t) % L) / L))) * L / (2 * np.pi)
-opp = lambda tt: ((ph + v * tt) % L, 0.4 * math.sin(2 * math.pi * ((ph + v * tt) % L) / LAM))
+if rec['meta'].get('opp_mode', 'weaving') == 'constant_speed':
+    D0 = float(np.median([conv.to_frenet(o[1], o[2])[1] for o in rec['opp_true']]))
+    opp = lambda tt: ((ph + v * tt) % L, D0)  # noqa: E731
+else:
+    opp = lambda tt: ((ph + v * tt) % L,  # noqa: E731
+                      0.4 * math.sin(2 * math.pi * ((ph + v * tt) % L) / LAM))
 
 status = {round(x[3], 4): (x[1], x[2]) for x in rec['status']}
 plans = [(p[0], status.get(round(p[1], 4), ('?', '?')), p[3]) for p in rec['plan']]
