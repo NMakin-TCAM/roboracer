@@ -42,24 +42,45 @@ reports what is left of it from the car on. It releases the commitment, and plan
 afresh, on exactly these conditions (Spliner.release_reason, checked in order):
 
   passed        the car is past the end of the committed path
-  gone          no obstacle in the current array matches the committed one, while
-                it is still ahead of the car's nose (once alongside, a forward
-                sensor loses it; that is held until 'passed')
+  gone          no obstacle in the current array matches the committed one (within
+                match_tolerance), while it is still ahead of the car's nose (once
+                alongside, a forward sensor loses it; that is held until 'passed')
   blocked       the rest of the committed path is no longer collision-free
                 against the current obstacles (path_clear). Once the car's nose
                 has reached the committed obstacle, the committed obstacle
-                itself is held until 'passed', as for 'gone': a
-                collision_prediction region is recomputed every cycle and moves
-                onto the path while the car is beside it, and releasing then
-                was the clearance violation (the replan steered back into the
-                opponent). Any other obstacle on the rest of the path still
-                releases, alongside or not. "The committed obstacle" means one
-                with its id (collision_prediction's region is always id 0, and
-                the tracker's ids are per object), or, for obstacles without
-                one, matching it within match_tolerance or overlapping its s
-                span. Position alone is not enough: on porto the recomputed
-                region slid 1.3 m forward in 0.7 s, clear of its old span.
+                itself no longer blocks (it is beside the car, on a path planned
+                round it); before that, it does.
   off line      the car is more than max_commit_offset from the committed d
+
+"The committed obstacle", once alongside, is the one with its id
+(collision_prediction's region is always id 0; the tracker's ids are per object), or,
+for obstacles without one, matching it within match_tolerance or overlapping its s
+span: on porto the recomputed region slid 1.3 m in 0.7 s, clear of its old span.
+Releasing alongside was the clearance violation (the replan steered back into the
+opponent), so alongside the committed obstacle neither goes nor blocks.
+
+NOT HELD BEFORE ALONGSIDE (tried 2026-11-16; docs/reports/autodrive_predictive).
+In AutoDRIVE run 4 every evasion was dropped before the car reached the region: 77
+'gone' (the recomputed region moved more than match_tolerance) and 42 'blocked'
+(it moved onto the path). Holding the commitment by id from the start was tried
+both ways on the stand-in, and neither is kept:
+  - holding 'blocked': a region moving onto the path says the opponent will be on
+    it. The held path planned through the opponent (closed-loop test: 70 cycles,
+    -0.170 m at evasion_dist 0.15) and touched it (2.1 s in a 600 s run).
+  - holding only 'gone': the same evasions were dropped as 'blocked' a little
+    later instead (78 against 81 + 39), no more passes, and a held path is only
+    re-checked at evasion_dist / 2 (path_clear), so its margin to the moving
+    region eroded; the closed-loop test then touched the opponent at 0.25.
+
+REJOIN (Spliner, build_rejoin). When an evasion ends (passed or released) with the
+car still more than rejoin_threshold off the raceline, a "clear" plan would snap the
+planned line back to d = 0 at the car: 30 to 48 cm in AutoDRIVE, a step pure
+pursuit then chases. Instead the result is a rejoin path from the car's actual d
+to the raceline, within max_lateral_slope, collision-checked like any other, and
+re-derived each cycle from where the car is (never committed). It is reported as
+EVADING with the note "rejoining the raceline" (no obstacle), and stops once the
+car is within rejoin_threshold. Plain raceline driving, with no evasion behind it,
+is unchanged.
 
 TRAILING (trailing_mode, trail). Planning on collision_prediction's regions, as
 Predictive Spliner does, leaves a gap at the start: no region exists until the
@@ -114,6 +135,8 @@ class SplinerParams:
     speed_scale: float = 0.8         # fraction of raceline speed through the manoeuvre
     resolution: float = 0.10         # spacing of published waypoints, metres
     switch_hysteresis: float = 0.25  # the other side must be this much roomier to flip
+    rejoin_threshold: float = 0.10   # m off the raceline after an evasion before rejoining
+                                     # on a path (REJOIN); above steady tracking error
 
 
 @dataclass
@@ -246,6 +269,22 @@ def build_evasion(ego_s, ego_d, obs, side_choice, conv, params):
     hi, lo = conv.width_at(s)
     d = np.clip(d, np.asarray(lo) + params.bound_margin, np.asarray(hi) - params.bound_margin)
 
+    v = np.asarray(conv.speed_at(s), dtype=float) * params.speed_scale
+    return s, d, v
+
+
+def build_rejoin(ego_s, ego_d, conv, params):
+    """From the car's d back to the raceline, as one smoothstep within max_lateral_slope.
+
+    Returns (s, d, v). See REJOIN.
+    """
+    u_end = max(transition_length(ego_d, params), 4 * params.resolution)
+    n = max(int(np.ceil(u_end / params.resolution)) + 1, 2)
+    u = np.linspace(0.0, u_end, n)
+    d = ego_d * (1.0 - smoothstep(u / u_end))
+    s = np.mod(ego_s + u, conv.length)
+    hi, lo = conv.width_at(s)
+    d = np.clip(d, np.asarray(lo) + params.bound_margin, np.asarray(hi) - params.bound_margin)
     v = np.asarray(conv.speed_at(s), dtype=float) * params.speed_scale
     return s, d, v
 
@@ -434,6 +473,7 @@ class Spliner:
         self.params = params
         self.committed = None
         self.side = None            # last side taken, for choose_side's hysteresis
+        self.rejoining = False      # an evasion ended off the raceline (REJOIN)
 
     def _remaining(self, ego_s):
         """Index of the first committed sample at or ahead of the car, or None past the end."""
@@ -471,8 +511,8 @@ class Spliner:
             # once it is beside or behind the car, and releasing then would steer the car
             # back into it. Alongside, its disappearance is held until 'passed'.
             return 'gone'
-        # Alongside, the committed obstacle itself cannot block (see COMMITMENT): the
-        # car is beside it on a path planned round it. Anything else still can.
+        # Alongside, the committed obstacle itself cannot block (see COMMITMENT). Before
+        # that it can: moving onto the path means the opponent will be there.
         check = ([o for o in obstacles if not self._is_committed_one(o)] if nose_reached_it
                  else obstacles)
         if not path_clear(c.s[i:], c.d[i:], check, self.conv, self.params):
@@ -493,6 +533,7 @@ class Spliner:
                 return PlanResult(EVADING, c.note, side=c.side, obstacle=c.obstacle,
                                   s=c.s[i:], d=c.d[i:], v=c.v[i:], committed=True)
             self.committed = None
+            self.rejoining = True
 
         result = plan(ego_s, ego_d, obstacles, self.conv, self.params, self.side)
         result.released = released
@@ -500,4 +541,19 @@ class Spliner:
             self.committed = Commitment(result.s, result.d, result.v, result.side,
                                         result.obstacle, result.note)
             self.side = result.side
+            self.rejoining = False
+        elif result.status == CLEAR and self.rejoining:
+            if abs(ego_d) <= self.params.rejoin_threshold:
+                self.rejoining = False
+            else:
+                result = self._rejoin(ego_s, ego_d, obstacles, released)
         return result
+
+    def _rejoin(self, ego_s, ego_d, obstacles, released):
+        """The REJOIN path from where the car is, or a refusal if something is on it."""
+        s, d, v = build_rejoin(ego_s, ego_d, self.conv, self.params)
+        if not path_clear(s, d, obstacles, self.conv, self.params):
+            return PlanResult(NO_ROOM, 'trailing: the way back to the raceline is blocked',
+                              released=released)
+        return PlanResult(EVADING, f'rejoining the raceline from d {ego_d:+.2f}', s=s, d=d, v=v,
+                          released=released)

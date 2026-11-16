@@ -382,8 +382,12 @@ def test_release_when_passed(track, params, committed):
 
 def test_release_when_the_obstacle_is_gone_while_still_ahead(track, params, committed):
     sp, obs = committed
-    r = sp.step(2.0, _d_on(sp, 2.0), [])
-    assert r.released == 'gone' and r.status == CLEAR and sp.committed is None
+    d = _d_on(sp, 2.0)
+    r = sp.step(2.0, d, [])
+    assert r.released == 'gone' and r.collision_free and sp.committed is None
+    # Out wide when released: back to the raceline from where the car is (REJOIN).
+    assert abs(d) > params.rejoin_threshold
+    assert r.status == EVADING and r.d[0] == pytest.approx(d) and r.obstacle is None
 
 
 def test_an_obstacle_lost_from_view_alongside_is_held_until_passed(track, params, committed):
@@ -636,3 +640,94 @@ def test_an_obstacle_with_another_id_is_not_the_committed_one(track, params, com
     other = FakeObs(obs.s_center, obs.d_center)
     other.id = 4
     assert not sp._is_committed_one(other)
+
+
+# ------------------------------------------------------------------ hold from commit, by id
+
+from planning.spliner import arc  # noqa: E402
+
+def _committed_on_region(track, params, rid=0):
+    sp = Spliner(track, params)
+    region = long_obs(7.0, 8.5, d_right=-0.3, d_left=0.3)
+    region.id = rid
+    r = sp.step(0.0, 0.0, [region])
+    assert r.status == EVADING and sp.committed is not None
+    side = 1.0 if sp.committed.side == LEFT else -1.0
+    return sp, region, side
+
+
+def test_a_region_moving_beyond_tolerance_before_the_car_reaches_it_is_gone(track, params):
+    """Not held before alongside, by id or otherwise (see NOT HELD BEFORE ALONGSIDE)."""
+    sp, region, side = _committed_on_region(track, params)
+    moved = long_obs(8.0, 9.5, d_right=-0.3, d_left=0.3)        # s_center moved 1 m
+    moved.id = 0
+    assert not sp._matches(moved)
+    r = sp.step(2.0, _d_on(sp, 2.0), [moved])
+    assert r.released == 'gone'
+
+
+def test_a_region_moving_onto_the_path_before_the_car_reaches_it_still_blocks(track, params):
+    """Same id, now across the committed path, nose not there: the opponent will be on the
+    path. Holding this planned through the opponent in the closed-loop test."""
+    sp, region, side = _committed_on_region(track, params)
+    onto = long_obs(7.5, 9.0, d_right=-0.3 + 0.4 * side, d_left=0.3 + 0.4 * side)
+    onto.id = 0
+    assert not path_clear(sp.committed.s, sp.committed.d, [onto], track, params)
+    r = sp.step(2.0, _d_on(sp, 2.0), [onto])
+    assert r.released == 'blocked'
+
+
+def test_a_region_that_disappears_before_the_car_reaches_it_is_gone(track, params):
+    sp, region, side = _committed_on_region(track, params)
+    r = sp.step(2.0, _d_on(sp, 2.0), [])
+    assert r.released == 'gone'
+
+
+def test_another_id_on_the_path_still_releases_before_the_car_reaches_it(track, params):
+    sp, region, side = _committed_on_region(track, params)
+    other = FakeObs(5.0, d_center=_d_on(sp, 5.0))
+    other.id = 7
+    r = sp.step(2.0, _d_on(sp, 2.0), [region, other])
+    assert r.released == 'blocked'
+
+
+# ------------------------------------------------------------------ rejoin from the car
+
+def test_after_a_release_the_new_plan_starts_where_the_car_is(track, params):
+    """Released out wide: no snap back to d = 0, a path from the car's d to the raceline."""
+    sp, region, side = _committed_on_region(track, params)
+    ego_s = 6.0
+    ego_d = _d_on(sp, ego_s)
+    assert abs(ego_d) > 0.3
+    r = sp.step(ego_s, ego_d, [])                      # gone: but the nose is short of it
+    assert r.released == 'gone'
+    assert r.status == EVADING and r.obstacle is None and 'rejoining' in r.note
+    assert sp.committed is None                         # never committed
+    assert r.d[0] == pytest.approx(ego_d, abs=1e-9) and abs(r.d[-1]) < 1e-9
+    assert track.ds(ego_s, r.s[0]) == pytest.approx(0.0, abs=1e-9)
+    assert np.all(np.diff(np.abs(r.d)) <= 1e-12)        # only ever towards the raceline
+    slope = np.abs(np.diff(r.d) / np.diff(arc(r.s, track.length)))
+    assert slope.max() <= params.max_lateral_slope + 1e-6
+
+
+def test_rejoining_is_re_derived_from_the_car_and_ends_near_the_raceline(track, params):
+    sp, region, side = _committed_on_region(track, params)
+    sp.step(6.0, 0.4 * side, [])                         # released out wide
+    r = sp.step(6.5, 0.2 * side, [])
+    assert r.status == EVADING and r.d[0] == pytest.approx(0.2 * side)
+    r = sp.step(7.0, 0.05 * side, [])
+    assert r.status == CLEAR and len(r.s) == 0
+    assert sp.step(7.5, 0.3 * side, []).status == CLEAR  # no evasion behind it any more
+
+
+def test_plain_driving_off_the_raceline_stays_clear(track, params):
+    """No evasion behind it: tracking error alone never produces a rejoin path."""
+    assert Spliner(track, params).step(0.0, 0.4, []).status == CLEAR
+
+
+def test_a_rejoin_with_something_on_it_refuses(track, params):
+    sp, region, side = _committed_on_region(track, params)
+    blocker = FakeObs(6.6, d_center=0.25 * side)
+    blocker.is_static = False
+    r = sp.step(6.0, 0.4 * side, [blocker])
+    assert not r.collision_free

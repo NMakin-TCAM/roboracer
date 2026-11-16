@@ -203,6 +203,66 @@ a pass on the real dynamics. Getting passes on porto needs room the chain
 does not find at evasion_dist 0.25 with a 0.30 wall margin: either a wider
 track, a smaller margin, or evasions that survive the region moving.
 
+## Follow-up on the stand-in: holding the commitment, and the jump
+
+**The question.** Run 4 dropped every evasion before the car reached the
+opponent. Would holding the commitment by obstacle id from the moment it starts
+(not only once alongside) produce passes at the 0.30 wall margin?
+
+**Setup.** The stand-in (`clearance_sweep/closed_loop.py`, porto geometry,
+from cold), no simulator:
+- **run-4-like:** speed_scale 0.5, opponent 0.8 m/s, 600 s. Its baseline
+  reproduces run 4's drops: 120 against 119.
+- **test-like:** speed_scale 1.0, opponent 2.0 m/s, 300 s.
+
+Both at evasion_dist 0.25 and bound_margin 0.30.
+
+| variant | drops (run-4-like) | laps | passes | closest planned | closest achieved | contact |
+|---|---|---|---|---|---|---|
+| baseline | 120 (81 gone, 39 blocked) | 19 | 0 | +1.661 m | +1.644 m | 0 |
+| hold from commit (gone and blocked) | 25 (8 gone, 17 off line) | 29 | 7 | −0.011 m, 21 cycles through | −0.043 m | 2.1 s |
+| hold gone only | 78 (all blocked) | 19 | 0 | +1.674 m | +1.653 m | 0 |
+| no hold + REJOIN (committed) | 116 (80 gone, 36 blocked) | 19 | 0 | +1.649 m | +1.618 m | 0 |
+
+Test-like at 0.30: 23 laps, 0 passes and 0 drops for every variant (no evasion
+ever starts).
+
+The closed-loop clearance test runs at bound_margin 0.15, so these outcomes are
+independent of the 0.30 question:
+
+| variant | evasion_dist 0.25 | evasion_dist 0.15 |
+|---|---|---|
+| hold from commit | fails: 3 cycles through, −0.014 m | fails: 70 cycles, −0.170 m, contact −0.199 m |
+| hold gone only | fails: contact −0.014 m (planned +0.023) | passes |
+| no hold + REJOIN | passes: planned +0.172, achieved +0.101 m | passes: +0.136 / +0.075 m |
+
+**Why no hold.**
+- **Holding "blocked" is what produced passes at 0.30, and it is unsafe.** A
+  region moving onto the committed path is the prediction saying the opponent
+  will be on it; holding drove through the opponent.
+- **Holding only "gone" bought nothing.** The same evasions were dropped as
+  "blocked" a moment later. A held path is re-checked at evasion_dist / 2, so
+  its margin to the moving region eroded, and it touched the opponent at 0.25.
+
+The finding: on porto at a 0.30 wall margin, a planner that keeps its
+clearance never passed, in 42 laps. That is the track being the binding
+constraint for this planner, not dropped plans. Untested: re-planning the
+committed evasion against the moved region on the same side, instead of
+holding or dropping it.
+
+**The jump (REJOIN, committed).** When an evasion ends with the car more than
+rejoin_threshold (0.10 m) off the raceline, the new plan starts at the car's d
+and returns within the lateral-slope limit, re-derived each cycle. Gap between
+the car and the plan within 1 s of a status switch (`step_analyze.py`):
+
+| run-4-like | p50 | p95 | max |
+|---|---|---|---|
+| before | 2.2 cm | 38.6 cm | 47.2 cm |
+| after | 0.9 cm | 7.2 cm | 16.4 cm |
+
+AutoDRIVE's run 4 showed 36.2 cm at p95 and 48.4 cm at worst. Steady tracking is
+unchanged (p95 about 8–9 cm).
+
 ## Not done
 
 - No physical obstacle. The fork's `obstacle <x> <y>` puts one in the world

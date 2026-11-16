@@ -97,6 +97,7 @@ class SplinerNode(Node):
             speed_scale=float(p('speed_scale', 0.8)),
             resolution=float(p('resolution', 0.10)),
             switch_hysteresis=float(p('switch_hysteresis', 0.25)),
+            rejoin_threshold=float(p('rejoin_threshold', 0.10)),
         )
 
         self.ego_s = None

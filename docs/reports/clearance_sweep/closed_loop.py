@@ -36,7 +36,11 @@ from f1t_msgs.msg import ObstacleArray, OpponentTrajectory, OTWpntArray, Planner
 from planning.global_waypoints_publisher import load_global_waypoints
 
 TRACK, EV, DURATION, OUT = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
-SPEED_SCALE, MAX_SPEED, OPP_V = '1.0', '4.0', 2.0
+# Overridable, to reproduce a simulator run's settings on the stand-in.
+SPEED_SCALE = os.environ.get('CL_SPEED_SCALE', '1.0')
+MAX_SPEED = os.environ.get('CL_MAX_SPEED', '4.0')
+OPP_V = float(os.environ.get('CL_OPP_V', '2.0'))
+BOUND = os.environ.get('CL_BOUND_MARGIN', '0.15')   # spliner_node's default
 WHEELBASE, MAX_STEER, STEER_RATE, ACC, DEC = 0.33, 0.524, 4.0, 4.0, 8.0
 EGO_BOX = (0.45, 0.10, 0.30)          # front of rear axle, behind it, width
 OPP_BOX = (0.50, 0.30)                # length, width, centred
@@ -112,7 +116,7 @@ procs = [
             'gp:=dense', f'state:={STATE}'], 'graph.log'),
     launch(['ros2', 'run', 'planning', 'spliner_node', '--ros-args', *tp,
             '-p', 'obs_topic:=/collision_prediction/obstacles', '-p', f'evasion_dist:={EV}',
-            *TRAIL],
+            '-p', f'bound_margin:={BOUND}', *TRAIL],
            'spliner.log'),
     launch(['ros2', 'run', 'planning', 'local_path_node', '--ros-args', *tp], 'local_path.log'),
     launch(['ros2', 'launch', 'control', 'pure_pursuit.launch.py', f'track:={TRACK}',
@@ -258,7 +262,7 @@ try:
 finally:
     for p in procs:
         stop(p)
-    rec['meta'] = dict(handover=rec['handover'], state=STATE, cold=COLD, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
+    rec['meta'] = dict(handover=rec['handover'], state=STATE, cold=COLD, bound_margin=BOUND, track=TRACK, evasion_dist=EV, speed_scale=SPEED_SCALE,
                        max_speed=MAX_SPEED, opp_v=OPP_V, duration=DURATION)
     with open(os.path.join(OUT, 'record.pkl'), 'wb') as f:
         pickle.dump(rec, f)
